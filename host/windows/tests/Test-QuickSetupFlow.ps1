@@ -69,6 +69,7 @@ foreach ($case in @('source','installed-ok','installed-cancel','installed-fail',
     }
     if ($case -ceq 'installed-cancel') {Expect ($status.Text -match '유지') 'Cancel must retain completed configuration, not promise rollback'}
     if ($case -ceq 'installed-ok') {Expect ($status.Text -match '성공 여부는 Mac') 'Configured host must not imply a working stream'}
+    if ($case -ceq 'installed-ok') {Expect ($status.Text.IndexOf('준비를 먼저') -ge 0 -and $status.Text.IndexOf('준비를 먼저') -lt $status.Text.IndexOf('Mac에서 PC 확인')) 'Windows preparation must precede creating the Mac pending PIN'}
     if ($case -ceq 'service-denied' -or $case -ceq 'fresh-fail' -or $case -ceq 'installed-missing') {Expect $script:failed 'Failure must be sanitized and stop automatic installation'}
 }
 @{status='passed';checks=$script:checks;actualPrimaryAction=$true;freshSyntheticOnly=$true;network=$false;serviceAccess=$false;gui=$false} | ConvertTo-Json -Compress

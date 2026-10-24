@@ -26,7 +26,7 @@ static int result_cli(int argc,char **argv) {
 static void completion_matrix(void) {
     struct operation_case { db_operation operation; int headless; } operations[]={
         {DB_INVALID,0},{DB_NORMAL,0},{DB_ENABLE,0},{DB_EXPORT,0},{DB_DISABLE,0},{DB_INSTALL,0},
-        {DB_INSTALL_DISPLAY,1},{DB_REMOVE_DISPLAY,1},{(db_operation)-2,0},{(db_operation)7,0}
+        {DB_INSTALL_DISPLAY,1},{DB_REMOVE_DISPLAY,1},{DB_QUICK_SETUP,0},{(db_operation)-2,0},{(db_operation)(DB_QUICK_SETUP+1),0}
     };
     /* Explicit expected outcomes for every result class and integer boundary.
      * Silent calls always use the unacknowledged result, even if a caller passes

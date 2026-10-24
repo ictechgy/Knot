@@ -55,7 +55,7 @@ $null = Add-Text '연결 준비를 누르면 필요한 설치와 보안 설정�
 $script:quickInstall=$false
 $quick=Add-Button '연결 준비 · 자동 설정' { Invoke-QuickSetup }
 $quick.AccessibleDescription='필요한 Sunshine 설치 후 관리자 로그인, 필수 암호화 설정과 Mac PIN 승인을 한 창에서 진행합니다.'
-$null = Add-Text '처음 한 번 Windows 관리자 승인과 Sunshine 계정 입력이 필요합니다. Mac의 PIN을 승인한 뒤에는 저장된 연결을 사용하세요. 연결 준비 중 Sunshine이 재시작될 수 있습니다.' 64
+$null = Add-Text '처음 한 번 Windows 관리자 승인과 Sunshine 계정 입력이 필요합니다. Mac의 PIN을 승인한 뒤에는 저장된 연결을 사용하세요. 보안 설정을 처음 적용하거나 다시 적용할 때 Sunshine이 재시작될 수 있습니다.' 64
 $status=New-Object Windows.Forms.TextBox
 $status.AccessibleName='Windows 연결 설정 상태'; $status.AccessibleDescription='진행 상황과 다음 단계 안내입니다. 내용을 선택해 복사할 수 있습니다.'
 $status.ReadOnly=$true; $status.Multiline=$true; $status.ScrollBars='Vertical'; $status.BorderStyle='None'; $status.BackColor=[Drawing.SystemColors]::Control
@@ -180,7 +180,7 @@ function Invoke-QuickSetup {
         $process.WaitForExit()
         if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
         if ($process.ExitCode -eq 0) {
-            $status.Text='간편 설정을 마쳤습니다. Mac에서 PC 확인 → PIN으로 연결을 시작하고 이 버튼을 다시 눌러 PIN을 승인할 수 있습니다. 화면 연결 성공 여부는 Mac에서 확인하세요.'
+            $status.Text='간편 연결 창을 닫았습니다. 새로 페어링하려면 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 저장된 보안 설정이 맞으면 다시 시작하지 않고 PIN을 승인합니다. 화면 연결 성공 여부는 Mac에서 확인하세요.'
         } elseif ($process.ExitCode -eq 1602) {
             $status.Text='간편 연결 창을 닫았습니다. 완료된 설치·설정과 기존 페어링은 유지됩니다. 필요할 때 다시 누르세요.'
         } else {
@@ -243,7 +243,7 @@ $script:installAction={
         $process.WaitForExit()
         if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
         if ($script:quickInstall -and $process.ExitCode -in @(0,1602,2)) {
-            $status.Text=if ($process.ExitCode -eq 0) {'설치와 간편 설정을 마쳤습니다. Mac에서 PC 확인 → PIN으로 연결을 진행하세요. 화면 전송 성공은 Mac에서 확인하세요.'} elseif ($process.ExitCode -eq 1602) {'간편 연결을 취소했습니다. 이미 완료된 설치·설정은 유지됩니다. 연결 준비로 다시 시작하세요.'} else {'간편 연결을 완료하지 못했습니다. 표시된 안내나 고급·수동 설정을 확인하세요. 완료된 설치와 기존 인증서는 유지됩니다.'}
+            $status.Text=if ($process.ExitCode -eq 0) {'설치와 계정 확인을 마쳤습니다. PIN 승인에는 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 화면 전송 성공은 Mac에서 확인하세요.'} elseif ($process.ExitCode -eq 1602) {'간편 연결을 취소했습니다. 이미 완료된 설치·설정은 유지됩니다. 연결 준비로 다시 시작하세요.'} else {'간편 연결을 완료하지 못했습니다. 표시된 안내나 고급·수동 설정을 확인하세요. 완료된 설치와 기존 인증서는 유지됩니다.'}
             return
         }
         $result=Get-SunshineInstallResult -ExitCode $process.ExitCode -Broker:([bool]$LauncherPath)
@@ -298,7 +298,7 @@ $null = Add-Text 'Mac의 Windows 화면에서 근처 PC 선택 → 「PIN으로 
 $pin=Add-Button '이 Windows에서 PIN 입력 화면 열기' { Invoke-SunshineLocalCheck -Open PIN }
 $null = Add-Text 'Sunshine 로그인이 먼저 나오면 2단계에서 만든 계정으로 로그인한 뒤 PIN 메뉴를 여세요. 설정을 바꾼 뒤에도 기존 PIN 페어링은 지우지 마세요. PC가 목록에 없으면 아래 QR / 링크를 사용하세요.' 55
 $script:section=$flow
-$null = Add-Text 'Mac에서 근처 PC → PC 확인 → PIN으로 연결을 누르세요. 이 Windows의 「연결 준비」 창에서 Mac의 요청을 선택하고 PIN을 승인합니다. 검색되지 않으면 QR / 링크를 사용하세요.' 68
+$null = Add-Text '먼저 이 Windows의 「연결 준비」를 마치고 그 창을 열어 두세요. 이어서 Mac에서 근처 PC → PC 확인 → PIN으로 연결을 누르고, Windows 창에서 Mac의 요청과 PIN을 승인합니다. 검색되지 않으면 QR / 링크를 사용하세요.' 68
 $qrButton = Add-Button '연결 QR / 링크 보기…' {
     Set-Busy $true
     try {

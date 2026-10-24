@@ -38,7 +38,7 @@ struct SetupPage: View {
 
                     step(number: "2", title: "화면 페어링", subtitle: nil) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("원격 화면에서 근처 PC를 선택하세요. 검색되지 않거나 Tailscale을 쓴다면 Windows 도우미의 QR 이미지·카메라 스캔·연결 링크로 주소를 가져올 수 있어요. 이어서 Windows Knot의 ‘연결 준비’ 창에서 Mac 요청을 선택하고 표시된 PIN을 승인하세요. 고급·수동 설정은 Windows 브라우저의 https://localhost:47990/pin 입니다.")
+                            Text("Windows의 간편 연결에서 계정·보안 준비를 먼저 마치고 그 창을 열어 두세요. 이어서 Mac 원격 화면에서 근처 PC를 선택하세요. 검색되지 않거나 Tailscale을 쓴다면 Windows 도우미의 QR 이미지·카메라 스캔·연결 링크로 주소를 가져올 수 있어요. 이어서 Windows Knot의 ‘연결 준비’ 창에서 Mac 요청을 선택하고 표시된 PIN을 승인하세요. 고급·수동 설정은 Windows 브라우저의 https://localhost:47990/pin 입니다.")
                                 .foregroundStyle(.secondary)
                             HStack(spacing: 12) {
                                 Button("PC 찾기 / QR 연결", action: onDesktop)

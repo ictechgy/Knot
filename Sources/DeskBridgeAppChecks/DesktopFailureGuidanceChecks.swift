@@ -13,6 +13,9 @@ func runDesktopFailureGuidanceChecks(temporary: URL) async throws -> Int {
     let suite = "org.deskbridge.synthetic." + UUID().uuidString
     defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
     let model = DesktopModel(storageDirectory: temporary.appendingPathComponent("desktop-guidance"), identitySuite: suite)
+    try expect(model.pairingTitle.contains("Windows Knot") && model.pairingGuidance.contains("연결 준비") &&
+               model.pairingGuidance.contains("새 PIN") && model.pairingGuidance.contains("https://localhost:47990/pin"),
+               "Windows PIN guidance must lead to native approval, retain manual fallback and explain restart recovery")
     let raw = "synthetic-untrusted-detail-192.0.2.1-private-path"
     let cases: [(any Error, String)] = [
         (ConnectionInvitation.Failure.invalid, "새 연결 QR"),
@@ -70,6 +73,10 @@ func runDesktopFailureGuidanceChecks(temporary: URL) async throws -> Int {
         let controller = DesktopStreamController()
         let target = DesktopModel(storageDirectory: temporary.appendingPathComponent("recovery-guidance-\(platform.rawValue)"),
                                   identitySuite: suite, platform: platform, streamController: controller)
+        if platform == .linux {
+            try expect(target.pairingTitle.contains("Linux 브라우저") && !target.pairingGuidance.contains("Windows Knot"),
+                       "Linux PIN guidance must retain its own browser workflow")
+        }
         for (failure, code) in [(StreamSecurityPolicy.Failure.plaintextSignalling, "[S01]"), (.missingEncryption(2), "[S02]")] {
             var recovery = DesktopRecoveryPresentation()
             recovery.receive(.firstFrame)

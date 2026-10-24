@@ -104,6 +104,8 @@ public static class SunshineQuickSetupChecks
     { return new SunshineSetupSession(fake, delegate(int ignored, System.Threading.CancellationToken cancel) { cancel.ThrowIfCancellationRequested(); return System.Threading.Tasks.Task.FromResult(0); }); }
     private static void Prepare(SunshineSetupSession session, bool first = false)
     { session.PrepareAsync("fixture", "synthetic-password-1234", first, System.Threading.CancellationToken.None).GetAwaiter().GetResult(); }
+    private static void PrepareForced(SunshineSetupSession session)
+    { Prepare(session); if (!session.Configured) session.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); }
     public static void Main() { System.Console.WriteLine(Run()); }
     public static string Run()
     {
@@ -207,45 +209,69 @@ public static class SunshineQuickSetupChecks
         Reject(delegate { Prepare(Session(unverified)); }); Check(unverified.Paths.Count == 1);
         var mismatch = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig.Replace("2026.914.233613", "other")));
         Reject(delegate { Prepare(Session(mismatch)); }); Check(mismatch.Paths.Count == 2);
-        var falsePair = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        var falsePair = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig));
         var falseSession = Session(falsePair); Prepare(falseSession); falsePair.Replies.Enqueue(Reply(Pairs)); falsePair.Replies.Enqueue(Reply("{\"status\":false}"));
         Reject(delegate { falseSession.PairAsync(pairs[0], "1234", System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         var invalidPin = new Fake();
         Reject(delegate { Session(invalidPin).PairAsync(pairs[0], "1234", System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         Check(invalidPin.Paths.Count == 0);
+        // A Mac may already be waiting for PIN approval when this dialog is
+        // reopened. Existing authenticated secure settings must preserve it.
+        var pinOnly = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(Pairs), Reply(Pairs), Reply(Success));
+        var pinOnlySession = Session(pinOnly); Prepare(pinOnlySession);
+        Check(pinOnlySession.PairingReady && !pinOnlySession.Configured && pinOnly.Paths.Count == 2 && !pinOnly.Captured);
+        Check(pinOnlySession.PendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult().Count == 1);
+        pinOnlySession.PairAsync(pairs[0], "1234", System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(!pinOnly.Paths.Contains("/api/restart") && !pinOnly.Paths.Contains("/api/password") && !pinOnly.Captured);
+        Check(pinOnly.Paths.Count == 5 && pinOnly.Bodies[pinOnly.Bodies.Count - 1] == SunshineSetupPolicy.PairBody(pairs[0], "1234"));
+        Check(SunshineSetupPolicy.ReadyMessage(false).Contains("재시작하지 않았으며") && SunshineSetupPolicy.ReadyMessage(false).Contains("다시 확인하지 않았습니다"));
+        Check(SunshineSetupPolicy.ReadyMessage(true).Contains("새 연결 요청"));
+        var reapply = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        var reapplySession = Session(reapply); Prepare(reapplySession);
+        Check(reapplySession.PairingReady && !reapplySession.Configured && reapply.Paths.Count == 2);
+        reapplySession.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(reapplySession.PairingReady && reapplySession.Configured && reapply.Witness.Verified && reapply.Witness.Disposed);
+        Check(reapply.Paths.Count == 5 && reapply.Paths[2] == "/api/config" && reapply.Paths[3] == "/api/restart" && reapply.Paths[4] == "/api/config");
+        Check(reapply.Auth[2] == reapply.Auth[1] && reapply.Auth[3] == reapply.Auth[1]);
+        var unauthenticated = new Fake(new SunshineApiReply(401, ""), new SunshineApiReply(401, "{}"));
+        var unauthenticatedSession = Session(unauthenticated); Reject(delegate { Prepare(unauthenticatedSession); });
+        Check(!unauthenticatedSession.PairingReady && !unauthenticatedSession.Configured && !unauthenticated.Captured);
+        Reject(delegate { unauthenticatedSession.PendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
+        var neverSignedIn = Session(new Fake()); Reject(delegate { neverSignedIn.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         foreach (int code in new int[] { 400, 401, 403, 500 })
         {
-            var rejectedRestart = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), new SunshineApiReply(code, "{}"), Reply(SecureConfig));
-            var rejectedSession = Session(rejectedRestart); Reject(delegate { Prepare(rejectedSession); });
-            Check(!rejectedSession.Configured && rejectedRestart.Paths.Count == 3 && !rejectedRestart.Witness.Waited && rejectedRestart.Witness.Disposed);
+            var rejectedRestart = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), new SunshineApiReply(code, "{}"), Reply(SecureConfig));
+            var rejectedSession = Session(rejectedRestart); Reject(delegate { PrepareForced(rejectedSession); });
+            Check(!rejectedSession.Configured && !rejectedSession.PairingReady && rejectedRestart.Paths.Count == 4 && !rejectedRestart.Witness.Waited && rejectedRestart.Witness.Disposed);
         }
-        var liveOld = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); liveOld.Witness.Exited = false;
-        var liveSession = Session(liveOld); Reject(delegate { Prepare(liveSession); });
-        Check(!liveSession.Configured && liveOld.Paths.Count == 3 && !liveOld.Witness.Verified && liveOld.Witness.Disposed);
-        var socketClosed = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), null, Reply(SecureConfig));
-        var socketSession = Session(socketClosed); Prepare(socketSession);
+        var liveOld = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); liveOld.Witness.Exited = false;
+        var liveSession = Session(liveOld); Reject(delegate { PrepareForced(liveSession); });
+        Check(!liveSession.Configured && liveOld.Paths.Count == 4 && !liveOld.Witness.Verified && liveOld.Witness.Disposed);
+        var socketClosed = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), null, Reply(SecureConfig));
+        var socketSession = Session(socketClosed); PrepareForced(socketSession);
         Check(socketSession.Configured && socketClosed.Witness.Verified && socketClosed.Witness.Disposed);
-        var changedImage = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); changedImage.Witness.Replacement = false;
-        var imageSession = Session(changedImage); Reject(delegate { Prepare(imageSession); });
+        var changedImage = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); changedImage.Witness.Replacement = false;
+        var imageSession = Session(changedImage); Reject(delegate { PrepareForced(imageSession); });
         Check(!imageSession.Configured && changedImage.Witness.Disposed);
         using (var cancel = new System.Threading.CancellationTokenSource())
         {
-            var interrupted = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); interrupted.Witness.CancelOnWait = cancel;
+            var interrupted = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); interrupted.Witness.CancelOnWait = cancel;
             var interruptedSession = Session(interrupted); bool canceled = false;
-            try { interruptedSession.PrepareAsync("fixture", "synthetic-password-1234", false, cancel.Token).GetAwaiter().GetResult(); }
+            Prepare(interruptedSession);
+            try { interruptedSession.ReapplySecurityAsync(cancel.Token).GetAwaiter().GetResult(); }
             catch (System.OperationCanceledException) { canceled = true; }
-            Check(canceled && !interruptedSession.Configured && interrupted.Paths.Count == 3 && interrupted.Witness.Disposed);
+            Check(canceled && !interruptedSession.Configured && interrupted.Paths.Count == 4 && interrupted.Witness.Disposed);
         }
-        var expires = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); expires.Witness.Block = true;
+        var expires = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); expires.Witness.Block = true;
         var expireSession = new SunshineSetupSession(expires, delegate(int ignored, System.Threading.CancellationToken token) { return System.Threading.Tasks.Task.FromResult(0); }, 10);
         bool expired = false;
-        try { Prepare(expireSession); } catch (SunshineSetupFailure) { expired = true; }
-        Check(expired && !expireSession.Configured && expires.Paths.Count == 3 && expires.Witness.Disposed);
-        var readExpires = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}")); readExpires.BlockReadback = true;
+        try { PrepareForced(expireSession); } catch (SunshineSetupFailure) { expired = true; }
+        Check(expired && !expireSession.Configured && expires.Paths.Count == 4 && expires.Witness.Disposed);
+        var readExpires = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), Reply("{}")); readExpires.BlockReadback = true;
         var readExpireSession = new SunshineSetupSession(readExpires, delegate(int ignored, System.Threading.CancellationToken token) { return System.Threading.Tasks.Task.FromResult(0); }, 10);
         bool readExpired = false;
-        try { Prepare(readExpireSession); } catch (SunshineSetupFailure) { readExpired = true; }
-        Check(readExpired && !readExpireSession.Configured && readExpires.Paths.Count == 4 && !readExpires.Witness.Verified && readExpires.Witness.Disposed);
+        try { PrepareForced(readExpireSession); } catch (SunshineSetupFailure) { readExpired = true; }
+        Check(readExpired && !readExpireSession.Configured && readExpires.Paths.Count == 5 && !readExpires.Witness.Verified && readExpires.Witness.Disposed);
         var changed = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig.Replace("80000", "70000")));
         Reject(delegate { Prepare(Session(changed)); }); Check(changed.Paths.Count == 3);
         var saveFailed = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig), Reply("{\"status\":false}"));

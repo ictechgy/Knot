@@ -55,6 +55,14 @@ final class DesktopModel: ObservableObject {
     let platform: HostPlatform
     var supportsFiles: Bool { platform == .windows }
     var platformName: String { platform.displayName }
+    var pairingTitle: String {
+        platform == .windows ? "Windows Knot 창에서 PIN을 승인하세요" : "\(platformName) 브라우저의 Sunshine PIN 페이지에 입력하세요"
+    }
+    var pairingGuidance: String {
+        platform == .windows
+            ? "Windows Knot의 ‘연결 준비 · 자동 설정’ 창에서 계정 확인을 마친 뒤 요청한 Mac을 선택하고 위 번호를 승인하세요. 보안 설정 적용으로 Sunshine이 재시작됐다면 Mac에서 취소한 뒤 새 PIN을 만드세요. 수동 설정은 Windows 브라우저의 https://localhost:47990/pin 입니다."
+            : "\(platformName)에서 https://localhost:47990/pin 을 열고 위 번호를 입력하세요. Sunshine은 별도 창 없이 백그라운드에서 실행될 수 있습니다."
+    }
     weak var peerDesktop: DesktopModel?
     var enrollmentEngaged: Bool { fileActivity?.enrollmentActive == true || peerDesktop?.fileActivity?.enrollmentActive == true }
     var peerEngaged: Bool { peerDesktop.map { $0.busy || $0.stream.isEngaged || $0.fileActivity?.enrollmentActive == true } ?? false }
@@ -336,7 +344,7 @@ final class DesktopModel: ObservableObject {
             try targetBinding.require(input: address, expectedAddress: server.address)
             let pin = String(format: "%04d", Int.random(in: 0...9999))
             pairingPIN = pin
-            status = "\(platformName) 브라우저에서 https://localhost:47990/pin 을 열고 아래 번호를 입력하세요."
+            status = pairingGuidance
             var result = try await PairingClient(network: network, server: server).pair(pin: pin, expectedUniqueId: server.uniqueId)
             try Task.checkCancellation()
             try targetBinding.require(input: address, expectedAddress: server.address)
