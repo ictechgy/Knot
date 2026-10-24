@@ -1,0 +1,497 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Source-only fixtures define KNOT_QUICKSETUP_POLICY_ONLY; production uses the same policy.
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+#if !KNOT_QUICKSETUP_POLICY_ONLY
+using System.Drawing;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Security;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
+using System.Windows.Forms;
+using Microsoft.Win32.SafeHandles;
+#endif
+
+internal sealed class SunshineSetupFailure : Exception
+{
+    internal SunshineSetupFailure(string message) : base(message) { }
+}
+internal sealed class SunshineApiReply
+{
+    internal int Status;
+    internal string Location, Body;
+    internal SunshineApiReply(int status, string body, string location = null) { Status = status; Body = body; Location = location; }
+}
+internal interface ISunshineSetupApi
+{
+    Task<SunshineApiReply> SendAsync(string path, string body, string authorization, CancellationToken cancellation);
+}
+internal sealed class SunshinePendingPair
+{
+    internal string ID, Name, Address;
+    public override string ToString() { return Name + " — " + Address; }
+}
+
+internal static class SunshineSetupPolicy
+{
+    internal const string Version = "2026.914.233613";
+    internal const int MaximumBody = 262144;
+    internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 고급 설정에서 Sunshine을 확인하세요.";
+    internal static void Require(bool condition) { if (!condition) throw new SunshineSetupFailure(Manual); }
+    internal static bool Matches(byte[] expected, byte[] actual)
+    {
+        if (expected == null || actual == null || expected.Length != actual.Length || expected.Length == 0) return false;
+        int difference = 0; for (int i = 0; i < expected.Length; i++) difference |= expected[i] ^ actual[i]; return difference == 0;
+    }
+    internal static bool IsWelcome(SunshineApiReply reply) { return reply.Status == 307 && reply.Location == "/welcome"; }
+    internal static void ValidateCredentials(string username, string password, bool create)
+    {
+        Require(!String.IsNullOrEmpty(username) && username.Length <= 128 && username.IndexOf(':') < 0 && SafeText(username));
+        Require(!String.IsNullOrEmpty(password) && Encoding.UTF8.GetByteCount(password) <= 1024 && SafeText(password));
+        if (create && Encoding.UTF8.GetByteCount(password) < 16)
+            throw new SunshineSetupFailure("새 Sunshine 비밀번호는 UTF-8 기준 16바이트 이상으로 정하세요. 기존 계정은 기존 비밀번호를 입력하세요.");
+    }
+    internal static bool SafeText(string value)
+    {
+        foreach (char c in value)
+        {
+            UnicodeCategory category = Char.GetUnicodeCategory(c);
+            if (Char.IsControl(c) || Char.IsSurrogate(c) || category == UnicodeCategory.Format ||
+                category == UnicodeCategory.LineSeparator || category == UnicodeCategory.ParagraphSeparator) return false;
+        }
+        return true;
+    }
+    internal static string Authorization(string username, string password)
+    { return "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(username + ":" + password)); }
+    internal static Dictionary<string, object> Config(SunshineApiReply reply)
+    {
+        Require(reply.Status == 200);
+        Dictionary<string, object> all = SunshineSetupJson.Object(reply.Body);
+        Require(all.ContainsKey("status") && all["status"] is bool && (bool)all["status"] &&
+            all.ContainsKey("version") && (all["version"] as string) == Version &&
+            all.ContainsKey("platform") && (all["platform"] as string) == "windows");
+        all.Remove("status"); all.Remove("version"); all.Remove("platform");
+        foreach (var item in all)
+            Require(Regex.IsMatch(item.Key, @"\A[a-z][a-z0-9_]{0,79}\z") && item.Value is string &&
+                ((string)item.Value).Length <= 65536 && SafeText((string)item.Value));
+        return all;
+    }
+    internal static bool Equal(Dictionary<string, object> a, Dictionary<string, object> b)
+    {
+        if (a.Count != b.Count) return false;
+        foreach (var item in a) { object v; if (!b.TryGetValue(item.Key, out v) || !Object.Equals(item.Value, v)) return false; }
+        return true;
+    }
+    internal static Dictionary<string, object> Secure(Dictionary<string, object> original)
+    {
+        var result = new Dictionary<string, object>(original, StringComparer.Ordinal);
+        result["lan_encryption_mode"] = "2"; result["wan_encryption_mode"] = "2";
+        result["upnp"] = "disabled"; result["origin_web_ui_allowed"] = "pc";
+        return result;
+    }
+    internal static void Success(SunshineApiReply reply)
+    {
+        Require(reply.Status == 200);
+        Dictionary<string, object> body = SunshineSetupJson.Object(reply.Body);
+        Require(body.ContainsKey("status") && body["status"] is bool && (bool)body["status"]);
+    }
+    internal static List<SunshinePendingPair> Pairings(SunshineApiReply reply)
+    {
+        Require(reply.Status == 200);
+        var body = SunshineSetupJson.Object(reply.Body);
+        object list; Require(body.TryGetValue("pairings", out list) && list is List<object>);
+        var result = new List<SunshinePendingPair>(); var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Require(((List<object>)list).Count <= 32);
+        foreach (object value in (List<object>)list)
+        {
+            var item = value as Dictionary<string, object>; Require(item != null && item.Count == 3);
+            object id = null, name = null, address = null;
+            Require(item.TryGetValue("id", out id) && item.TryGetValue("name", out name) && item.TryGetValue("address", out address));
+            var pair = new SunshinePendingPair { ID = id as string, Name = name as string, Address = address as string };
+            Require(pair.ID != null && Regex.IsMatch(pair.ID, @"\A[0-9a-fA-F]{32}\z") && seen.Add(pair.ID));
+            Require(pair.Name != null && Encoding.UTF8.GetByteCount(pair.Name) >= 1 && Encoding.UTF8.GetByteCount(pair.Name) <= 128 && SafeText(pair.Name));
+            System.Net.IPAddress ip;
+            Require(pair.Address != null && pair.Address.Length <= 64 && System.Net.IPAddress.TryParse(pair.Address, out ip) && SafeText(pair.Address));
+            result.Add(pair);
+        }
+        return result;
+    }
+    internal static string PairBody(SunshinePendingPair selected, string pin)
+    {
+        Require(selected != null && selected.ID != null && Regex.IsMatch(selected.ID, @"\A[0-9a-fA-F]{32}\z") &&
+            selected.Name != null && Encoding.UTF8.GetByteCount(selected.Name) >= 1 && Encoding.UTF8.GetByteCount(selected.Name) <= 128 && SafeText(selected.Name));
+        if (pin == null || !Regex.IsMatch(pin, @"\A[0-9]{4}\z")) throw new SunshineSetupFailure("Mac의 Knot에 표시된 4자리 PIN을 입력하세요.");
+        return SunshineSetupJson.Write(new Dictionary<string, object> { { "pairing_id", selected.ID }, { "pin", pin }, { "name", selected.Name } });
+    }
+}
+
+// A deliberately small strict parser. Duplicate keys, arbitrary numeric values,
+// deep objects and malformed Unicode fail closed instead of being normalized.
+internal sealed class SunshineSetupJson
+{
+    private readonly string text; private int at, count;
+    private SunshineSetupJson(string value) { text = value; }
+    internal static Dictionary<string, object> Object(string text)
+    {
+        SunshineSetupPolicy.Require(text != null && Encoding.UTF8.GetByteCount(text) <= SunshineSetupPolicy.MaximumBody);
+        var parser = new SunshineSetupJson(text); object value = parser.Read(0); parser.Space();
+        SunshineSetupPolicy.Require(parser.at == text.Length && value is Dictionary<string, object>);
+        return (Dictionary<string, object>)value;
+    }
+    private void Space() { while (at < text.Length && (text[at] == ' ' || text[at] == '\t' || text[at] == '\r' || text[at] == '\n')) at++; }
+    private bool Take(char c) { Space(); if (at < text.Length && text[at] == c) { at++; return true; } return false; }
+    private object Read(int depth)
+    {
+        SunshineSetupPolicy.Require(depth <= 8 && ++count <= 2048); Space(); SunshineSetupPolicy.Require(at < text.Length);
+        if (text[at] == '"') return ReadString();
+        if (Take('{'))
+        {
+            var result = new Dictionary<string, object>(StringComparer.Ordinal); if (Take('}')) return result;
+            do { Space(); SunshineSetupPolicy.Require(at < text.Length && text[at] == '"'); string key = ReadString();
+                SunshineSetupPolicy.Require(!result.ContainsKey(key) && Take(':')); result.Add(key, Read(depth + 1)); if (Take('}')) return result;
+            } while (Take(','));
+            throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+        }
+        if (Take('['))
+        {
+            var result = new List<object>(); if (Take(']')) return result;
+            do { result.Add(Read(depth + 1)); if (Take(']')) return result; } while (Take(','));
+            throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+        }
+        foreach (string literal in new string[] { "true", "false", "null" })
+            if (text.Length - at >= literal.Length && String.CompareOrdinal(text, at, literal, 0, literal.Length) == 0)
+            { at += literal.Length; return literal == "null" ? null : (object)(literal == "true"); }
+        throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+    }
+    private string ReadString()
+    {
+        SunshineSetupPolicy.Require(Take('"')); var result = new StringBuilder();
+        while (at < text.Length)
+        {
+            char c = text[at++]; if (c == '"') return result.ToString();
+            SunshineSetupPolicy.Require(c >= 32 && !Char.IsSurrogate(c));
+            if (c == '\\')
+            {
+                SunshineSetupPolicy.Require(at < text.Length); c = text[at++];
+                switch (c)
+                {
+                    case '"': case '\\': case '/': break;
+                    case 'b': c = '\b'; break; case 'f': c = '\f'; break; case 'n': c = '\n'; break;
+                    case 'r': c = '\r'; break; case 't': c = '\t'; break;
+                    case 'u':
+                        SunshineSetupPolicy.Require(at + 4 <= text.Length); int code;
+                        SunshineSetupPolicy.Require(Int32.TryParse(text.Substring(at, 4), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out code));
+                        c = (char)code; SunshineSetupPolicy.Require(!Char.IsSurrogate(c)); at += 4; break;
+                    default: throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+                }
+            }
+            result.Append(c);
+        }
+        throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+    }
+    internal static string Write(Dictionary<string, object> values)
+    {
+        var keys = new List<string>(values.Keys); keys.Sort(StringComparer.Ordinal); var result = new StringBuilder("{"); bool first = true;
+        foreach (string key in keys)
+        {
+            SunshineSetupPolicy.Require(values[key] is string); if (!first) result.Append(','); first = false;
+            Quoted(result, key); result.Append(':'); Quoted(result, (string)values[key]);
+        }
+        result.Append('}'); SunshineSetupPolicy.Require(Encoding.UTF8.GetByteCount(result.ToString()) <= SunshineSetupPolicy.MaximumBody); return result.ToString();
+    }
+    private static void Quoted(StringBuilder result, string value)
+    {
+        result.Append('"'); foreach (char c in value)
+        { if (c == '"' || c == '\\') result.Append('\\').Append(c); else if (c < 32) result.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture)); else result.Append(c); }
+        result.Append('"');
+    }
+}
+
+internal sealed class SunshineSetupSession
+{
+    private readonly ISunshineSetupApi api; private readonly Func<int, CancellationToken, Task> delay; private string authorization; internal bool Configured { get; private set; }
+    internal SunshineSetupSession(ISunshineSetupApi api, Func<int, CancellationToken, Task> delay = null) { this.api = api; this.delay = delay ?? new Func<int, CancellationToken, Task>(Task.Delay); }
+    internal Task<SunshineApiReply> ProbeAsync(CancellationToken cancel) { return api.SendAsync("/api/config", null, null, cancel); }
+    internal async Task PrepareAsync(string username, string password, bool allowFirstAccount, CancellationToken cancel)
+    {
+        Configured = false;
+        authorization = null;
+        SunshineApiReply probe = await ProbeAsync(cancel).ConfigureAwait(false);
+        bool first = SunshineSetupPolicy.IsWelcome(probe);
+        SunshineSetupPolicy.Require(first || probe.Status == 401);
+        SunshineSetupPolicy.ValidateCredentials(username, password, first);
+        if (first)
+        {
+            SunshineSetupPolicy.Require(allowFirstAccount);
+            string body = SunshineSetupJson.Write(new Dictionary<string, object> { { "currentUsername", "" }, { "currentPassword", "" },
+                { "newUsername", username }, { "newPassword", password }, { "confirmNewPassword", password } });
+            SunshineSetupPolicy.Success(await api.SendAsync("/api/password", body, null, cancel).ConfigureAwait(false));
+        }
+        authorization = SunshineSetupPolicy.Authorization(username, password);
+        var original = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
+        var desired = SunshineSetupPolicy.Secure(original);
+        Dictionary<string, object> saved;
+        if (!SunshineSetupPolicy.Equal(original, desired))
+        {
+            // Upstream has no compare-and-swap. Refuse observed concurrent edits;
+            // the UI also requires other editors closed. A final readback is mandatory.
+            var latest = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
+            SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(original, latest));
+            SunshineSetupPolicy.Success(await api.SendAsync("/api/config", SunshineSetupJson.Write(desired), authorization, cancel).ConfigureAwait(false));
+            saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
+            SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved));
+        }
+        // The explicit prepare action always applies/restarts, including a previous
+        // save whose running configuration was never applied in another editor.
+        // Restart closes the upstream socket without a response by design.
+        try { await api.SendAsync("/api/restart", "{}", authorization, cancel).ConfigureAwait(false); }
+            catch (IOException) { }
+            for (int i = 0; i < 20; i++)
+            {
+                cancel.ThrowIfCancellationRequested(); await delay(1000, cancel).ConfigureAwait(false);
+                try
+                {
+                    saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
+                    SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved)); Configured = true; return;
+                }
+                catch (IOException) { }
+            }
+        throw new SunshineSetupFailure("Sunshine 재시작을 아직 확인하지 못했습니다. 잠시 뒤 빠른 설정을 다시 여세요. 인증서는 교체하지 않습니다.");
+    }
+    internal async Task<List<SunshinePendingPair>> PendingAsync(CancellationToken cancel)
+    {
+        SunshineSetupPolicy.Require(Configured && authorization != null);
+        return SunshineSetupPolicy.Pairings(await api.SendAsync("/api/pin", null, authorization, cancel).ConfigureAwait(false));
+    }
+    internal async Task PairAsync(SunshinePendingPair selected, string pin, CancellationToken cancel)
+    {
+        SunshineSetupPolicy.Require(Configured && authorization != null);
+        string body = SunshineSetupPolicy.PairBody(selected, pin);
+        List<SunshinePendingPair> current = await PendingAsync(cancel).ConfigureAwait(false); bool found = false;
+        foreach (var item in current) if (item.ID == selected.ID && item.Name == selected.Name && item.Address == selected.Address) found = true;
+        SunshineSetupPolicy.Require(found);
+        SunshineSetupPolicy.Success(await api.SendAsync("/api/pin", body, authorization, cancel).ConfigureAwait(false));
+    }
+    internal void Clear() { authorization = null; Configured = false; }
+}
+
+#if !KNOT_QUICKSETUP_POLICY_ONLY
+internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
+{
+    private readonly List<IDisposable> locks = new List<IDisposable>(); private byte[] expected;
+    internal bool VerifiedInstalledVersion { get; private set; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    internal SunshinePinnedApi()
+    {
+        try
+        {
+            string parent = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string install = Path.Combine(parent, "Sunshine");
+            string certificate = Path.Combine(install, @"config\credentials\cacert.pem");
+            if (!Directory.Exists(Path.GetDirectoryName(certificate))) throw new IOException();
+            // Lock each directory against rename/delete before validating the path.
+            for (var current = new DirectoryInfo(Path.GetDirectoryName(certificate)); current != null; current = current.Parent)
+            {
+                SafeFileHandle handle = CreateFile(current.FullName, 0, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+                SunshineSetupPolicy.Require(!handle.IsInvalid); locks.Add(handle);
+            }
+            Launcher.AssertProtectedAncestors(Path.GetDirectoryName(certificate));
+            for (var current = new DirectoryInfo(Path.GetDirectoryName(certificate)); current != null && current.FullName.Length >= install.Length; current = current.Parent)
+                AssertProtectedAcl(current.GetAccessControl());
+            string executable = Path.Combine(install, "sunshine.exe");
+            SunshineSetupPolicy.Require((File.GetAttributes(executable) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0);
+            var image = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.Read); locks.Add(image);
+            AssertProtectedFile(executable);
+            // Upstream windows.rc embeds unmodified PROJECT_VERSION in ProductVersion;
+            // the numeric FILEVERSION is deliberately split into four smaller fields.
+            VerifiedInstalledVersion = FileVersionInfo.GetVersionInfo(executable).ProductVersion == SunshineSetupPolicy.Version;
+            SunshineSetupPolicy.Require(VerifiedInstalledVersion);
+            if ((File.GetAttributes(certificate) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0) throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+            var file = new FileStream(certificate, FileMode.Open, FileAccess.Read, FileShare.Read); locks.Add(file);
+            AssertProtectedFile(certificate); SunshineSetupPolicy.Require(file.Length >= 100 && file.Length <= 16384);
+            var bytes = new byte[(int)file.Length]; int total = 0;
+            while (total < bytes.Length) { int read = file.Read(bytes, total, bytes.Length - total); SunshineSetupPolicy.Require(read > 0); total += read; }
+            string pem = new UTF8Encoding(false, true).GetString(bytes);
+            Match match = Regex.Match(pem, @"\A\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\r\n]+)\s*-----END CERTIFICATE-----\s*\z");
+            SunshineSetupPolicy.Require(match.Success);
+            using (var parsed = new X509Certificate2(Convert.FromBase64String(match.Groups[1].Value))) expected = parsed.RawData;
+        }
+        catch (IOException) { Dispose(); throw new IOException(); }
+        catch { Dispose(); throw new SunshineSetupFailure(SunshineSetupPolicy.Manual); }
+    }
+    private static void AssertProtectedFile(string path)
+    {
+        AssertProtectedAcl(File.GetAccessControl(path, AccessControlSections.Access | AccessControlSections.Owner));
+    }
+    private static void AssertProtectedAcl(FileSystemSecurity acl)
+    {
+        Func<string, bool> trusted = delegate(string sid) { return sid == "S-1-5-18" || sid == "S-1-5-32-544" || sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"; };
+        SunshineSetupPolicy.Require(trusted(acl.GetOwner(typeof(SecurityIdentifier)).Value));
+        var mutable = FileSystemRights.Write | FileSystemRights.Delete | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership | (FileSystemRights)0x50000000;
+        foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            SunshineSetupPolicy.Require(rule.AccessControlType != AccessControlType.Allow || trusted(rule.IdentityReference.Value) || (rule.FileSystemRights & mutable) == 0);
+    }
+    public async Task<SunshineApiReply> SendAsync(string path, string body, string authorization, CancellationToken cancellation)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        SunshineSetupPolicy.Require(path == "/api/config" || path == "/api/password" || path == "/api/pin" || path == "/api/restart");
+        SunshineSetupPolicy.Require((path != "/api/password" && path != "/api/restart") || body != null);
+        var request = (HttpWebRequest)WebRequest.Create("https://127.0.0.1:47990" + path);
+        request.Method = body == null ? "GET" : "POST"; request.Proxy = null; request.AllowAutoRedirect = false;
+        request.UseDefaultCredentials = false; request.Credentials = null; request.CookieContainer = null;
+        request.KeepAlive = false; request.PreAuthenticate = false; request.MaximumResponseHeadersLength = 16;
+        request.Timeout = 10000; request.ReadWriteTimeout = 10000; request.SslProtocols = SslProtocols.Tls12;
+        request.ServerCertificateValidationCallback = delegate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors)
+        { return certificate != null && SunshineSetupPolicy.Matches(expected, certificate.GetRawCertData()); };
+        if (authorization != null) request.Headers[HttpRequestHeader.Authorization] = authorization;
+        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
+        {
+            timeout.CancelAfter(path == "/api/pin" && body != null ? 60000 : 10000);
+            using (timeout.Token.Register(delegate { request.Abort(); }))
+            {
+                try
+                {
+                    if (body != null)
+                    {
+                        byte[] bytes = new UTF8Encoding(false, true).GetBytes(body); SunshineSetupPolicy.Require(bytes.Length <= SunshineSetupPolicy.MaximumBody);
+                        request.ContentType = "application/json"; request.ContentLength = bytes.Length;
+                        try { using (Stream output = await request.GetRequestStreamAsync().ConfigureAwait(false)) await output.WriteAsync(bytes, 0, bytes.Length, timeout.Token).ConfigureAwait(false); }
+                        finally { Array.Clear(bytes, 0, bytes.Length); }
+                    }
+                    HttpWebResponse response;
+                    try { response = (HttpWebResponse)await request.GetResponseAsync().ConfigureAwait(false); }
+                    catch (WebException error) {
+                        if (error.Status == WebExceptionStatus.TrustFailure || error.Status == WebExceptionStatus.SecureChannelFailure) throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+                        response = error.Response as HttpWebResponse; if (response == null) throw new IOException();
+                    }
+                    using (response)
+                    {
+                        SunshineSetupPolicy.Require(response.ResponseUri == request.RequestUri && response.ContentLength <= SunshineSetupPolicy.MaximumBody);
+                        if ((int)response.StatusCode == 200) SunshineSetupPolicy.Require(response.ContentType != null && response.ContentType.Split(';')[0].Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase));
+                        using (Stream input = response.GetResponseStream())
+                        using (var data = new MemoryStream())
+                        {
+                            byte[] buffer = new byte[8192]; int read;
+                            while ((read = await input.ReadAsync(buffer, 0, buffer.Length, timeout.Token).ConfigureAwait(false)) > 0)
+                            { SunshineSetupPolicy.Require(data.Length + read <= SunshineSetupPolicy.MaximumBody); data.Write(buffer, 0, read); }
+                            return new SunshineApiReply((int)response.StatusCode, new UTF8Encoding(false, true).GetString(data.ToArray()), response.Headers["Location"]);
+                        }
+                    }
+                }
+                catch (WebException) { cancellation.ThrowIfCancellationRequested(); throw new IOException(); }
+                catch (OperationCanceledException) { cancellation.ThrowIfCancellationRequested(); throw new IOException(); }
+                finally { request.Abort(); }
+            }
+        }
+    }
+    public void Dispose() { expected = null; for (int i = locks.Count - 1; i >= 0; i--) locks[i].Dispose(); locks.Clear(); }
+}
+
+internal sealed class SunshineQuickSetupForm : Form
+{
+    private readonly TextBox username = new TextBox(), password = new TextBox(), pin = new TextBox();
+    private readonly Button prepare = new Button(), refresh = new Button(), pair = new Button();
+    private readonly ComboBox pending = new ComboBox(); private readonly Label status = new Label();
+    private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
+    private SunshinePinnedApi api; private SunshineSetupSession session; private bool closing, busy;
+    internal bool Completed { get; private set; }
+    internal bool HadFailure { get; private set; }
+    internal SunshineQuickSetupForm()
+    {
+        Text = "Knot · 이 PC 연결 준비"; StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(620, 650); Size = MinimumSize;
+        Font = new Font("Segoe UI", 10); AutoScaleMode = AutoScaleMode.Dpi;
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 13, AutoScroll = true };
+        Controls.Add(layout);
+        layout.Controls.Add(new Label { Text = "이 PC를 Mac에서 열기", AutoSize = true, Font = new Font(Font.FontFamily, 18, FontStyle.Bold) });
+        layout.Controls.Add(new Label { Text = "Sunshine 계정으로 보안 설정을 준비하고 이 창에서 PIN을 입력합니다.\n계정 정보는 이 창에서만 사용하며 Knot에 저장하지 않습니다.", AutoSize = true, Margin = new Padding(0, 10, 0, 12) });
+        layout.Controls.Add(new Label { Text = "Sunshine 사용자 이름 (Windows 로그인 계정 아님)", AutoSize = true }); username.Width = 510; username.MaxLength = 128; username.Text = "knot"; layout.Controls.Add(username);
+        layout.Controls.Add(new Label { Text = "Sunshine 비밀번호 · 처음 만드는 계정은 16바이트 이상", AutoSize = true }); password.Width = 510; password.MaxLength = 1024; password.UseSystemPasswordChar = true; layout.Controls.Add(password);
+        layout.Controls.Add(new Label { Text = "다른 Sunshine 설정 창을 닫고 진행하세요. 준비를 누르면 화면 암호화를 필수로 설정하고, 공유기 자동 포트 열기를 끄고, 관리 화면을 이 PC로 제한합니다. Sunshine을 재시작하여 진행 중인 화면 연결이 잠시 끊길 수 있습니다.", AutoSize = true, MaximumSize = new Size(530, 0), Margin = new Padding(0, 10, 0, 10) });
+        prepare.Text = "안전하게 연결 준비"; prepare.AutoSize = true; prepare.Enabled = false; layout.Controls.Add(prepare);
+        status.AutoSize = true; status.MaximumSize = new Size(530, 0); status.Text = "이 PC의 Sunshine 인증서를 확인하는 중…"; status.Margin = new Padding(0, 12, 0, 12); layout.Controls.Add(status);
+        layout.Controls.Add(new Label { Text = "연결할 Mac에서 Knot의 이 PC를 선택하세요. 요청한 Mac의 이름과 주소를 직접 확인한 뒤 PIN을 입력하세요.", AutoSize = true, MaximumSize = new Size(530, 0) });
+        var requests = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pending.DropDownStyle = ComboBoxStyle.DropDownList; pending.Width = 380; refresh.Text = "요청 새로고침"; refresh.AutoSize = true; refresh.Enabled = false; requests.Controls.Add(pending); requests.Controls.Add(refresh); layout.Controls.Add(requests);
+        var pairing = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "선택한 Mac 연결"; pair.AutoSize = true; pair.Enabled = false; pairing.Controls.Add(new Label { Text = "Mac의 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); layout.Controls.Add(pairing);
+        var close = new Button { Text = "닫기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
+        Shown += async delegate { await WorkAsync(InitializeAsync); };
+        prepare.Click += async delegate { await WorkAsync(async delegate {
+            string user = username.Text, secret = password.Text; pending.Items.Clear(); pending.SelectedIndex = -1; pin.Clear(); prepare.Enabled = false; status.Text = "보안 설정을 저장하고 확인하는 중…";
+            try { await session.PrepareAsync(user, secret, api.VerifiedInstalledVersion, lifetime.Token); } finally { password.Clear(); secret = null; }
+            pending.Items.Clear(); foreach (var item in await session.PendingAsync(lifetime.Token)) pending.Items.Add(item); pending.SelectedIndex = -1;
+            refresh.Enabled = true; pair.Enabled = true; Completed = true;
+            status.Text = "보안 설정 저장과 재시작 후 확인을 마쳤습니다. 화면 연결 성공을 뜻하지는 않습니다. 이제 아래에서 요청한 Mac과 PIN을 확인하세요.";
+        }); };
+        refresh.Click += async delegate { await WorkAsync(async delegate { pending.Items.Clear(); pending.SelectedIndex = -1; foreach (var item in await session.PendingAsync(lifetime.Token)) pending.Items.Add(item); pending.SelectedIndex = -1; status.Text = pending.Items.Count == 0 ? "아직 연결 요청이 없습니다. Mac에서 먼저 이 PC에 연결하세요." : "요청한 Mac을 직접 선택하고 Mac에 표시된 PIN을 입력하세요."; }); };
+        pair.Click += async delegate { await WorkAsync(async delegate { var selected = pending.SelectedItem as SunshinePendingPair;
+            string selectedPin = pin.Text;
+            try { await session.PairAsync(selected, selectedPin, lifetime.Token); pending.Items.Clear(); status.Text = "선택한 Mac의 PIN 연결이 완료되었습니다. Mac에서 화면을 열 수 있습니다."; }
+            finally { pin.Clear(); selectedPin = null; } }); };
+        FormClosing += delegate { closing = true; lifetime.Cancel(); password.Clear(); pin.Clear(); if (session != null) session.Clear(); };
+    }
+    private async Task InitializeAsync()
+    {
+        using (var startup = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token))
+        {
+            startup.CancelAfter(20000);
+            try
+            {
+                for (int attempt = 0; attempt < 20; attempt++)
+                {
+                    startup.Token.ThrowIfCancellationRequested();
+                    try
+                    {
+                        api = new SunshinePinnedApi(); session = new SunshineSetupSession(api);
+                        SunshineApiReply probe = await session.ProbeAsync(startup.Token);
+                        SunshineSetupPolicy.Require(probe.Status == 401 || SunshineSetupPolicy.IsWelcome(probe));
+                        status.Text = SunshineSetupPolicy.IsWelcome(probe) ? "Sunshine 계정을 처음 만듭니다. 기억할 사용자 이름과 긴 비밀번호를 입력하세요." : "기존 Sunshine 계정으로 로그인하세요. 기존 비밀번호를 바꾸지 않습니다.";
+                        prepare.Enabled = true; return;
+                    }
+                    catch (IOException)
+                    {
+                        if (api != null) api.Dispose(); api = null; session = null;
+                        await Task.Delay(500, startup.Token);
+                    }
+                }
+            }
+            catch (OperationCanceledException) { lifetime.Token.ThrowIfCancellationRequested(); }
+        }
+        throw new SunshineSetupFailure("Sunshine이 아직 시작되지 않았습니다. 잠시 뒤 빠른 설정을 다시 여세요. 다른 경로나 포트를 쓰는 설치는 고급 설정으로 확인하세요.");
+    }
+    private async Task WorkAsync(Func<Task> action)
+    {
+        if (busy || closing) return; busy = true;
+        prepare.Enabled = false; refresh.Enabled = false; pair.Enabled = false;
+        username.Enabled = false; password.Enabled = false; pending.Enabled = false; pin.Enabled = false;
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (SunshineSetupFailure error) { HadFailure = true; if (!closing) status.Text = error.Message; }
+        catch (Exception) { HadFailure = true; if (!closing) status.Text = SunshineSetupPolicy.Manual; }
+        finally {
+            busy = false;
+            if (!closing) {
+                username.Enabled = session == null || !session.Configured; password.Enabled = username.Enabled;
+                pending.Enabled = true; pin.Enabled = true;
+                if (session != null) { prepare.Enabled = !session.Configured; refresh.Enabled = session.Configured; pair.Enabled = session.Configured; }
+            }
+        }
+    }
+    protected override void Dispose(bool disposing)
+    { if (disposing) { lifetime.Cancel(); if (session != null) session.Clear(); if (api != null) api.Dispose(); lifetime.Dispose(); } base.Dispose(disposing); }
+}
+internal static class SunshineQuickSetup
+{
+    internal static int Run()
+    { using (var form = new SunshineQuickSetupForm()) { Application.Run(form); return form.Completed ? 0 : (form.HadFailure ? 2 : 1602); } }
+}
+#endif

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import AppKit
-import CoreImage
-import CoreImage.CIFilterBuiltins
 import DeskBridgeCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -129,25 +127,5 @@ struct MacHostPage: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try data.write(to: url, options: .withoutOverwriting) }
         catch { host.errorMessage = "연결 파일을 저장하지 못했습니다. 다른 이름이나 폴더를 선택하세요." }
-    }
-}
-
-enum MacHostQR {
-    static func image(_ invitation: ConnectionInvitation) -> NSImage? {
-        guard let image = code(invitation) else { return nil }
-        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-    }
-    static func png(_ invitation: ConnectionInvitation) -> Data? {
-        guard let image = code(invitation) else { return nil }
-        return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
-    }
-    private static func code(_ invitation: ConnectionInvitation) -> CGImage? {
-        let filter = CIFilter.qrCodeGenerator(); filter.message = Data(invitation.url.absoluteString.utf8)
-        filter.correctionLevel = "M"
-        guard let raw = filter.outputImage else { return nil }
-        let bounds = CGRect(x: 0, y: 0, width: raw.extent.width + 8, height: raw.extent.height + 8)
-        let white = CIImage(color: CIColor.white).cropped(to: bounds)
-        let image = raw.transformed(by: .init(translationX: 4, y: 4)).composited(over: white).transformed(by: .init(scaleX: 8, y: 8))
-        return CIContext().createCGImage(image, from: image.extent)
     }
 }

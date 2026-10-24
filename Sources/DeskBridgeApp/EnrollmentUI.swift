@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import AppKit
-import CoreImage.CIFilterBuiltins
 import DeskBridgeCore
 import Foundation
 
@@ -113,18 +112,5 @@ extension FilesModel {
         guard enrollmentGeneration == epoch else { return }
         guard answer == .alertSecondButtonReturn else { status = "SSH 지문 등록을 취소했습니다. 파일 연결은 시작하지 않았습니다."; return }
         try applyEnrollmentConfirmation(preview, epoch: epoch, identity: identity, addresses: addresses, publicKey: publicKey)
-    }
-}
-
-enum EnrollmentQR {
-    static func image(_ text: String) -> NSImage? {
-        guard (try? EnrollmentProtocol.Link(text)) != nil else { return nil }
-        let filter = CIFilter.qrCodeGenerator(); filter.message = Data(text.utf8); filter.correctionLevel = "M"
-        guard let raw = filter.outputImage else { return nil }
-        let bounds = CGRect(x: 0, y: 0, width: raw.extent.width + 8, height: raw.extent.height + 8)
-        let white = CIImage(color: .white).cropped(to: bounds)
-        let composed = raw.transformed(by: .init(translationX: 4, y: 4)).composited(over: white).transformed(by: .init(scaleX: 4, y: 4))
-        guard let result = CIContext().createCGImage(composed, from: composed.extent) else { return nil }
-        return NSImage(cgImage: result, size: NSSize(width: result.width, height: result.height))
     }
 }
