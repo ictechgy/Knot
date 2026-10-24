@@ -68,6 +68,7 @@ def compile_module(name, folder, package):
     run("compile-" + name, argv); stamp.write_text(digest)
 run("verify-vendor", ["/usr/bin/python3", str(ROOT / "scripts/verify_vendor.py")])
 if not args.skip_checks:
+    run("connection-qr-checks", [sys.executable, str(ROOT / "scripts/tests/test_connection_qr.py")])
     run("enrollment-protocol-checks", [sys.executable, str(ROOT / "scripts/tests/test_enrollment.py")])
     run("update-policy-checks", [sys.executable, str(ROOT / "scripts/tests/test_update_policy.py")])
     run("build-contract-checks", [sys.executable, str(ROOT / "scripts/tests/test_build_snapshot.py")])

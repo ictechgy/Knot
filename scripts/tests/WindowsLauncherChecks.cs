@@ -197,6 +197,13 @@ internal static class Checks
         Expect(broker.Invoke(null, new object[] { Array.Empty<string>() }) == null, "Ordinary launch must remain non-elevated GUI mode");
         var requestJson = "{\"kind\":\"deskbridge.mac-setup\",\"version\":1,\"requestID\":\"11111111-1111-4111-8111-111111111111\",\"clientPublicKey\":\"synthetic public key\",\"allowedClientAddresses\":[\"192.168.1.10\"]}";
         var encodedRequest = Convert.ToBase64String(Encoding.UTF8.GetBytes(requestJson));
+        var quickSetup = broker.Invoke(null, new object[] { new[] { "--elevated-operation", "QuickSetupSunshine" } })!;
+        Expect(Field(quickSetup, "Operation") as string == "QuickSetupSunshine", "Fixed native setup must parse");
+        RejectBroker(broker, new[] { "--elevated-operation", "QuickSetupSunshine", "--url", "https://example.invalid" });
+        RejectBroker(broker, new[] { "--elevated-operation", "QuickSetupSunshine", "--silent" });
+        var combinedInstall = broker.Invoke(null, new object[] { new[] { "--elevated-operation", "InstallSunshineAndSetup", "--msi-path", @"C:\fixture.msi" } })!;
+        Expect(Field(combinedInstall, "MsiPath") as string == @"C:\fixture.msi", "Combined install retains bounded data path only");
+        RejectBroker(broker, new[] { "--elevated-operation", "InstallSunshineAndSetup", "--msi-path", @"C:\fixture.msi", "--silent" });
         var exportArgs = new[] { "--elevated-operation", "Export", "--request-base64", encodedRequest, "--windows-address", "192.168.1.20" };
         var export = broker.Invoke(null, new object[] { exportArgs })!;
         string? Field(object value, string name) => (string?)value.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(value);

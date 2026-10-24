@@ -206,7 +206,8 @@ internal static class Launcher
     {
         if (request.Operation == "InstallVirtualDisplay" || request.Operation == "RemoveVirtualDisplay")
             return RunHeadlessOperation(request, directory, written);
-        if (request.Operation == "InstallSunshine")
+        if (request.Operation == "QuickSetupSunshine") return SunshineQuickSetup.Run();
+        if (request.Operation == "InstallSunshine" || request.Operation == "InstallSunshineAndSetup")
         {
             SunshinePin pin = ParseSunshinePin(File.ReadAllText(Path.Combine(directory, "SunshineDependency.json")));
             if (new DriveInfo(Path.GetPathRoot(request.MsiPath)).DriveType == DriveType.Network)
@@ -226,10 +227,11 @@ internal static class Launcher
             {
                 if (verified.Length != pin.Bytes) throw new InvalidDataException("Sunshine 설치 파일 크기가 다릅니다.");
                 VerifyHash(verified, pin.Sha256);
-                var install = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "msiexec.exe"), "/i " + Quote(msi));
+                var install = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "msiexec.exe"), "/i " + Quote(msi) + (request.Operation == "InstallSunshineAndSetup" ? " /passive /norestart" : ""));
                 install.UseShellExecute = false;
                 install.WorkingDirectory = directory;
-                return InterpretSunshineInstallerResult(RunAndWait(install));
+                int result = InterpretSunshineInstallerResult(RunAndWait(install));
+                return result == 0 && request.Operation == "InstallSunshineAndSetup" ? SunshineQuickSetup.Run() : result;
             }
         }
         if (request.Operation != "EnableFiles" && request.Operation != "Export" && request.Operation != "DisableFiles")
@@ -396,7 +398,12 @@ internal static class Launcher
             request.Silent = args.Length == 3;
             return request;
         }
-        if (request.Operation == "InstallSunshine")
+        if (request.Operation == "QuickSetupSunshine")
+        {
+            if (args.Length != 2) throw new InvalidDataException("올바르지 않은 빠른 설정 요청입니다.");
+            return request;
+        }
+        if (request.Operation == "InstallSunshine" || request.Operation == "InstallSunshineAndSetup")
         {
             if (args.Length != 4 || args[2] != "--msi-path") throw new InvalidDataException("올바르지 않은 설치 요청입니다.");
             ValidateMsiPath(args[3]); request.MsiPath = args[3]; return request;
@@ -510,7 +517,7 @@ internal static class Launcher
         return sid == "S-1-5-18" || sid == "S-1-5-32-544" || sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
     }
 
-    private static void AssertProtectedAncestors(string path)
+    internal static void AssertProtectedAncestors(string path)
     {
         AssertOrdinaryAncestors(path);
         var unsafeRights = FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership | (FileSystemRights)0x50000000;

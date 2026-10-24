@@ -51,11 +51,15 @@ function Add-Button([string] $Text,[scriptblock] $Action) {
 }
 $title = Add-Text 'Windows를 Mac의 한 화면으로' 38
 $title.Font = New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold)
-$null = Add-Text '이 Windows에서 Sunshine 설치 → 초기 설정 → Mac의 PIN 승인 순서로 진행하세요.' 32
+$null = Add-Text '연결 준비를 누르면 필요한 설치와 보안 설정을 한 창에서 진행합니다.' 32
+$script:quickInstall=$false
+$quick=Add-Button '연결 준비 · 자동 설정' { Invoke-QuickSetup }
+$quick.AccessibleDescription='필요한 Sunshine 설치 후 관리자 로그인, 필수 암호화 설정과 Mac PIN 승인을 한 창에서 진행합니다.'
+$null = Add-Text '처음 한 번 Windows 관리자 승인과 Sunshine 계정 입력이 필요합니다. Mac의 PIN을 승인한 뒤에는 저장된 연결을 사용하세요. 보안 설정을 처음 적용하거나 다시 적용할 때 Sunshine이 재시작될 수 있습니다.' 64
 $status=New-Object Windows.Forms.TextBox
 $status.AccessibleName='Windows 연결 설정 상태'; $status.AccessibleDescription='진행 상황과 다음 단계 안내입니다. 내용을 선택해 복사할 수 있습니다.'
 $status.ReadOnly=$true; $status.Multiline=$true; $status.ScrollBars='Vertical'; $status.BorderStyle='None'; $status.BackColor=[Drawing.SystemColors]::Control
-$status.Text='Sunshine이 없다면 1단계에서 설치하세요. 이미 설치했다면 2단계의 설정 상태 새로고침을 누르세요.'
+$status.Text='「연결 준비 · 자동 설정」으로 시작하세요. 기존 인증서와 PIN 페어링은 유지합니다.'
 $status.Dock='Fill'
 $status.Margin=New-Object Windows.Forms.Padding(20,8,20,8)
 $layout.Controls.Add($status,0,1)
@@ -89,7 +93,7 @@ function Set-Busy([bool] $Busy) {
     $form.UseWaitCursor=$effectiveBusy
 }
 function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('Status','Settings','PIN','Encryption')][string] $Open='Status') {
-    Set-Busy $true; $probe=$null
+    Set-Busy $true; $probe=$null; $script:quickSetupPortResponded=$null
     try {
         $script:cancelLocalCheck=$false; $localCheckCancel.Visible=$true; $localCheckCancel.Enabled=$true
         $status.Text='이 Windows의 로컬 설정 포트 응답을 확인하는 중…'; [Windows.Forms.Application]::DoEvents()
@@ -100,6 +104,7 @@ function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('St
             Start-Sleep -Milliseconds 50
         }
         $responded=$probe.Completion.GetAwaiter().GetResult()
+        $script:quickSetupPortResponded=[bool]$responded
         $localPortStatus.Text=Get-SunshineLocalPortText $responded
         $status.Text=$localPortStatus.Text
         if ($responded -and $Open -cne 'Status') {
@@ -136,9 +141,67 @@ function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('St
         } finally { Set-Busy $false }
     }
 }
+function Invoke-QuickSetup {
+    if ([string]::IsNullOrWhiteSpace($LauncherPath)) {
+        $status.Text='간편 연결은 설치된 Knot EXE에서 사용할 수 있습니다. 소스 폴더에서는 고급·수동 설정을 사용하세요.'
+        $advancedPanel.Visible=$true; return
+    }
+    Set-Busy $true
+    try {
+        # A file-presence hint only selects the path. The protected native helper
+        # independently validates the installation and pins the local TLS API.
+        $installed=Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Sunshine\sunshine.exe') -PathType Leaf
+        if (-not $installed) {
+            # A custom or inaccessible deployment must not be overwritten by a
+            # convenient installer. Inspect only the fixed service's existence.
+            try {
+                $existing=@(Get-Service -Name 'SunshineService' -ErrorAction Stop)
+            } catch {
+                if ($_.CategoryInfo.Category -ne [Management.Automation.ErrorCategory]::ObjectNotFound) { throw }
+                $existing=@()
+            }
+            if ($existing.Count -gt 0) {
+                $status.Text='기존 Sunshine 서비스가 있습니다. 표준 설치 위치를 확인하지 못해 다시 설치하지 않습니다. 고급·수동 설정을 사용하세요.'
+                $advancedPanel.Visible=$true; return
+            }
+            Invoke-SunshineLocalCheck -WaitMilliseconds 1000
+            if ($script:quickSetupPortResponded -ne $false -or $null -eq $script:quickSetupPortResponded) {
+                $status.Text='기존 또는 확인되지 않은 로컬 서비스가 있어 자동 설치를 중단했습니다. 고급·수동 설정을 확인하세요.'
+                $advancedPanel.Visible=$true; return
+            }
+            $script:quickInstall=$true
+            & $script:installAction
+            return
+        }
+        $status.Text='Windows 관리자 확인 후 Knot 간편 연결 창을 여는 중…'
+        $process=Start-Process -FilePath $LauncherPath -Verb RunAs -ArgumentList '--elevated-operation QuickSetupSunshine' -PassThru
+        $null=$process.Handle
+        while (-not $process.HasExited) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+        $process.WaitForExit()
+        if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
+        if ($process.ExitCode -eq 0) {
+            $status.Text='간편 연결 창을 닫았습니다. 새로 페어링하려면 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 저장된 보안 설정이 맞으면 다시 시작하지 않고 PIN을 승인합니다. 화면 연결 성공 여부는 Mac에서 확인하세요.'
+        } elseif ($process.ExitCode -eq 1602) {
+            $status.Text='간편 연결 창을 닫았습니다. 완료된 설치·설정과 기존 페어링은 유지됩니다. 필요할 때 다시 누르세요.'
+        } else {
+            $status.Text='간편 연결을 완료하지 못했습니다. 관리자 창의 안내를 확인하거나 고급·수동 설정을 사용하세요. 기존 인증서는 유지됩니다.'
+        }
+    } catch { Show-Failure $_ }
+    finally { $script:quickInstall=$false; Set-Busy $false }
+}
+$advancedToggle=Add-Button '＋ 고급·수동 설정' {}
+$advancedPanel=New-Object Windows.Forms.FlowLayoutPanel
+$advancedPanel.FlowDirection='TopDown'; $advancedPanel.WrapContents=$false; $advancedPanel.AutoSize=$true
+$advancedPanel.AutoSizeMode='GrowAndShrink'; $advancedPanel.Width=710; $advancedPanel.Visible=$false
+$flow.Controls.Add($advancedPanel)
+$advancedToggle.Add_Click({
+    $advancedPanel.Visible=-not $advancedPanel.Visible
+    $advancedToggle.Text=if ($advancedPanel.Visible) {'－ 고급·수동 설정 접기'} else {'＋ 고급·수동 설정'}
+})
+$script:section=$advancedPanel
 $null = Add-Text '1   화면 연결 프로그램 설치' 30
 $null = Add-Text 'Sunshine이 Windows 화면을 Mac으로 전달합니다. 이미 설치했다면 다음 단계로 가세요.' 36
-$install = Add-Button 'Sunshine 설치' {
+$script:installAction={
     Set-Busy $true; $folder=$null; $download=$null; $verifiedDownload=$null
     try {
         $dep=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'SunshineDependency.json') -Raw | ConvertFrom-Json
@@ -163,11 +226,12 @@ $install = Add-Button 'Sunshine 설치' {
         try { $digest=[BitConverter]::ToString($sha.ComputeHash($verifiedDownload)).Replace('-','').ToLowerInvariant() }
         finally { $sha.Dispose() }
         if ($verifiedDownload.Length -ne $dep.bytes -or $digest -cne $dep.sha256) { throw 'Sunshine 설치 파일 검증에 실패했습니다. 실행하지 않았습니다. 새로 다운로드해 다시 시도하세요.' }
-        $status.Text='공식 Sunshine 설치 안내를 완료하세요. 유료 게임패드 드라이버는 업무용 연결에 필요하지 않습니다.'
+        $status.Text=if ($script:quickInstall) {'관리자 확인 후 Sunshine을 설치하고 간편 연결 창을 엽니다. 설치 중 Windows가 자동 재시작되지는 않습니다.'} else {'공식 Sunshine 설치 안내를 완료하세요. 게임패드 드라이버는 업무용 연결에 필요하지 않습니다.'}
         if ($LauncherPath) {
             # The native elevated broker makes and verifies its own protected copy against its embedded pin.
             $installExecutable=$LauncherPath
-            $installArguments='--elevated-operation InstallSunshine --msi-path "' + $file + '"'
+            $installOperation=if ($script:quickInstall) {'InstallSunshineAndSetup'} else {'InstallSunshine'}
+            $installArguments='--elevated-operation ' + $installOperation + ' --msi-path "' + $file + '"'
         } else {
             # Explicit raw developer-folder workflow: the held read handle excludes writes/deletes until exit.
             $installExecutable=Join-Path $env:WINDIR 'System32\msiexec.exe'
@@ -178,6 +242,10 @@ $install = Add-Button 'Sunshine 설치' {
         while (-not $process.HasExited) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
         $process.WaitForExit()
         if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
+        if ($script:quickInstall -and $process.ExitCode -in @(0,1602,2)) {
+            $status.Text=if ($process.ExitCode -eq 0) {'설치와 계정 확인을 마쳤습니다. PIN 승인에는 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 화면 전송 성공은 Mac에서 확인하세요.'} elseif ($process.ExitCode -eq 1602) {'간편 연결을 취소했습니다. 이미 완료된 설치·설정은 유지됩니다. 연결 준비로 다시 시작하세요.'} else {'간편 연결을 완료하지 못했습니다. 표시된 안내나 고급·수동 설정을 확인하세요. 이미 완료된 단계와 기존 인증서는 유지됩니다.'}
+            return
+        }
         $result=Get-SunshineInstallResult -ExitCode $process.ExitCode -Broker:([bool]$LauncherPath)
         if ($result.State -ceq 'Failed') { throw $result.Text }
         $status.Text=$result.Text
@@ -204,7 +272,9 @@ $install = Add-Button 'Sunshine 설치' {
         } finally { Set-Busy $false }
     }
 }
+$install=Add-Button 'Sunshine 설치 · 수동' $script:installAction
 $downloadCancel=Add-Button '다운로드 취소' { $script:cancelDownload=$true }; $downloadCancel.Visible=$false
+$advancedPanel.Controls.Remove($downloadCancel); $flow.Controls.Add($downloadCancel)
 $null = Add-Text '2   이 Windows에서 Sunshine 초기 설정 · 처음 한 번' 30
 $null = Add-Text "Sunshine은 별도 창 없이 백그라운드에서 실행됩니다. 아래 버튼으로 이 Windows의 브라우저를 여세요. 초기 계정을 만들고 로그인합니다. 이 계정은 Sunshine 설정용이며 Mac에서 로그인하지 않습니다.`r`n영상 암호화 설정 열기 → LAN Encryption Mode / WAN Encryption Mode를 둘 다 Required for all clients로 선택하세요. 한국어: LAN/WAN 암호화 모드 → 모든 사용자에게 필수. Save → Apply/재시작까지 완료하세요. Wi-Fi와 Tailscale도 LAN으로 분류될 수 있어 LAN 설정이 필요합니다. Desktop 앱도 확인하세요." 118
 $localPortStatus=Add-Text '로컬 설정 포트: 아직 확인하지 않았습니다. 포트 응답은 Sunshine 로그인이나 화면 연결 성공을 의미하지 않습니다.' 46
@@ -227,6 +297,8 @@ $null = Add-Text '3   Mac에서 PIN 만들기 → 이 Windows에서 승인' 30
 $null = Add-Text 'Mac의 Windows 화면에서 근처 PC 선택 → 「PIN으로 연결」을 누르세요. Mac에 표시된 PIN을 아래 버튼으로 연 이 Windows의 Sunshine 페이지에 입력합니다. Windows에서 PIN 승인을 마친 뒤 Mac에서 「Windows 열기」를 누르세요.' 65
 $pin=Add-Button '이 Windows에서 PIN 입력 화면 열기' { Invoke-SunshineLocalCheck -Open PIN }
 $null = Add-Text 'Sunshine 로그인이 먼저 나오면 2단계에서 만든 계정으로 로그인한 뒤 PIN 메뉴를 여세요. 설정을 바꾼 뒤에도 기존 PIN 페어링은 지우지 마세요. PC가 목록에 없으면 아래 QR / 링크를 사용하세요.' 55
+$script:section=$flow
+$null = Add-Text '먼저 이 Windows의 「연결 준비」를 마치고 그 창을 열어 두세요. 이어서 Mac에서 근처 PC → PC 확인 → PIN으로 연결을 누르고, Windows 창에서 Mac의 요청과 PIN을 승인합니다. 검색되지 않으면 QR / 링크를 사용하세요.' 68
 $qrButton = Add-Button '연결 QR / 링크 보기…' {
     Set-Busy $true
     try {
@@ -242,7 +314,10 @@ $qrButton = Add-Button '연결 QR / 링크 보기…' {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'DeskBridge-QR.dll') -PathType Leaf)) { $qrButton.Text='연결 링크 보기…' }
 $null = Add-Text '연결 QR과 링크에는 주소만 들어 있습니다. PIN 승인은 별도로 필요합니다. Wi-Fi 또는 Tailscale 양쪽에서 도달 가능한 주소를 선택하세요.' 48
+$qrAddressHint=Add-Text (Get-QRAddressHintText '' 0) 48
+$qrAddressHint.AccessibleName='QR에 포함되는 연결 주소'
 $addresses=New-Object Windows.Forms.ComboBox; $addresses.AccessibleName='이 PC의 연결 주소'; $addresses.AccessibleDescription='Mac에서 도달할 수 있는 Wi-Fi 또는 Tailscale 주소를 선택하세요.'; $addresses.DropDownStyle='DropDownList'; $addresses.Width=710
+$addresses.Add_SelectedIndexChanged({ $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count })
 function Update-WindowsAddresses {
     $previous=[string]$addresses.SelectedItem
     $addresses.Items.Clear()
@@ -255,9 +330,10 @@ function Update-WindowsAddresses {
     }
     if ($addresses.Items.Contains($previous)) { $addresses.SelectedItem=$previous }
     elseif ($addresses.Items.Count -gt 0) { $addresses.SelectedIndex=0 }
+    $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count
 }
-$flow.Controls.Add($addresses)
-Update-WindowsAddresses
+$advancedPanel.Controls.Add($addresses)
+$script:section=$advancedPanel
 $copy = Add-Button '선택한 Windows 주소 복사' {
     if ($addresses.SelectedItem) {
         try { [Windows.Forms.Clipboard]::SetText([string]$addresses.SelectedItem); $status.Text='주소를 복사했습니다. Mac의 원격 화면 탭에 입력하세요.' }
@@ -265,6 +341,7 @@ $copy = Add-Button '선택한 Windows 주소 복사' {
     } else { $status.Text='연결 가능한 주소가 없습니다. Wi-Fi 또는 Tailscale에 연결한 뒤 주소를 새로고침하세요.' }
 }
 $refresh = Add-Button '주소 새로고침' { try { Update-WindowsAddresses } catch { Show-Failure $_ } }
+$script:section=$flow
 $filesToggle = Add-Button '＋ 파일 전송도 설정하기 (선택)' {}
 $filePanel=New-Object Windows.Forms.FlowLayoutPanel
 $filePanel.FlowDirection='TopDown'; $filePanel.WrapContents=$false; $filePanel.AutoSize=$true
@@ -440,6 +517,7 @@ function Resize-SetupContent {
     $flow.SuspendLayout(); $filePanel.SuspendLayout()
     try {
         if ($filePanel.Width -ne $available) { $filePanel.Width=$available }
+        if ($advancedPanel.Width -ne $available) { $advancedPanel.Width=$available }
         foreach ($control in (Get-SetupControls $flow)) {
             if ($control -is [Windows.Forms.Label]) {
                 if ($control.MaximumSize.Width -ne $available) { $control.MaximumSize=New-Object Drawing.Size($available,0) }
@@ -459,7 +537,8 @@ $form.Add_Shown({
     $form.Size=New-Object Drawing.Size([Math]::Min($form.Width,$area.Width),[Math]::Min($form.Height,$area.Height))
     $form.Location=New-Object Drawing.Point(($area.Left+($area.Width-$form.Width)/2),($area.Top+($area.Height-$form.Height)/2))
     Resize-SetupContent
-    Invoke-SunshineLocalCheck -WaitMilliseconds 1500
+    Update-WindowsAddresses
+    # Checks begin on explicit action; showing the window never probes the service.
 })
 $form.Add_FormClosing({param($sender,$eventArgs) if ($form.UseWaitCursor) {$eventArgs.Cancel=$true}})
 [void]$form.ShowDialog()

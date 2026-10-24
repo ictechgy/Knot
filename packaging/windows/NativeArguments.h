@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <wchar.h>
 
-typedef enum { DB_INVALID = -1, DB_NORMAL = 0, DB_ENABLE, DB_EXPORT, DB_DISABLE, DB_INSTALL, DB_INSTALL_DISPLAY, DB_REMOVE_DISPLAY } db_operation;
+typedef enum { DB_INVALID = -1, DB_NORMAL = 0, DB_ENABLE, DB_EXPORT, DB_DISABLE, DB_INSTALL, DB_INSTALL_DISPLAY, DB_REMOVE_DISPLAY, DB_QUICK_SETUP } db_operation;
 static size_t db_length(const wchar_t *s) { size_t n=0; if (s) while (s[n]) ++n; return n; }
 static int db_equal(const wchar_t *a,const wchar_t *b) { return a && b && wcscmp(a,b)==0; }
 static int db_digit(wchar_t c) { return c>=L'0' && c<=L'9'; }
@@ -97,7 +97,8 @@ static db_operation db_dispatch(int argc,const wchar_t *const *argv) {
     if (argc==0) return DB_NORMAL;
     if (!argv || argc<2 || !db_equal(argv[0],L"--elevated-operation")) return DB_INVALID;
     if (db_equal(argv[1],L"DisableFiles")) return argc==2 || db_silent_disable(argc,argv)?DB_DISABLE:DB_INVALID;
-    if (db_equal(argv[1],L"InstallSunshine")) return argc==4 && db_equal(argv[2],L"--msi-path") && db_local_file(argv[3],L".msi")?DB_INSTALL:DB_INVALID;
+    if (db_equal(argv[1],L"QuickSetupSunshine")) return argc==2?DB_QUICK_SETUP:DB_INVALID;
+    if (db_equal(argv[1],L"InstallSunshine") || db_equal(argv[1],L"InstallSunshineAndSetup")) return argc==4 && db_equal(argv[2],L"--msi-path") && db_local_file(argv[3],L".msi")?DB_INSTALL:DB_INVALID;
     if (db_equal(argv[1],L"InstallVirtualDisplay")) return argc==4 && db_equal(argv[2],L"--zip-path") && db_local_file(argv[3],L".zip")?DB_INSTALL_DISPLAY:DB_INVALID;
     if (db_equal(argv[1],L"RemoveVirtualDisplay")) return argc==2?DB_REMOVE_DISPLAY:DB_INVALID;
     enable=db_equal(argv[1],L"EnableFiles");

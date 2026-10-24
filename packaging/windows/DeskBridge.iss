@@ -1,6 +1,6 @@
 ﻿; SPDX-License-Identifier: GPL-3.0-only
 #ifndef AppVersion
-  #define AppVersion "0.2.0-preview.18"
+  #define AppVersion "0.2.0-preview.19"
 #endif
 [Setup]
 AppId={{7BB82A17-E531-4D04-A1FA-E8912E9E8E99}

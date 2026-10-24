@@ -18,7 +18,7 @@ English · [한국어](README.ko.md)
 
 The app UI and most setup guides are currently in Korean.
 
-The source tree is **0.2.0-preview.18**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
+The source tree is **0.2.0-preview.19**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
 
 ## Supported connections
 
@@ -64,6 +64,8 @@ The release includes [SHA256SUMS](https://github.com/ictechgy/Knot/releases/down
 Follow the steps below to connect. **Screen access does not require SSH setup.**
 
 ### Open Windows from Mac
+
+**New source-build Windows setup:** choose **연결 준비 · 자동 설정** (prepare connection). It chains the pinned Sunshine installation when needed with a native account/security/PIN dialog, so you do not have to find encryption settings in a browser. Finish Windows preparation and keep its dialog open before starting Mac pairing. Initial UAC and account entry, then selecting the Mac request and entering its PIN, remain explicit. Matching saved security settings permit PIN approval without a restart; explicit security reapply restarts the host and requires a new Mac PIN. Existing pairing is retained; unsupported versions/layouts use **고급·수동 설정** (advanced/manual setup). This flow is not in the published preview.16 packages.
 
 1. Install the Windows setup EXE, open **Knot 설정** from the Start menu and choose **이 Windows 공유** (share this Windows PC). Follow the Sunshine installation steps.
 2. In a **Windows browser**, open `https://localhost:47990` and create the Sunshine administrator account. Open **Configuration → Network** and set both LAN and WAN encryption modes to **Required for all clients** (**모든 사용자에게 필수** in Korean), then **Save → Apply**. Check that a Desktop app is available.

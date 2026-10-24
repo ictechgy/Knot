@@ -201,7 +201,8 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
             "-r:" + str(decoder),
             "-resource:" + str(decoder) + "," + decoder_record['resourceName'],
             *["-resource:" + str(path) + ",DeskBridge.Payload." + name for name, path in entries],
-            str(ROOT / "packaging/windows/Launcher.cs"), str(ROOT / "packaging/windows/RoleChooser.cs"), str(generated),
+            str(ROOT / "packaging/windows/Launcher.cs"), str(ROOT / "packaging/windows/RoleChooser.cs"),
+            str(ROOT / "host/windows/SunshineQuickSetup.cs"), str(generated),
             str(engine_pin), str(qr_loader), str(update['configurationSource']),
             str(ROOT / 'packaging/windows/KnotUpdateHandoff.cs'), *map(str, client_sources(ROOT)),
         ]

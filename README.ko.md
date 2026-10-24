@@ -16,7 +16,7 @@ Mac에서 Windows 화면을 전체 화면 Space로 열고, Windows에서 Mac을 
 
 [설치 안내](INSTALLATION.md) · [보안 범위](SECURITY.md) · [빌드·패키징](docs/RELEASING.md) · [검증 항목](docs/VALIDATION.md)
 
-현재 소스는 **0.2.0-preview.18**입니다. 아래의 공개 preview.16 설치 파일에는 새 첫 설정·고화질·업데이트 기능이 포함되지 않습니다. 배포용 키·피드·플랫폼 서명을 구성하기 전에는 자동 업데이트를 사용할 수 없습니다. [업데이트 구성과 제한](docs/UPDATES.md)을 확인하세요.
+현재 소스는 **0.2.0-preview.19**입니다. 아래의 공개 preview.16 설치 파일에는 새 첫 설정·고화질·업데이트 기능이 포함되지 않습니다. 배포용 키·피드·플랫폼 서명을 구성하기 전에는 자동 업데이트를 사용할 수 없습니다. [업데이트 구성과 제한](docs/UPDATES.md)을 확인하세요.
 
 ## 지원하는 연결
 
@@ -62,6 +62,8 @@ Mac은 DMG를 열고 **Knot.app**을 **Applications**로 옮깁니다. Windows�
 다음 순서로 연결합니다. **화면 연결에는 SSH 설정이 필요 없습니다.**
 
 ### Mac에서 Windows 열기
+
+**최신 소스 빌드의 Windows 간편 연결:** **연결 준비 · 자동 설정** 하나로 필요한 Sunshine 설치와 계정·보안·PIN 설정 창을 엽니다. 브라우저에서 암호화 설정을 찾을 필요 없이 진행합니다. Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PIN 연결을 시작하세요. 최초 UAC·계정 입력과 Mac 요청 선택·PIN 승인은 직접 확인하며, 기존 페어링은 유지합니다. 저장된 보안 설정이 맞으면 재시작 없이 PIN을 승인하고, 보안 설정을 다시 적용하면 새 Mac PIN이 필요합니다. 지원하지 않는 버전·설치 위치는 **고급·수동 설정**을 사용하세요. 아래 공개 preview.16 패키지에는 이 흐름이 포함되어 있지 않습니다.
 
 1. Windows 설치 EXE로 설치하고 시작 메뉴의 **Knot 설정**을 열어 **이 Windows 공유**를 선택합니다. 안내에 따라 Sunshine을 설치합니다.
 2. **Windows 브라우저**에서 `https://localhost:47990`을 열어 Sunshine 관리자 계정을 만듭니다. **Configuration → Network**의 LAN/WAN 암호화 모드를 모두 **모든 사용자에게 필수**(Required for all clients)로 선택하고 **Save → Apply**를 누른 뒤 Desktop 앱이 있는지 확인합니다.

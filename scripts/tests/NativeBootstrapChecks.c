@@ -26,7 +26,7 @@ static int result_cli(int argc,char **argv) {
 static void completion_matrix(void) {
     struct operation_case { db_operation operation; int headless; } operations[]={
         {DB_INVALID,0},{DB_NORMAL,0},{DB_ENABLE,0},{DB_EXPORT,0},{DB_DISABLE,0},{DB_INSTALL,0},
-        {DB_INSTALL_DISPLAY,1},{DB_REMOVE_DISPLAY,1},{(db_operation)-2,0},{(db_operation)7,0}
+        {DB_INSTALL_DISPLAY,1},{DB_REMOVE_DISPLAY,1},{DB_QUICK_SETUP,0},{(db_operation)-2,0},{(db_operation)(DB_QUICK_SETUP+1),0}
     };
     /* Explicit expected outcomes for every result class and integer boundary.
      * Silent calls always use the unacknowledged result, even if a caller passes
@@ -103,6 +103,16 @@ int main(int argc,char **argv) {
         expect(db_dispatch(4,disable_invalid)==DB_INVALID && !db_silent_disable(4,disable_invalid),"extra silent revocation arguments accepted");
         expect(db_dispatch(7,export_silent)==DB_INVALID && !db_silent_disable(7,export_silent),"silent must be restricted to revocation");
         expect(db_dispatch(4,install)==DB_INSTALL,"fixed installation rejected");
+        {
+            const wchar_t *quick[]={L"--elevated-operation",L"QuickSetupSunshine",L"--url",L"https://example.invalid"};
+            const wchar_t *combined[]={L"--elevated-operation",L"InstallSunshineAndSetup",L"--msi-path",L"C:\\fixture.msi",L"--silent"};
+            expect(db_dispatch(2,quick)==DB_QUICK_SETUP,"fixed native setup rejected");
+            expect(db_dispatch(3,quick)==DB_INVALID && db_dispatch(4,quick)==DB_INVALID,"native setup accepted caller URL or extra arguments");
+            expect(db_dispatch(4,combined)==DB_INSTALL,"fixed combined installation rejected");
+            expect(db_dispatch(3,combined)==DB_INVALID && db_dispatch(5,combined)==DB_INVALID,"combined install accepted missing/extra arguments");
+            combined[3]=L"\\\\server\\fixture.msi";
+            expect(db_dispatch(4,combined)==DB_INVALID,"combined install accepted network path");
+        }
         expect(db_dispatch(6,export_args)==DB_EXPORT,"fixed export rejected");
         expect(db_dispatch(8,enable)==DB_ENABLE,"fixed enable rejected");
         expect(db_dispatch(2,unknown)==DB_INVALID,"unknown operation accepted");

@@ -23,10 +23,10 @@ struct SetupPage: View {
                                 .foregroundStyle(.secondary)
                             DisclosureGroup("준비 방법 보기", isExpanded: $windowsDetailsExpanded) {
                                 VStack(alignment: .leading, spacing: 12) {
-                                    Text("동봉된 Windows quick-setup EXE를 두 번 클릭하세요. 압축 해제나 PowerShell 명령 입력 없이 Sunshine 설치 → 초기 설정 → Mac 연결 순서로 안내합니다. 파일 설정은 나중에 추가할 수 있어요.")
+                                    Text("동봉된 Windows quick-setup EXE를 두 번 클릭하세요. ‘연결 준비 · 자동 설정’을 누르면 필요한 Sunshine 설치와 계정·보안·PIN 창으로 이어집니다. 파일 설정은 나중에 추가할 수 있어요.")
                                     Link("Sunshine 공식 프로젝트", destination: URL(string: "https://github.com/LizardByte/Sunshine")!)
                                     QuietHelp(text: "Windows 도우미의 ‘모니터 없이 사용’에서 안내를 확인하세요. 가상 화면 자동 설치는 드라이버 보안 검토로 현재 보류 중입니다. 최초 설정에는 모니터나 다른 접속 수단이 필요합니다.", symbol: "display")
-                                    QuietHelp(text: "Windows 브라우저에서 Sunshine의 Configuration → Network를 열고 LAN/WAN 암호화 모드를 모두 ‘모든 사용자에게 필수’(Required for all clients)로 선택한 뒤 Save → Apply를 누르세요.", symbol: "lock")
+                                    QuietHelp(text: "최신 Windows Knot의 간편 연결에서 필수 암호화를 적용하세요. 고급·수동 설정에서는 Sunshine의 LAN/WAN 암호화 모드를 모두 ‘모든 사용자에게 필수’(Required for all clients)로 Save → Apply합니다.", symbol: "lock")
                                     HStack(spacing: 12) {
                                         Button("설정 안내 열기") { openGuide() }
                                     }
@@ -38,7 +38,7 @@ struct SetupPage: View {
 
                     step(number: "2", title: "화면 페어링", subtitle: nil) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("원격 화면에서 근처 PC를 선택하세요. 검색되지 않거나 Tailscale을 쓴다면 Windows 도우미의 QR 이미지·카메라 스캔·연결 링크로 주소를 가져올 수 있어요. 이어서 Windows 브라우저에서 https://localhost:47990/pin 을 열고 Mac에 표시된 PIN을 입력하세요.")
+                            Text("Windows의 간편 연결에서 계정·보안 준비를 먼저 마치고 그 창을 열어 두세요. 이어서 Mac 원격 화면에서 근처 PC를 선택하세요. 검색되지 않거나 Tailscale을 쓴다면 Windows 도우미의 QR 이미지·카메라 스캔·연결 링크로 주소를 가져올 수 있어요. 이어서 Windows Knot의 ‘연결 준비’ 창에서 Mac 요청을 선택하고 표시된 PIN을 승인하세요. 고급·수동 설정은 Windows 브라우저의 https://localhost:47990/pin 입니다.")
                                 .foregroundStyle(.secondary)
                             HStack(spacing: 12) {
                                 Button("PC 찾기 / QR 연결", action: onDesktop)

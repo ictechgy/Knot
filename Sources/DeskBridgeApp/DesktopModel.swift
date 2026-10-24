@@ -55,6 +55,14 @@ final class DesktopModel: ObservableObject {
     let platform: HostPlatform
     var supportsFiles: Bool { platform == .windows }
     var platformName: String { platform.displayName }
+    var pairingTitle: String {
+        platform == .windows ? "Windows Knot 창에서 PIN을 승인하세요" : "\(platformName) 브라우저의 Sunshine PIN 페이지에 입력하세요"
+    }
+    var pairingGuidance: String {
+        platform == .windows
+            ? "Windows Knot의 ‘연결 준비 · 자동 설정’ 창에서 계정 확인을 마친 뒤 요청한 Mac을 선택하고 위 번호를 승인하세요. 보안 설정 적용으로 Sunshine이 재시작됐다면 Mac에서 취소한 뒤 새 PIN을 만드세요. 수동 설정은 Windows 브라우저의 https://localhost:47990/pin 입니다."
+            : "\(platformName)에서 https://localhost:47990/pin 을 열고 위 번호를 입력하세요. Sunshine은 별도 창 없이 백그라운드에서 실행될 수 있습니다."
+    }
     weak var peerDesktop: DesktopModel?
     var enrollmentEngaged: Bool { fileActivity?.enrollmentActive == true || peerDesktop?.fileActivity?.enrollmentActive == true }
     var peerEngaged: Bool { peerDesktop.map { $0.busy || $0.stream.isEngaged || $0.fileActivity?.enrollmentActive == true } ?? false }
@@ -162,7 +170,7 @@ final class DesktopModel: ObservableObject {
         operation = Task { [weak self] in
             do { try self?.assertStorageReady(); try await body() }
             catch is CancellationError { self?.status = "취소했습니다." }
-            catch { self?.errorMessage = Self.failureMessage(error).replacingOccurrences(of: "Windows", with: self?.platformName ?? "PC"); self?.status = "작업을 완료하지 못했습니다." }
+            catch { self?.errorMessage = Self.failureMessage(error, platform: self?.platform ?? .windows).replacingOccurrences(of: "Windows", with: self?.platformName ?? "PC"); self?.status = "작업을 완료하지 못했습니다." }
             guard self?.generation == current else { return }
             self?.pairingPIN = nil; self?.busy = false; self?.operation = nil
         }
@@ -172,7 +180,7 @@ final class DesktopModel: ObservableObject {
         shuttingDown = true
         nearby.stop(); cancelOperation()
     }
-    nonisolated static func failureMessage(_ error: any Error) -> String {
+    nonisolated static func failureMessage(_ error: any Error, platform: HostPlatform = .windows) -> String {
         if let invitation = error as? ConnectionInvitation.Failure {
             return invitation.localizedDescription
         }
@@ -196,9 +204,15 @@ final class DesktopModel: ObservableObject {
             case .invalidAddress: return "Windows의 LAN 또는 Tailscale IPv4 주소를 확인하세요."
             case .unreachable: return "Windows와 Sunshine의 실행 상태와 네트워크 연결을 확인한 뒤 PC 확인을 다시 선택하세요."
             case .gameStream: return "지원되는 Sunshine 호스트를 설치하고 다시 연결하세요."
-            case .timedOut: return "PIN 입력 시간이 지났습니다. Sunshine의 PIN 페이지를 열고 PIN 연결을 다시 시작하세요."
+            case .timedOut:
+                return platform == .windows
+                    ? "PIN 입력 시간이 지났습니다. Mac에서 PIN 연결을 다시 시작한 뒤 Windows Knot의 연결 준비 창에서 '요청 새로고침'을 누르고 요청한 Mac과 새 PIN을 승인하세요."
+                    : "PIN 입력 시간이 지났습니다. \(platform.displayName) 브라우저의 Sunshine PIN 페이지를 열고 PIN 연결을 다시 시작하세요."
             case .busy: return "Sunshine에서 다른 PIN 연결을 진행 중입니다. 해당 작업을 마친 뒤 다시 시도하세요."
-            case .rejected: return "Sunshine에서 PIN 연결을 승인하지 않았습니다. 올바른 PC의 PIN 페이지인지 확인하고 새 PIN으로 다시 시도하세요."
+            case .rejected:
+                return platform == .windows
+                    ? "Sunshine에서 PIN 연결을 승인하지 않았습니다. 올바른 Windows Knot의 연결 준비 창인지 확인하고 Mac에서 새 PIN으로 다시 시도하세요. Windows의 '요청 새로고침'에서 요청한 Mac을 선택해 승인하세요."
+                    : "Sunshine에서 PIN 연결을 승인하지 않았습니다. 올바른 \(platform.displayName) 브라우저의 PIN 페이지인지 확인하고 새 PIN으로 다시 시도하세요."
             }
         }
         switch error as? StreamError {
@@ -336,7 +350,7 @@ final class DesktopModel: ObservableObject {
             try targetBinding.require(input: address, expectedAddress: server.address)
             let pin = String(format: "%04d", Int.random(in: 0...9999))
             pairingPIN = pin
-            status = "\(platformName) 브라우저에서 https://localhost:47990/pin 을 열고 아래 번호를 입력하세요."
+            status = pairingGuidance
             var result = try await PairingClient(network: network, server: server).pair(pin: pin, expectedUniqueId: server.uniqueId)
             try Task.checkCancellation()
             try targetBinding.require(input: address, expectedAddress: server.address)

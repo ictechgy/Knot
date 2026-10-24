@@ -126,6 +126,16 @@ jobs:
       - name: Validate JSON integer compatibility in PowerShell 7
         shell: pwsh
         run: .\host\windows\tests\Test-SetupContract.ps1
+      - name: Validate native quick setup and primary-action flows in Windows PowerShell
+        shell: powershell
+        run: |
+          .\host\windows\tests\Test-SunshineQuickSetup.ps1
+          .\host\windows\tests\Test-QuickSetupFlow.ps1
+      - name: Validate native quick setup and primary-action flows in PowerShell 7
+        shell: pwsh
+        run: |
+          .\host\windows\tests\Test-SunshineQuickSetup.ps1
+          .\host\windows\tests\Test-QuickSetupFlow.ps1
       - name: Validate actual setup failure handler in Windows PowerShell
         shell: powershell
         run: .\host\windows\tests\Test-SetupFailureExit.ps1
