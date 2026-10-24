@@ -101,7 +101,9 @@ func runDesktopRecoveryChecks() throws -> Int {
     for (error, guidance): (StreamError, String) in [
         (.hostUnreachable("synthetic secret"), "Wi-Fi·Tailscale"),
         (.hostCertChanged("synthetic secret"), "인증서는 자동으로 교체하지"),
-        (.crypto("synthetic secret"), "암호화 설정")
+        (.crypto("synthetic secret"), "[S03]"),
+        (.securityNegotiation(.plaintextSignalling), "[S01]"),
+        (.securityNegotiation(.missingEncryption(2)), "Required for all clients")
     ] {
         for code: Int32 in [-1, 0] {
             var ended = DesktopRecoveryPresentation()

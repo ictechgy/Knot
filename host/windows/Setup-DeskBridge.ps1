@@ -8,6 +8,8 @@ Import-Module (Join-Path $PSScriptRoot 'SetupContract.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'ConnectionInvitation.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SetupDownload.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SetupStatus.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'SetupReadiness.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Enrollment.psm1') -Force
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
@@ -49,11 +51,11 @@ function Add-Button([string] $Text,[scriptblock] $Action) {
 }
 $title = Add-Text 'Windows를 Mac의 한 화면으로' 38
 $title.Font = New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold)
-$null = Add-Text '먼저 화면부터 연결하세요. 파일 전송은 나중에 추가할 수 있습니다.' 32
+$null = Add-Text '이 Windows에서 Sunshine 설치 → 초기 설정 → Mac의 PIN 승인 순서로 진행하세요.' 32
 $status=New-Object Windows.Forms.TextBox
 $status.AccessibleName='Windows 연결 설정 상태'; $status.AccessibleDescription='진행 상황과 다음 단계 안내입니다. 내용을 선택해 복사할 수 있습니다.'
 $status.ReadOnly=$true; $status.Multiline=$true; $status.ScrollBars='Vertical'; $status.BorderStyle='None'; $status.BackColor=[Drawing.SystemColors]::Control
-$status.Text='시작하려면 아래 Sunshine 설치를 누르세요.'
+$status.Text='Sunshine이 없다면 1단계에서 설치하세요. 이미 설치했다면 2단계의 설정 상태 새로고침을 누르세요.'
 $status.Dock='Fill'
 $status.Margin=New-Object Windows.Forms.Padding(20,8,20,8)
 $layout.Controls.Add($status,0,1)
@@ -74,11 +76,65 @@ function Show-Failure($ErrorRecord) {
 function Get-SetupControls($Root) {
     foreach ($control in $Root.Controls) { $control; Get-SetupControls $control }
 }
+$script:setupBusyDepth=0
 function Set-Busy([bool] $Busy) {
+    # Installation can run its bounded local check before download cleanup.
+    # Keep the outer operation's controls locked until its own finally exits.
+    if ($Busy) { $script:setupBusyDepth++ }
+    else { $script:setupBusyDepth=[Math]::Max(0,$script:setupBusyDepth-1) }
+    $effectiveBusy=$script:setupBusyDepth -gt 0
     foreach ($control in (Get-SetupControls $flow)) {
-        if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.ComboBox]) { $control.Enabled = -not $Busy }
+        if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.ComboBox]) { $control.Enabled = -not $effectiveBusy }
     }
-    $form.UseWaitCursor=$Busy
+    $form.UseWaitCursor=$effectiveBusy
+}
+function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('Status','Settings','PIN','Encryption')][string] $Open='Status') {
+    Set-Busy $true; $probe=$null
+    try {
+        $script:cancelLocalCheck=$false; $localCheckCancel.Visible=$true; $localCheckCancel.Enabled=$true
+        $status.Text='이 Windows의 로컬 설정 포트 응답을 확인하는 중…'; [Windows.Forms.Application]::DoEvents()
+        $probe=Start-SetupLocalPortProbe -WaitMilliseconds $WaitMilliseconds
+        while (-not $probe.Completion.IsCompleted) {
+            [Windows.Forms.Application]::DoEvents()
+            if ($script:cancelLocalCheck) { $probe.Cancel(); $localCheckCancel.Enabled=$false }
+            Start-Sleep -Milliseconds 50
+        }
+        $responded=$probe.Completion.GetAwaiter().GetResult()
+        $localPortStatus.Text=Get-SunshineLocalPortText $responded
+        $status.Text=$localPortStatus.Text
+        if ($responded -and $Open -cne 'Status') {
+            # Fixed local URLs only. The probe does not authenticate the listener
+            # and never changes TLS validation, Sunshine settings or services.
+            $url=if ($Open -ceq 'PIN') {'https://localhost:47990/pin'} elseif ($Open -ceq 'Encryption') {'https://localhost:47990/config#lan_encryption_mode'} else {'https://localhost:47990/'}
+            try {
+                Start-Process $url
+                $status.Text=if ($Open -ceq 'PIN') {
+                    '이 Windows의 브라우저에서 PIN 입력 화면을 열었습니다. Sunshine에 로그인한 뒤 Mac에 표시된 PIN을 입력하세요. 아직 Mac에서 PIN을 만들지 않았다면 먼저 「PIN으로 연결」을 누르세요.'
+                } elseif ($Open -ceq 'Encryption') {
+                    'LAN Encryption Mode와 WAN Encryption Mode를 둘 다 Required for all clients로 선택하세요. 한국어 화면에서는 LAN/WAN 암호화 모드 → 모든 사용자에게 필수입니다. Save 후 Apply/재시작까지 완료하고 Mac에서 다시 연결하세요. 기존 PIN 페어링은 유지하세요.'
+                } else {
+                    '이 Windows의 브라우저에서 초기 계정을 만들고 로그인하세요. 다음으로 영상 암호화 설정 열기를 눌러 LAN/WAN 암호화 모드를 둘 다 Required for all clients(모든 사용자에게 필수)로 Save하고 Apply/재시작하세요. 이후 3단계에서 Mac의 PIN을 승인합니다.'
+                }
+            } catch {
+                $status.Text='이 Windows의 설정 브라우저를 열지 못했습니다. 이 Windows의 Edge/Chrome 주소창에 ' + $url + ' 을 직접 입력하세요. Mac에서 localhost를 열면 이 Windows에 연결되지 않습니다.'
+            }
+        }
+    } catch [OperationCanceledException] {
+        $localPortStatus.Text=Get-SunshineLocalPortText $false -Cancelled
+        $status.Text=$localPortStatus.Text
+    } catch {
+        $localPortStatus.Text='로컬 설정 포트 확인을 완료하지 못했습니다. 이 Windows의 브라우저에서 https://localhost:47990/ 을 확인하거나 잠시 후 다시 시도하세요.'
+        $status.Text=$localPortStatus.Text
+    } finally {
+        $localCheckCancel.Visible=$false
+        try {
+            if ($probe) {
+                $probe.Cancel()
+                while (-not $probe.Completion.IsCompleted) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+                $probe.Dispose()
+            }
+        } finally { Set-Busy $false }
+    }
 }
 $null = Add-Text '1   화면 연결 프로그램 설치' 30
 $null = Add-Text 'Sunshine이 Windows 화면을 Mac으로 전달합니다. 이미 설치했다면 다음 단계로 가세요.' 36
@@ -127,8 +183,9 @@ $install = Add-Button 'Sunshine 설치' {
         $status.Text=$result.Text
         if ($result.State -cne 'Installed') { return }
         $install.Text='Sunshine 다시 설치'
-        try { Start-Process 'https://localhost:47990' }
-        catch { $status.Text += [Environment]::NewLine+'Sunshine 설치는 완료했지만 설정 브라우저를 열지 못했습니다. 브라우저에서 https://localhost:47990 을 직접 여세요.' }
+        # Installer exit 0 is not service, TLS, pairing or stream readiness.
+        # Wait at most 15 seconds, then leave the explicit settings action to the user.
+        Invoke-SunshineLocalCheck -WaitMilliseconds 15000
     } catch [OperationCanceledException] { $status.Text='Sunshine 다운로드를 취소했습니다. 필요할 때 다시 시작하세요.' }
     catch { Show-Failure $_ }
     finally {
@@ -148,11 +205,17 @@ $install = Add-Button 'Sunshine 설치' {
     }
 }
 $downloadCancel=Add-Button '다운로드 취소' { $script:cancelDownload=$true }; $downloadCancel.Visible=$false
-$null = Add-Text '2   Sunshine 초기 설정 · 처음 한 번' 30
-$null = Add-Text "설정 창에서 계정을 만들고, Configuration → Network에서 LAN/WAN 암호화를 모두 Mandatory로 저장하세요. Desktop 앱도 확인하세요.`r`n이 계정은 Windows의 Sunshine 설정용입니다. Mac에서 로그인하지 않습니다." 66
-$open = Add-Button 'Sunshine 설정 열기' {
-    try { Start-Process 'https://localhost:47990' }
-    catch { $status.Text='Sunshine 설정 브라우저를 열지 못했습니다. 브라우저에서 https://localhost:47990 을 직접 여세요.' }
+$null = Add-Text '2   이 Windows에서 Sunshine 초기 설정 · 처음 한 번' 30
+$null = Add-Text "Sunshine은 별도 창 없이 백그라운드에서 실행됩니다. 아래 버튼으로 이 Windows의 브라우저를 여세요. 초기 계정을 만들고 로그인합니다. 이 계정은 Sunshine 설정용이며 Mac에서 로그인하지 않습니다.`r`n영상 암호화 설정 열기 → LAN Encryption Mode / WAN Encryption Mode를 둘 다 Required for all clients로 선택하세요. 한국어: LAN/WAN 암호화 모드 → 모든 사용자에게 필수. Save → Apply/재시작까지 완료하세요. Wi-Fi와 Tailscale도 LAN으로 분류될 수 있어 LAN 설정이 필요합니다. Desktop 앱도 확인하세요." 118
+$localPortStatus=Add-Text '로컬 설정 포트: 아직 확인하지 않았습니다. 포트 응답은 Sunshine 로그인이나 화면 연결 성공을 의미하지 않습니다.' 46
+$checkLocal=Add-Button '설정 상태 새로고침' { Invoke-SunshineLocalCheck }
+$localCheckCancel=Add-Button '설정 포트 확인 취소' { $script:cancelLocalCheck=$true }; $localCheckCancel.Visible=$false
+$open = Add-Button '이 Windows에서 Sunshine 설정 열기' { Invoke-SunshineLocalCheck -Open Settings }
+$encryption = Add-Button '영상 암호화 설정 열기' { Invoke-SunshineLocalCheck -Open Encryption }
+$null = Add-Text '직접 열기: 이 Windows의 Edge/Chrome → https://localhost:47990/ · localhost는 현재 브라우저를 연 컴퓨터를 뜻합니다. Mac에서는 열지 마세요.' 48
+$services=Add-Button 'Windows 서비스 상태 직접 확인…' {
+    try { Start-Process 'services.msc'; $status.Text='Windows 서비스 목록에서 Sunshine 상태를 직접 확인하세요. Knot은 서비스를 자동으로 시작하거나 설정을 바꾸지 않았습니다.' }
+    catch { $status.Text='Windows 서비스 창을 열지 못했습니다. Windows 시작 메뉴에서 「서비스」를 검색한 뒤 Sunshine 상태를 직접 확인하세요.' }
 }
 $headless = Add-Button '모니터 없이 사용… (선택)' {
     Set-Busy $true
@@ -160,8 +223,10 @@ $headless = Add-Button '모니터 없이 사용… (선택)' {
     catch { Show-Failure $_ }
     finally { Set-Busy $false }
 }
-$null = Add-Text '3   Mac에서 연결' 30
-$null = Add-Text 'Mac의 원격 화면에서 근처 PC를 선택하세요. 목록에 없으면 연결 QR / 링크로 가져올 수 있습니다.' 40
+$null = Add-Text '3   Mac에서 PIN 만들기 → 이 Windows에서 승인' 30
+$null = Add-Text 'Mac의 Windows 화면에서 근처 PC 선택 → 「PIN으로 연결」을 누르세요. Mac에 표시된 PIN을 아래 버튼으로 연 이 Windows의 Sunshine 페이지에 입력합니다. Windows에서 PIN 승인을 마친 뒤 Mac에서 「Windows 열기」를 누르세요.' 65
+$pin=Add-Button '이 Windows에서 PIN 입력 화면 열기' { Invoke-SunshineLocalCheck -Open PIN }
+$null = Add-Text 'Sunshine 로그인이 먼저 나오면 2단계에서 만든 계정으로 로그인한 뒤 PIN 메뉴를 여세요. 설정을 바꾼 뒤에도 기존 PIN 페어링은 지우지 마세요. PC가 목록에 없으면 아래 QR / 링크를 사용하세요.' 55
 $qrButton = Add-Button '연결 QR / 링크 보기…' {
     Set-Busy $true
     try {
@@ -176,7 +241,7 @@ $qrButton = Add-Button '연결 QR / 링크 보기…' {
     finally { Set-Busy $false }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'DeskBridge-QR.dll') -PathType Leaf)) { $qrButton.Text='연결 링크 보기…' }
-$null = Add-Text 'PIN은 Mac에 표시됩니다. Sunshine의 PIN 메뉴에 입력하면 화면 페어링이 진행됩니다. Wi-Fi 또는 Tailscale 양쪽에서 도달 가능한 주소를 선택하세요.' 48
+$null = Add-Text '연결 QR과 링크에는 주소만 들어 있습니다. PIN 승인은 별도로 필요합니다. Wi-Fi 또는 Tailscale 양쪽에서 도달 가능한 주소를 선택하세요.' 48
 $addresses=New-Object Windows.Forms.ComboBox; $addresses.AccessibleName='이 PC의 연결 주소'; $addresses.AccessibleDescription='Mac에서 도달할 수 있는 Wi-Fi 또는 Tailscale 주소를 선택하세요.'; $addresses.DropDownStyle='DropDownList'; $addresses.Width=710
 function Update-WindowsAddresses {
     $previous=[string]$addresses.SelectedItem
@@ -213,7 +278,46 @@ $filesToggle.Add_Click({
 $script:section=$filePanel
 $null = Add-Text '파일 전송 · 필요할 때 한 번' 30
 $null = Add-Text '화면 연결에는 아래 설정이 필요 없습니다. 파일 기능은 Mac 전용 키와 별도의 Windows 파일 계정을 사용합니다.' 42
-$null = Add-Text 'Mac의 파일 탭에서 키 만들기 → Mac 주소 찾기 → Windows 설정 파일 저장. 저장한 JSON을 이 PC로 옮겨 불러오세요.' 48
+$null = Add-Text 'Mac의 파일 탭에서 자동 파일 설정을 시작하고 표시된 일회용 연결을 아래에 붙여 넣으세요. 공개 설정을 자동으로 주고받으며 개인 키는 Mac에 남습니다.' 48
+$null = Add-Text 'Mac에서 Windows 대상을 Tailscale 주소로 선택했다면 Mac 설정 주소도 Tailscale 주소를 사용하세요. 같은 Wi-Fi에서는 두 PC의 Wi-Fi 주소를 선택하세요. 주소 종류를 섞으면 자동 연결이 거부될 수 있습니다.' 64
+$script:enrollmentClient=$null; $script:enrollmentRequest=$null
+$enrollmentBox=New-Object Windows.Forms.TextBox; $enrollmentBox.Width=710
+$enrollmentBox.AccessibleName='Mac의 일회용 자동 파일 설정 연결'; $filePanel.Controls.Add($enrollmentBox)
+$automatic=Add-Button '자동 파일 설정 · Mac 연결 받기…' {
+    Set-Busy $true; $client=$null
+    try {
+        if ([string]::IsNullOrWhiteSpace($LauncherPath)) { throw '자동 파일 설정에는 설치된 Knot EXE를 사용하세요. 개발자 소스 폴더에서는 아래 JSON 복구를 사용하세요.' }
+        $client=Start-KnotFileEnrollment (([string]$enrollmentBox.Text).Trim([char[]]" `t`r`n"))
+        $enrollmentBox.Clear()
+        $enrollmentCancel.Visible=$true; $enrollmentCancel.Enabled=$true
+        $script:enrollmentClient=$client
+        $status.Text='Mac에 보안 연결하고 공개 설정을 받는 중…'
+        while (-not $client.Request.IsCompleted) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+        $bytes=$client.Request.GetAwaiter().GetResult()
+        $text=(New-Object Text.UTF8Encoding($false,$true)).GetString($bytes)
+        $expected=ConvertFrom-MacSetup $text
+        if ($expected.requestID -cne $client.Connection.SessionID -or $expected.allowedClientAddresses -cnotcontains $client.Connection.Address) { throw '현재 Mac 자동 설정 연결과 받은 공개 설정이 다릅니다. Mac에서 새로 시작하세요.' }
+        # The Mac admitted this exact TCP peer. Reuse its local interface address
+        # for the reply rather than the first Wi-Fi/virtual-adapter selection.
+        $automaticAddress=[Knot.Enrollment.Client]::SelectLocalAddress($client.LocalAddress,[string[]]@($addresses.Items))
+        $client.AuthorizeReply([string]$expected.requestID,[string[]]@($expected.allowedClientAddresses))
+        $addresses.SelectedItem=$automaticAddress
+        $script:enrollmentRequest=$expected
+        Invoke-FileSetup 'EnableFiles' -AutomaticRequest $expected -AutomaticClient $client
+    } catch { Show-Failure $_ }
+    finally {
+        $script:enrollmentRequest=$null; $script:enrollmentClient=$null
+        if ($client) { $client.Cancel(); $client.Dispose() }
+        $enrollmentCancel.Visible=$false
+        Set-Busy $false
+    }
+}
+$enrollmentCancel=Add-Button '자동 파일 설정 연결 취소' {
+    if ($script:enrollmentClient) { $script:enrollmentClient.Cancel() }
+    $enrollmentCancel.Enabled=$false
+}
+$enrollmentCancel.Visible=$false
+$null=Add-Text '수동 복구: 자동 연결이 어려울 때만 Mac에서 설정 JSON을 저장해 아래에서 불러오세요.' 40
 $requestBox = New-Object Windows.Forms.TextBox; $requestBox.ReadOnly=$true; $requestBox.Width=710; $filePanel.Controls.Add($requestBox)
 $requestBox.AccessibleName='불러온 Mac 설정 파일'; $requestBox.AccessibleDescription='Mac 설정 파일 불러오기에서 선택한 JSON 파일의 위치입니다.'
 $load = Add-Button 'Mac 설정 파일 불러오기…' {
@@ -227,14 +331,22 @@ $load = Add-Button 'Mac 설정 파일 불러오기…' {
         $dialog.Dispose()
     } catch { $requestBox.Text=''; Show-Failure $_ }
 }
-function Invoke-FileSetup([string] $Operation) {
+function Invoke-FileSetup([string] $Operation, $AutomaticRequest=$null, $AutomaticClient=$null) {
+    # Set only after a validated native completion and canonical current reply.
+    $confirmedAutomaticReply=$null
     Set-Busy $true
+    if ($AutomaticClient) { $enrollmentCancel.Enabled=$true }
     try {
         $expected=$null; $requestPath=$null; $selectedAddress=$null
         if ($Operation -ne 'DisableFiles') {
+            if ($AutomaticRequest) {
+                if (-not $LauncherPath -or -not $AutomaticClient.Active) { throw '자동 파일 설정 연결이 만료되었거나 취소되었습니다. Mac에서 새로 시작하세요.' }
+                $expected=ConvertFrom-MacSetup ($AutomaticRequest | ConvertTo-Json -Depth 4 -Compress)
+            } else {
             $requestPath=[string]$requestBox.Text
             if ([string]::IsNullOrWhiteSpace($requestPath)) { throw '먼저 Mac 설정 파일을 불러오세요.' }
             try { $expected=Read-MacSetup $requestPath } catch { throw 'Mac 설정 파일을 읽지 못했습니다. Mac에서 새로 저장한 JSON 파일을 불러오세요.' }
+            }
             if (-not $addresses.SelectedItem) { throw 'Windows 주소를 선택하세요.' }
             $selectedAddress=Get-PrivateIPv4 ([string]$addresses.SelectedItem)
         }
@@ -248,6 +360,7 @@ function Invoke-FileSetup([string] $Operation) {
             'OpenSSH Server, 전용 일반 계정, C:\DeskBridgeShare\files, 선택한 Mac 주소 전용 방화벽을 설정합니다. 공유 파일을 사용할 Windows 사용자: ' + $desktopUser.Name + ' (' + $desktopUser.SID.Value + '). 기존 SSH 설정은 바꾸지 않습니다. 계속할까요?'
         } else {'Windows 호스트 공개 키를 내보내기 위해 관리자 확인이 필요합니다.'}
         if ($Operation -eq 'EnableFiles') {
+            $message += "`n`nMac 공개 키 지문: " + (Get-KeyFingerprint $expected.clientPublicKey)
             $message += "`n`n허용할 Mac 주소: " + ([string[]]$expected.allowedClientAddresses -join ', ') + "`n이 주소와 등록한 SSH 키로만 파일 접속을 허용합니다. 주소를 직접 확인하세요."
         }
         if ([Windows.Forms.MessageBox]::Show($message,'Knot','OKCancel','Information') -ne 'OK') { return }
@@ -271,6 +384,7 @@ function Invoke-FileSetup([string] $Operation) {
             if ($Operation -ne 'DisableFiles') { $arguments += ' -RequestPath "' + $requestPath + '" -WindowsAddress "' + $selectedAddress + '"' }
             if ($desktopUser) { $arguments += ' -DesktopUserSid "' + $desktopUser.SID.Value + '"' }
         }
+        if ($AutomaticClient -and -not $AutomaticClient.Active) { throw '자동 파일 설정이 만료되었거나 취소되었습니다. Mac에서 새로 시작하세요.' }
         $status.Text='관리자 창에서 설정을 진행 중입니다. 완료 후 이 창으로 돌아오세요.'
         $process=Start-Process -FilePath $elevatedExecutable -Verb RunAs -ArgumentList $arguments -PassThru
         $null=$process.Handle
@@ -285,7 +399,17 @@ function Invoke-FileSetup([string] $Operation) {
         $reply=Get-Content -LiteralPath $replyPath -Raw | ConvertFrom-Json
         if ($reply.requestID -cne $expected.requestID -or $reply.clientPublicKey -cne $expected.clientPublicKey -or $reply.address -cne $selectedAddress) { throw 'Windows 연결 결과가 현재 Mac 설정과 다릅니다. 설정 파일과 선택한 PC 주소를 다시 확인하세요.' }
         $fingerprint=Get-KeyFingerprint $reply.serverPublicKey
+        $confirmedAutomaticReply=[pscustomobject]@{Fingerprint=$fingerprint}
         $status.Text="Windows SSH 지문 (Mac 화면과 비교):`r`n" + $fingerprint
+        if ($AutomaticClient) {
+            if (-not $AutomaticClient.Active) { throw 'Windows 파일 설정은 완료됐지만 Mac 자동 연결이 만료되었습니다. 새 Mac 연결로 다시 시도하거나 연결 파일 다시 저장을 사용하세요. 설정을 제거할 필요가 없습니다.' }
+            $replyText=$reply | ConvertTo-Json -Depth 4 -Compress
+            $send=$AutomaticClient.SendReplyAsync($replyText)
+            while (-not $send.IsCompleted) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+            $send.GetAwaiter().GetResult()
+            $status.Text="파일 설정을 Mac에 전달했습니다. Mac에서 아래 SSH 지문이 같은지 확인하고 등록하세요.`r`nWindows SSH 지문: " + $fingerprint
+            return
+        }
         $save=New-Object Windows.Forms.SaveFileDialog; $save.Filter='Knot JSON (*.json)|*.json'; $save.FileName='Knot-Windows-Connection.json'
         $saved=Save-DeskBridgeConnectionReply -Reply $reply -Dialog $save
         if ($saved -eq 'Saved') { $status.Text+="`r`n연결 파일을 저장했습니다. Mac에서 불러오세요." }
@@ -293,7 +417,15 @@ function Invoke-FileSetup([string] $Operation) {
             $detail=if ($saved -eq 'Cancelled') {'연결 파일 저장을 취소했습니다.'} else {'연결 파일을 저장하지 못했습니다.'}
             $status.Text="파일 설정 완료 · " + $detail + "`r`nWindows SSH 지문: " + $fingerprint + "`r`n‘이미 설정한 연결 파일 다시 저장’으로 다시 저장하세요. 설정을 다시 설치할 필요가 없습니다."
         }
-    } catch { Show-Failure $_ }
+    } catch {
+        if ($AutomaticClient -and $null -ne $confirmedAutomaticReply) {
+            # Native provisioning/export succeeded and this request's public
+            # reply was validated. Delivery failure must not erase its verified
+            # SSH fingerprint or misreport Windows activation as failed. Render
+            # fixed authored guidance only; never surface transport exceptions.
+            $status.Text="Windows 파일 설정 완료 · Mac으로 연결 결과를 전달하지 못했습니다.`r`nWindows SSH 지문: " + $confirmedAutomaticReply.Fingerprint + "`r`nMac에서 새 자동 파일 설정 연결을 만든 뒤 같은 Mac 키로 다시 시도하세요. 또는 「이미 설정한 연결 파일 다시 저장」으로 전달하세요. 파일 접속을 해제하거나 다시 설치할 필요는 없습니다. Mac에서 SSH 지문을 직접 비교한 뒤 등록하세요."
+        } else { Show-Failure $_ }
+    }
     finally { Set-Busy $false }
 }
 $enable = Add-Button '파일 전송 설정 · 연결 파일 만들기…' { Invoke-FileSetup 'EnableFiles' }
@@ -327,6 +459,7 @@ $form.Add_Shown({
     $form.Size=New-Object Drawing.Size([Math]::Min($form.Width,$area.Width),[Math]::Min($form.Height,$area.Height))
     $form.Location=New-Object Drawing.Point(($area.Left+($area.Width-$form.Width)/2),($area.Top+($area.Height-$form.Height)/2))
     Resize-SetupContent
+    Invoke-SunshineLocalCheck -WaitMilliseconds 1500
 })
 $form.Add_FormClosing({param($sender,$eventArgs) if ($form.UseWaitCursor) {$eventArgs.Cancel=$true}})
 [void]$form.ShowDialog()

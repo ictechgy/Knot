@@ -78,6 +78,29 @@ private struct ControlHardeningSyntheticChecks {
             do { try body() } catch { rejected = true }
             try require(rejected, "malformed input was accepted")
         }
+        // Complete production parser and recursive lookups, using only inert bytes.
+        let normalXML = try XMLTreeBuilder.parse(data: Data("<root><hostname>Fixture</hostname></root>".utf8))
+        try require(normalXML.string(forChild: "hostname") == "Fixture", "normal host XML must remain readable")
+        let boundedNesting = String(repeating: "<a>", count: XMLTreeBuilder.maximumDepth) + String(repeating: "</a>", count: XMLTreeBuilder.maximumDepth)
+        let boundedTree = try XMLTreeBuilder.parse(data: Data(boundedNesting.utf8))
+        try require(boundedTree.firstChild(named: "missing") == nil, "maximum supported nesting remains safe to walk")
+        for depth in [XMLTreeBuilder.maximumDepth + 1, 10_000] {
+            let nested = Data((String(repeating: "<a>", count: depth) + String(repeating: "</a>", count: depth)).utf8)
+            try rejects { _ = try XMLTreeBuilder.parse(data: nested) }
+        }
+        try rejects { _ = try XMLTreeBuilder.parse(data: Data(("<root>" + String(repeating: "<a/>", count: XMLTreeBuilder.maximumNodes) + "</root>").utf8)) }
+        var boundaryXML = Data(repeating: 32, count: XMLTreeBuilder.maximumSourceBytes - 7)
+        boundaryXML.append(contentsOf: "<root/>".utf8)
+        try require(try XMLTreeBuilder.parse(data: boundaryXML).firstChild(named: "root") != nil,
+                    "well-formed XML at the exact source budget must parse")
+        boundaryXML.append(32)
+        do {
+            _ = try XMLTreeBuilder.parse(data: boundaryXML)
+            throw ControlCheckFailure(message: "over-budget valid XML was accepted")
+        } catch let error as NSError {
+            try require(error.domain == "Glimmer.XML" && error.code == -3,
+                        "over-budget XML must fail at the source guard")
+        }
         for value in ["", " ", "-1", "+1", "no", "1, 1", String(repeating: "9", count: 100)] {
             try rejects { _ = try ControlTransport.contentLengthHeader(in: Data("HTTP/1.1 200 OK\r\nContent-Length: \(value)".utf8)) }
         }

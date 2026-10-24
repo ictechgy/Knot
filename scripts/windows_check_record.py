@@ -36,6 +36,20 @@ def validate_windows_check_record(checks, build):
                 for label, minimum in MINIMUM_WINDOWS_CHECKS.items())):
         raise ValueError(message)
     source = build['sourceManifest']
+    update_paths = {'client/windows/KnotUpdates.cs', 'packaging/windows/KnotUpdateHandoff.cs', 'scripts/tests/WindowsUpdateChecks.cs'}
+    if update_paths & source.keys():
+        updates = checks.get('updates', {})
+        update_build = build.get('updates', {})
+        if (not update_paths <= source.keys() or not isinstance(updates, dict) or not isinstance(update_build, dict) or
+                updates.get('status') != 'PASS' or updates.get('compilerExitCode') != 0 or updates.get('runExitCode') != 0 or
+                type(updates.get('checks')) is not int or updates['checks'] < (72 if updates.get('nativeWindowsFileSharingTested') else 65) or updates.get('freshSyntheticOnly') is not True or
+                any(updates.get(field) is not False for field in ('nativeUpdaterExecuted', 'installerExecuted', 'registryRead', 'networkUsed')) or
+                updates.get('sourceSHA256') != {path: source[path] for path in update_paths} or
+                not _digest(update_build.get('runtimeSHA256')) or not _digest(update_build.get('handoffSHA256')) or
+                updates.get('handoffBuild', {}).get('runtimeSHA256') != update_build['runtimeSHA256'] or
+                type(updates.get('nativeWindowsFileSharingTested')) is not bool or
+                (checks.get('windowsImageCodecRuntimeTested') is True and updates['nativeWindowsFileSharingTested'] is not True)):
+            raise ValueError('Windows signed updater policy checks are missing, failed or stale')
     headless = checks.get('headless', {})
     if not isinstance(headless, dict):
         raise ValueError(message)

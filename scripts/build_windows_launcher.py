@@ -6,17 +6,18 @@ Inputs are an explicit C# compiler and Framework reference directory. This scrip
 does not download/install tools, run the EXE, or change any Windows configuration.
 """
 from pathlib import Path
-import argparse, hashlib, json, os, re, subprocess, tempfile
+import argparse, hashlib, json, os, re, shutil, subprocess, tempfile
 from build_snapshot import source_snapshot
 from windows_resources import resource_file, validate_bootstrap
 from reverse_client import client_sources, generate_engine_pin, generate_qr_loader
 from reverse_qr import compile_decoder
+from update_windows import prepare_windows_updates
 
 ROOT = Path(__file__).resolve().parent.parent
 PAYLOAD_NAMES = (
-    "Setup-DeskBridge.ps1", "Invoke-DeskBridgeSetup.ps1", "SetupContract.psm1", "SetupDownload.psm1", "SetupStatus.psm1",
+    "Setup-DeskBridge.ps1", "Invoke-DeskBridgeSetup.ps1", "SetupContract.psm1", "SetupDownload.psm1", "SetupStatus.psm1", "SetupReadiness.psm1",
     "Enable-DeskBridgeSFTP.ps1", "Resume-DeskBridgeSFTP.ps1", "Disable-DeskBridgeSFTP.ps1",
-    "SunshineDependency.json", "README.md",
+    "SunshineDependency.json", "README.md", "EnrollmentClient.cs", "Enrollment.psm1",
     "ConnectionInvitation.psm1", "Show-ConnectionQR.ps1",
     "HeadlessSetup.psm1", "HeadlessStatus.psm1", "HeadlessNative.cs", "Invoke-DeskBridgeHeadless.ps1", "Show-HeadlessSetup.ps1",
     "VirtualDisplayDependency.json", "VirtualDisplayFiles.json", "VirtualDisplayDeployments.json", "Knot-vdd_settings.xml", "VirtualDisplay-NOTICE.txt",
@@ -151,6 +152,9 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
     refs = [Path(references) / (name + ".dll") for name in ("mscorlib", "System", "System.Core", "System.Windows.Forms", "System.Drawing", "System.IO.Compression", "System.IO.Compression.FileSystem")]
     if any(not p.is_file() for p in refs):
         raise ValueError("Supply the .NET Framework 4.8 reference assemblies directory")
+    compiler = Path(shutil.which(str(compiler)) or compiler).resolve(strict=True)
+    managed_compiler_sha = hashlib.sha256(compiler.read_bytes()).hexdigest()
+    reference_hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in refs}
     compiler_prefix = [str(dotnet), str(compiler)] if dotnet else [str(compiler)]
     vendor = ROOT / 'Vendor/QRCodegen'
     provenance = json.loads((vendor / 'UPSTREAM.json').read_text())
@@ -170,9 +174,10 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
         raise RuntimeError(qr_result.stdout.decode(errors='replace') + qr_result.stderr.decode(errors='replace'))
     decoder = output.with_name('DeskBridge.QrDecoder.dll')
     decoder_record = compile_decoder(ROOT, compiler_prefix, references, decoder)
-    entries = payload_files(ROOT, qr_library)
-    hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in entries}
     with tempfile.TemporaryDirectory(prefix="deskbridge-launcher-build-") as temporary:
+        update = prepare_windows_updates(ROOT, compiler_prefix, references, Path(temporary) / "updates")
+        entries = payload_files(ROOT, qr_library) + update['payload']
+        hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in entries}
         engine_pin = Path(temporary) / "EnginePin.cs"
         engine_record = generate_engine_pin(ROOT, engine_pin)
         qr_loader = Path(temporary) / "ReverseQrLibrary.cs"
@@ -197,7 +202,8 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
             "-resource:" + str(decoder) + "," + decoder_record['resourceName'],
             *["-resource:" + str(path) + ",DeskBridge.Payload." + name for name, path in entries],
             str(ROOT / "packaging/windows/Launcher.cs"), str(ROOT / "packaging/windows/RoleChooser.cs"), str(generated),
-            str(engine_pin), str(qr_loader), *map(str, client_sources(ROOT)),
+            str(engine_pin), str(qr_loader), str(update['configurationSource']),
+            str(ROOT / 'packaging/windows/KnotUpdateHandoff.cs'), *map(str, client_sources(ROOT)),
         ]
         result = subprocess.run(argv, cwd=temporary, capture_output=True)
         if result.returncode:
@@ -210,7 +216,7 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
         resources = Path(temporary) / 'NativePayload.res'
         resources.write_bytes(resource_file(managed_bytes,
             (ROOT / 'packaging/windows/Launcher.manifest').read_bytes(),
-            (ROOT / 'Assets/Brand/AppIcon.ico').read_bytes()))
+            (ROOT / 'Assets/Brand/AppIcon.ico').read_bytes(), version))
         native_argv = [str(native_compiler), 'cc', '-target', 'x86_64-windows-gnu',
                        '-std=c11', '-municode', '-O2', '-Wl,--subsystem,windows',
                        '-I', temporary, str(ROOT / 'packaging/windows/NativeBootstrap.c'),
@@ -225,15 +231,20 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
         if native_result.returncode:
             output.unlink(missing_ok=True)
             raise RuntimeError(native_result.stdout.decode(errors='replace') + native_result.stderr.decode(errors='replace'))
-        native_imports = validate_bootstrap(output.read_bytes(), managed_bytes)
+        native_imports = validate_bootstrap(output.read_bytes(), managed_bytes, version)
     if source_snapshot(ROOT) != snapshot:
         output.unlink(missing_ok=True)
         raise RuntimeError("Source changed during launcher build; rebuild")
+    if (hashlib.sha256(compiler.read_bytes()).hexdigest() != managed_compiler_sha or
+            {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in refs} != reference_hashes):
+        output.unlink(missing_ok=True)
+        raise RuntimeError("Managed compiler or reference assemblies changed during launcher build; rebuild")
     if output.read_bytes()[:2] != b"MZ":
         output.unlink(missing_ok=True)
         raise RuntimeError("Compiler did not produce a Windows executable")
     record = {"schema": 1, "version": version, "sourceManifest": snapshot,
               "compiler": str(compiler), "references": str(references), "argv": argv,
+              "managedCompilerSha256": managed_compiler_sha, "referenceAssemblySha256": reference_hashes,
               "compilerExitCode": result.returncode, "stdout": result.stdout.decode(errors="replace"),
               "stderr": result.stderr.decode(errors="replace"), "payloadSha256": hashes,
               "managedSha256": managed_sha, "nativeCompiler": str(native_compiler),
@@ -250,7 +261,7 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
               "reverseQrDecoder": decoder_record, "reverseEngine": engine_record,
               "extraResources": {decoder_record['resourceName']: decoder_record['sha256']},
               "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-              "virtualDisplay": virtual_display,
+              "virtualDisplay": virtual_display, "updates": update['record'],
               "windowsRuntimeTested": False, "authenticodeSigned": False}
     manifest.write_text(json.dumps(record, indent=2))
     return record

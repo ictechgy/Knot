@@ -26,6 +26,33 @@ func runConnectionDiscoveryChecks(temporary: URL) async throws -> Int {
     CGImageDestinationAddImage(destination, image, nil)
     try expect(CGImageDestinationFinalize(destination), "synthetic PNG fixture generated")
     try expect(try ConnectionQRReader.decode(data: png as Data) == invitation, "actual QR image decoder roundtrip")
+
+    // A valid three-pixel module becomes subpixel if an 8000-wide image is
+    // forced down to 2048. Keep the accepted canvas bounded, without losing QR detail.
+    let rawQR = context.createCGImage(generator.outputImage!, from: generator.outputImage!.extent)!
+    let canvasWidth = 8000, canvasHeight = 2000, modulePixels = 3
+    let canvas = CGContext(data: nil, width: canvasWidth, height: canvasHeight, bitsPerComponent: 8,
+        bytesPerRow: canvasWidth * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    canvas.setFillColor(CGColor(gray: 1, alpha: 1))
+    canvas.fill(CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight))
+    canvas.interpolationQuality = .none
+    canvas.draw(rawQR, in: CGRect(x: (canvasWidth - rawQR.width * modulePixels) / 2,
+        y: (canvasHeight - rawQR.height * modulePixels) / 2,
+        width: rawQR.width * modulePixels, height: rawQR.height * modulePixels))
+    let largePNG = NSMutableData()
+    let largeDestination = CGImageDestinationCreateWithData(largePNG, "public.png" as CFString, 1, nil)!
+    CGImageDestinationAddImage(largeDestination, canvas.makeImage()!, nil)
+    try expect(CGImageDestinationFinalize(largeDestination) && largePNG.length < ConnectionQRReader.maximumFileBytes,
+               "bounded large-canvas QR fixture generation failed")
+    try expect(try ConnectionQRReader.decode(data: largePNG as Data) == invitation,
+               "small QR region in accepted large image lost its module detail")
+    let cancelledDecode = Task { () throws -> ConnectionInvitation in
+        withUnsafeCurrentTask { $0?.cancel() }
+        return try ConnectionQRReader.decode(data: largePNG as Data)
+    }
+    var cancellationKept = false
+    do { _ = try await cancelledDecode.value } catch is CancellationError { cancellationKept = true }
+    try expect(cancellationKept, "cancelled QR decoding must stop before parsing an image")
     for (format, accepted) in [("com.microsoft.bmp", true), ("com.compuserve.gif", false)] {
         let encoded = NSMutableData()
         let destination = CGImageDestinationCreateWithData(encoded, format as CFString, 1, nil)!

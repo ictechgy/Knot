@@ -18,6 +18,10 @@ try {
         $bitmap=[Drawing.Image]::FromStream($stream)
     }
     $window=New-Object Windows.Forms.Form
+    if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'AppIcon.ico') -PathType Leaf) {
+        $window.Icon=New-Object Drawing.Icon((Join-Path $PSScriptRoot 'AppIcon.ico'))
+        $window.Add_Disposed({ param($sender,$eventArgs) if ($sender.Icon) { $sender.Icon.Dispose() } })
+    }
     $window.Text='Windows 연결 QR'; $window.Size=New-Object Drawing.Size(700,730)
     $window.MinimumSize=New-Object Drawing.Size(480,360); $window.AutoScaleDimensions=New-Object Drawing.SizeF(96,96); $window.AutoScaleMode='Dpi'; $window.StartPosition='CenterParent'; $window.Font=New-Object Drawing.Font('Segoe UI',10)
     if (-not $hasQR) { $window.Text='Windows 연결 링크'; $window.Size=New-Object Drawing.Size(700,370) }

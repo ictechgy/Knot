@@ -68,6 +68,8 @@ func runSetupExchangeChecks() throws -> Int {
     count += 1
     do { _ = try SetupExchange.request(clientPublicKey: client, addresses: eligible); throw CheckFailure(message: "address count error missing") }
     catch SetupExchange.Failure.addressCount { count += 1 }
+    do { _ = try SetupExchange.request(clientPublicKey: client, addresses: ["192.168.1.20", "192.168.1.20"]); throw CheckFailure(message: "duplicate address guidance missing") }
+    catch SetupExchange.Failure.duplicateAddress { count += 1 }
     do { _ = try SetupExchange.canonicalKey("ssh-rsa synthetic"); throw CheckFailure(message: "Mac key error missing") }
     catch SetupExchange.Failure.invalidClientKey { count += 1 }
     return count

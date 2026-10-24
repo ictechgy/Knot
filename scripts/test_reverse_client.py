@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 
 from build_snapshot import source_snapshot
+from update_windows import configuration_source
 from reverse_client import client_sources, generate_engine_pin, generate_qr_loader
 from reverse_qr import compile_decoder
 
@@ -64,6 +65,8 @@ def run(dotnet, compiler, references):
         pin_record = generate_engine_pin(ROOT, pin)
         loader = temporary / "ReverseQrLibrary.cs"
         generate_qr_loader(decoder_record["sha256"], loader)
+        updater_config = temporary / "KnotUpdateConfiguration.cs"
+        updater_config.write_text(configuration_source(ROOT, 'a' * 64, 'b' * 64))
         assembly = temporary / "ReverseClientChecks.dll"
 
         def invoke(label, argv, timeout=180):
@@ -79,7 +82,7 @@ def run(dotnet, compiler, references):
             "-nologo", "-target:library", "-platform:anycpu", "-langversion:5", "-nostdlib+", "-optimize+", "-deterministic+",
             "-out:" + str(assembly), *["-r:" + str(p) for p in refs], "-r:" + str(decoder),
             "-resource:" + str(decoder) + "," + decoder_record["resourceName"],
-            *map(str, sources), str(pin), str(loader)])
+            *map(str, sources), str(pin), str(loader), str(updater_config), str(ROOT / "packaging/windows/KnotUpdateHandoff.cs")])
         runner = temporary / "runner"
         runner.mkdir()
         (runner / "Runner.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'

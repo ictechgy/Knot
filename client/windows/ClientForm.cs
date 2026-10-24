@@ -39,6 +39,9 @@ namespace DeskBridge.Reverse
         {
             this.platform = platform;
             Text = HostText(ClientMessage.Title);
+            var applicationIcon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            Icon = applicationIcon;
+            Disposed += delegate { if (applicationIcon != null) applicationIcon.Dispose(); };
             Font = new Font("Malgun Gothic", 9.5f);
             AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96);
             StartPosition = FormStartPosition.CenterScreen;
@@ -116,13 +119,14 @@ namespace DeskBridge.Reverse
 
             Add(Heading(HostText(ClientMessage.StreamHeading)));
             var settings = Row();
-            ConfigureChoice(resolution, new[] { "1920x1080", "2560x1440", "1280x720" }, 125, "해상도");
-            ConfigureChoice(fps, new[] { "60", "30" }, 65, "초당 프레임");
-            ConfigureChoice(bitrate, new[] { "20000", "10000", "40000" }, 90, "전송률 Kbps");
-            settings.Controls.Add(new Label { Text = "해상도", AutoSize = true, Margin = new Padding(0, 7, 6, 0) }); settings.Controls.Add(resolution);
-            settings.Controls.Add(new Label { Text = "FPS", AutoSize = true, Margin = new Padding(8, 7, 6, 0) }); settings.Controls.Add(fps);
-            settings.Controls.Add(new Label { Text = "Kbps", AutoSize = true, Margin = new Padding(8, 7, 6, 0) }); settings.Controls.Add(bitrate);
+            ConfigureChoice(resolution, StreamQualityPolicy.Resolutions, 185, "해상도");
+            ConfigureChoice(fps, StreamQualityPolicy.FrameRates, 65, "초당 프레임");
+            ConfigureChoice(bitrate, StreamQualityPolicy.BitratesKbps, 100, "전송률 Mbps");
+            settings.Controls.Add(QualitySetting("해상도", resolution));
+            settings.Controls.Add(QualitySetting("FPS", fps));
+            settings.Controls.Add(QualitySetting("전송률", bitrate));
             fullscreen.Text = "전체 화면"; fullscreen.AutoSize = true; fullscreen.Checked = true; settings.Controls.Add(fullscreen); changing.Add(fullscreen); Add(settings);
+            Add(Description("4K 원본 화질에는 호스트의 4K 캡처·인코딩과 이 PC의 4K 디코딩 지원이 필요합니다. 높은 해상도·전송률은 네트워크 부하를 늘립니다. 호스트 디스플레이 설정은 자동으로 바꾸지 않습니다."));
             macCommandKeys.Text = HostText(ClientMessage.CommandOption);
             macCommandKeys.Visible = platform == HostPlatform.Mac; macCommandKeys.AutoSize = true; changing.Add(macCommandKeys); Add(macCommandKeys);
             fullscreen.CheckedChanged += delegate { if (!fullscreen.Checked) macCommandKeys.Checked = false; macCommandKeys.Enabled = !busy && !closing && fullscreen.Checked && platform == HostPlatform.Mac; };
@@ -143,8 +147,14 @@ namespace DeskBridge.Reverse
         private FlowLayoutPanel Row() { return new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Dock = DockStyle.Fill, Margin = new Padding(0) }; }
         private Button ActionButton(string text, EventHandler handler)
         { var button = new Button { Text = text, AutoSize = true, Padding = new Padding(4) }; button.Click += handler; changing.Add(button); return button; }
-        private void ConfigureChoice(ComboBox box, string[] values, int width, string name)
-        { box.DropDownStyle = ComboBoxStyle.DropDownList; box.Items.AddRange(values); box.SelectedIndex = 0; box.Width = width; box.AccessibleName = name; changing.Add(box); }
+        private void ConfigureChoice<T>(ComboBox box, IEnumerable<StreamQualityChoice<T>> values, int width, string name)
+        { box.DropDownStyle = ComboBoxStyle.DropDownList; foreach (StreamQualityChoice<T> value in values) box.Items.Add(value); box.SelectedIndex = 0; box.Width = width; box.AccessibleName = name; changing.Add(box); }
+        private FlowLayoutPanel QualitySetting(string caption, ComboBox choice)
+        {
+            var row = Row(); row.Dock = DockStyle.None; row.WrapContents = false; row.Margin = new Padding(0, 0, 8, 0);
+            row.Controls.Add(new Label { Text = caption, AutoSize = true, Margin = new Padding(0, 7, 6, 0) });
+            row.Controls.Add(choice); return row;
+        }
         private void UpdateWrapping()
         {
             if (content.Parent == null) return;
@@ -269,11 +279,16 @@ namespace DeskBridge.Reverse
             progress.Value = 0; progress.Visible = true;
             try
             {
-                await store.InstallAsync(new Progress<int>(value => { if (!closing && !IsDisposed) progress.Value = Math.Max(0, Math.Min(100, value)); }), operation.Token);
+                await store.InstallAsync(new Progress<int>(value => {
+                    if (closing || IsDisposed) return;
+                    progress.Value = Math.Max(0, Math.Min(100, value));
+                    progress.Style = value >= 95 && value < 100 ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
+                    if (value >= 95 && value < 100) SetStatus("다운로드 완료 · 화면 엔진의 압축을 풀고 모든 파일을 검증하는 중입니다.");
+                }), operation.Token);
                 SetStatus(HostText(ClientMessage.EngineReady));
             }
             catch (Exception error) { ShowFailure(error); }
-            finally { progress.Visible = false; End(); }
+            finally { progress.Visible = false; progress.Style = ProgressBarStyle.Continuous; End(); }
         }
         private async Task LaunchAsync(bool pairing)
         {
@@ -282,8 +297,8 @@ namespace DeskBridge.Reverse
             string[] arguments;
             try
             {
-                arguments = pairing ? EngineCommands.Pair(address) : EngineCommands.Stream(address, (string)resolution.SelectedItem,
-                    Int32.Parse((string)fps.SelectedItem), Int32.Parse((string)bitrate.SelectedItem), fullscreen.Checked, ConnectionPolicy.MacCommandAllowed(platform, fullscreen.Checked, macCommandKeys.Checked));
+                arguments = pairing ? EngineCommands.Pair(address) : EngineCommands.Stream(address, ((StreamQualityChoice<string>)resolution.SelectedItem).Value,
+                    ((StreamQualityChoice<int>)fps.SelectedItem).Value, ((StreamQualityChoice<int>)bitrate.SelectedItem).Value, fullscreen.Checked, ConnectionPolicy.MacCommandAllowed(platform, fullscreen.Checked, macCommandKeys.Checked));
             }
             catch (Exception error) { ShowFailure(error); return; }
             if (!Begin("화면 엔진의 모든 파일을 검증하는 중입니다.")) return;
@@ -291,7 +306,8 @@ namespace DeskBridge.Reverse
             {
                 using (EngineLease lease = await Task.Run(() => store.Verify(operation.Token), operation.Token))
                 {
-                    using (ProfileLease profile = EngineProfile.Prepare(store.Root, address))
+                    SetStatus("로컬 연결 프로필과 사용 잠금을 확인하는 중입니다.");
+                    using (ProfileLease profile = await Task.Run(() => EngineProfile.Prepare(store.Root, address), operation.Token))
                     {
                     operation.Token.ThrowIfCancellationRequested();
                     using (var child = new EngineProcess())

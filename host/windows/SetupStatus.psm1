@@ -53,7 +53,7 @@ function Get-SetupFailureText($ErrorRecord,[ValidateSet('General','DesktopUser',
 function Get-SunshineInstallResult([Nullable[int]] $ExitCode,[switch] $Broker) {
     $state='Failed'; $text='Sunshine 설치를 완료하지 못했습니다. Windows 설치 안내의 오류를 확인한 뒤 다시 시도하세요.'
     switch ($ExitCode) {
-        0 { $state='Installed'; $text='설치 완료. 다음은 Sunshine 초기 설정입니다.' }
+        0 { $state='Installed'; $text='Sunshine 설치 프로그램이 완료되었습니다. 화면 연결 준비는 아직 확인하지 않았습니다.' }
         1602 { $state='Cancelled'; $text='Sunshine 설치를 취소했습니다. 필요할 때 다시 시작하세요.' }
         1618 { $state='Retry'; $text='다른 Windows 설치 작업이 진행 중입니다. 해당 설치가 끝난 뒤 Sunshine 설치를 다시 시작하세요.' }
         1641 { $state='RestartInitiated'; $text='Sunshine 설치가 완료되어 Windows 재시작이 시작되었습니다. 재시작한 뒤 Sunshine 초기 설정을 진행하세요.' }
@@ -66,6 +66,13 @@ function Set-SetupStatusText($Control,[string] $Text) {
     # Repeated download polls must preserve text selection and avoid duplicate accessibility events.
     if ([string]$Control.Text -cne $Text) { $Control.Text=$Text }
 }
+function Get-SunshineLocalPortText([bool] $Responded,[switch] $Cancelled) {
+    if ($Cancelled) { return '로컬 설정 포트 확인을 취소했습니다. 설정 상태 새로고침으로 다시 확인할 수 있습니다.' }
+    if ($Responded) {
+        return '로컬 설정 포트 응답 (127.0.0.1:47990) · 이 Windows에서 설정 페이지를 열어 보세요. Sunshine 로그인·암호화 설정·화면 연결 성공을 확인한 것은 아닙니다.'
+    }
+    return '로컬 설정 포트(127.0.0.1:47990)가 아직 응답하지 않습니다. Sunshine은 별도 창 없이 백그라운드에서 실행됩니다. 설치 후 잠시 기다리거나 Windows를 다시 시작하고 상태를 새로고침하세요. 이 Windows의 브라우저에서 아래 주소를 직접 열어 볼 수도 있습니다. 계속 안 되면 Windows 서비스에서 Sunshine 상태를 직접 확인하세요.'
+}
 function Get-KnotHeadlessAvailabilityText([string] $Reason) {
     if ($Reason -ceq 'manifest-invalid') {
         return '함께 제공된 가상 화면 설치 파일 정보를 확인하지 못해 자동 설치를 중단했습니다. 새 Knot 배포 파일로 다시 시도하세요. 기존 화면과 복구 기록은 보존됩니다.'
@@ -77,4 +84,4 @@ function Test-KnotHeadlessDeviceProbeRequired([string] $Status,[bool] $InstallEn
     # Every managed/recovery state still needs the existing fresh device identity check.
     return ($Status -cne 'Absent' -or $InstallEnabled)
 }
-Export-ModuleMember -Function Get-SetupFailureText,Get-SunshineInstallResult,Set-SetupStatusText,Get-KnotHeadlessAvailabilityText,Test-KnotHeadlessDeviceProbeRequired
+Export-ModuleMember -Function Get-SetupFailureText,Get-SunshineInstallResult,Set-SetupStatusText,Get-SunshineLocalPortText,Get-KnotHeadlessAvailabilityText,Test-KnotHeadlessDeviceProbeRequired

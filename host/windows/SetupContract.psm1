@@ -175,54 +175,288 @@ function Invoke-ProtectedCompilation([string] $TypeDefinition) {
         }
     }
 }
-function Stop-ManagedSessionWorkers {
-    param([string] $WindowsDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows),
-          [scriptblock] $Inventory = { @(Get-CimInstance -ClassName Win32_Process -Filter "Name='sshd.exe' OR Name='sshd-session.exe' OR Name='sshd-auth.exe'" -ErrorAction Stop) },
-          [scriptblock] $Terminate)
-    $workers=@(& $Inventory)
-    foreach ($worker in $workers) {
-        if (-not (Test-SystemOpenSSHWorkerPath $worker $WindowsDirectory) -or
-            -not ($worker.ProcessId -is [uint32] -or $worker.ProcessId -is [int]) -or $worker.ProcessId -le 0) {
-            throw 'Unknown OpenSSH worker identity. Access remains disabled; review the dedicated service manually.'
-        }
+function Assert-NoOpenSSHWorkers {
+    param([scriptblock] $Inventory = { @(Get-CimInstance -ClassName Win32_Process -Filter "Name='sshd.exe' OR Name='sshd-session.exe' OR Name='sshd-auth.exe'" -Property Name,ProcessId -ErrorAction Stop) })
+    if (@(& $Inventory).Count -ne 0) {
+        throw 'An OpenSSH server or session worker already exists. This helper will not provision alongside an unproven deployment; review it manually.'
     }
-    if (-not $Terminate -and $workers.Count -gt 0) {
-        if (-not ('DeskBridge.ManagedWorkerStop' -as [type])) {
-            Invoke-ProtectedCompilation -TypeDefinition @'
+}
+function Initialize-DeskBridgeLifecycleLease {
+    if ('DeskBridge.SFTPLifecycleLease' -as [type]) { return }
+    Invoke-ProtectedCompilation -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Threading;
+using Microsoft.Win32.SafeHandles;
+namespace DeskBridge {
+ public sealed class SFTPLifecycleLease : IDisposable {
+  const uint MutexAllAccess=0x001F0001, WaitObject=0, WaitAbandoned=0x80, WaitTimeout=0x102;
+  const string ProductionName="Global\\Knot.SFTP.Lifecycle.v1";
+  const string Security="O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+  [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes {
+   public int Length; public IntPtr Descriptor;
+   [MarshalAs(UnmanagedType.Bool)] public bool Inherit;
+  }
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, out uint size);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern SafeWaitHandle CreateMutexEx(ref SecurityAttributes attributes, string name, uint flags, uint access);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeWaitHandle handle, int type, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr allocation);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool ReleaseMutex(SafeWaitHandle handle);
+  SafeWaitHandle mutex; bool owned; int threadId;
+  SFTPLifecycleLease() {}
+  public static SFTPLifecycleLease Acquire() { return AcquireName(ProductionName); }
+  // Kept private: the production API has one fixed machine-wide name. CI reflects this
+  // same factory only for newly generated synthetic names, never the production object.
+  static SFTPLifecycleLease AcquireName(string name) {
+   var result=new SFTPLifecycleLease(); IntPtr descriptor=IntPtr.Zero;
+   try {
+    uint size;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptor(Security, 1, out descriptor, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    var attributes=new SecurityAttributes(); attributes.Length=Marshal.SizeOf(typeof(SecurityAttributes));
+    attributes.Descriptor=descriptor; attributes.Inherit=false;
+    result.mutex=CreateMutexEx(ref attributes, name, 0, MutexAllAccess);
+    if (result.mutex.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+    ValidateSecurity(result.mutex);
+    uint wait=WaitForSingleObject(result.mutex, 0); // Fail fast; no queued stale preflight.
+    if (wait==WaitTimeout) throw new InvalidOperationException("Another Knot file-access operation is running. Wait for it to finish, then retry.");
+    if (wait!=WaitObject && wait!=WaitAbandoned) throw new Win32Exception(Marshal.GetLastWin32Error());
+    result.owned=true; result.threadId=Thread.CurrentThread.ManagedThreadId;
+    if (wait==WaitAbandoned) throw new InvalidOperationException("A previous Knot file-access operation ended unexpectedly. Review the retained state before retrying.");
+    return result;
+   } catch { result.Dispose(); throw; }
+   finally { if (descriptor!=IntPtr.Zero) LocalFree(descriptor); }
+  }
+  static bool TrustedPolicy(string owner, bool protectedDacl, string[] sids, int[] masks, int[] flags, bool[] plainAllows) {
+   if ((owner!="S-1-5-18" && owner!="S-1-5-32-544") || !protectedDacl || sids==null || masks==null || flags==null || plainAllows==null ||
+       sids.Length!=2 || masks.Length!=2 || flags.Length!=2 || plainAllows.Length!=2) return false;
+   bool system=false, admins=false;
+   for (int i=0;i<2;i++) {
+    if (!plainAllows[i] || flags[i]!=0 || (masks[i]!=(int)MutexAllAccess && masks[i]!=0x10000000)) return false;
+    if (sids[i]=="S-1-5-18" && !system) system=true;
+    else if (sids[i]=="S-1-5-32-544" && !admins) admins=true;
+    else return false;
+   }
+   return system && admins;
+  }
+  static void ValidateSecurity(SafeWaitHandle handle) {
+   IntPtr owner, group, dacl, sacl, descriptor;
+   uint error=GetSecurityInfo(handle, 6, 0x00000005, out owner, out group, out dacl, out sacl, out descriptor);
+   if (error!=0) throw new Win32Exception((int)error);
+   try {
+    uint length=GetSecurityDescriptorLength(descriptor);
+    if (length==0 || length>65536) throw new InvalidOperationException("Invalid Knot lifecycle mutex security descriptor.");
+    var bytes=new byte[length]; Marshal.Copy(descriptor, bytes, 0, (int)length);
+    var security=new RawSecurityDescriptor(bytes, 0);
+    int count=security.DiscretionaryAcl==null ? 0 : security.DiscretionaryAcl.Count;
+    var sids=new string[count];var masks=new int[count];var flags=new int[count];var allows=new bool[count];
+    for (int i=0;i<count;i++) {
+     var ace=security.DiscretionaryAcl[i] as CommonAce;
+     if (ace==null) continue;
+     sids[i]=ace.SecurityIdentifier.Value;masks[i]=ace.AccessMask;flags[i]=(int)ace.AceFlags;
+     allows[i]=!ace.IsCallback && ace.AceQualifier==AceQualifier.AccessAllowed;
+    }
+    bool trusted=TrustedPolicy(security.Owner==null ? null : security.Owner.Value,
+      (security.ControlFlags & ControlFlags.DiscretionaryAclProtected)!=0, sids,masks,flags,allows);
+    if (!trusted) throw new InvalidOperationException("The Knot lifecycle mutex is not protected for SYSTEM and Administrators. Review its owner and permissions; no operation was started.");
+   } finally { if (descriptor!=IntPtr.Zero) LocalFree(descriptor); }
+  }
+  public void Dispose() {
+   if (mutex==null) return;
+   if (owned && threadId!=Thread.CurrentThread.ManagedThreadId) throw new InvalidOperationException("The Knot lifecycle lease must be released by its owning thread.");
+   try {
+    if (owned && !ReleaseMutex(mutex)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    owned=false;
+   } finally { mutex.Dispose(); mutex=null; }
+  }
+ }
+}
+'@
+}
+function Enter-DeskBridgeLifecycleLease {
+    param([scriptblock] $Acquire)
+    if ($Acquire) { $lease=& $Acquire }
+    else {
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'File-access lifecycle operations require Windows.' }
+        Initialize-DeskBridgeLifecycleLease
+        $lease=[DeskBridge.SFTPLifecycleLease]::Acquire()
+    }
+    if ($null -eq $lease -or -not $lease.PSObject.Methods['Dispose']) { throw 'The file-access lifecycle lease was not acquired.' }
+    return $lease
+}
+function Initialize-ManagedWorkerHandle {
+    if ('DeskBridge.ManagedWorkerHandle' -as [type]) { return }
+    Invoke-ProtectedCompilation -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 namespace DeskBridge {
- public static class ManagedWorkerStop {
-  [DllImport("kernel32.dll", SetLastError=true)] static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int pid);
+ public sealed class ManagedWorkerHandle : IDisposable {
+  [StructLayout(LayoutKind.Sequential)] struct BasicInformation {
+   public int ExitStatus; public IntPtr PebBaseAddress; public UIntPtr AffinityMask;
+   public int BasePriority; public UIntPtr UniqueProcessId; public UIntPtr InheritedFromUniqueProcessId;
+  }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern SafeProcessHandle OpenProcess(uint access, bool inherit, uint pid);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageName(SafeProcessHandle process, uint flags, StringBuilder name, ref uint size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(SafeProcessHandle process, out long created, out long exited, out long kernel, out long user);
+  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(SafeProcessHandle process, int kind, out BasicInformation information, int size, out int returned);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(SafeProcessHandle process, uint code);
-  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
-  public static void Stop(int pid, string expected) {
-   // Bind identity and termination to the SAME kernel handle, never a reused PID.
-   using (var process=OpenProcess(0x00101001, false, pid)) {
-    if (process.IsInvalid) { int error=Marshal.GetLastWin32Error(); if (error==87) return; throw new Win32Exception(error); }
-    var name=new StringBuilder(32768); uint size=32768;
-    if (!QueryFullProcessImageName(process, 0, name, ref size)) throw new Win32Exception(Marshal.GetLastWin32Error());
-    if (!String.Equals(name.ToString(), expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("OpenSSH worker identity changed.");
-    if (!TerminateProcess(process, 1)) {
-     int error=Marshal.GetLastWin32Error();
-     if (WaitForSingleObject(process, 0)!=0) throw new Win32Exception(error);
-    }
-    if (WaitForSingleObject(process, 5000)!=0) throw new InvalidOperationException("OpenSSH worker did not stop.");
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
+  SafeProcessHandle process;
+  public uint ProcessId { get; private set; }
+  public uint ParentProcessId { get; private set; }
+  public long CreatedFileTime { get; private set; }
+  public string ExecutablePath { get; private set; }
+  public bool Alive {
+   get {
+    if (process == null || process.IsClosed || process.IsInvalid) throw new InvalidOperationException("OpenSSH ownership handle is closed.");
+    uint state=WaitForSingleObject(process, 0);
+    if (state==0) return false;
+    if (state==258) return true;
+    throw new Win32Exception(Marshal.GetLastWin32Error());
    }
   }
+  public static ManagedWorkerHandle Capture(uint pid, string expected) {
+   var result=new ManagedWorkerHandle();
+   try {
+    // Hold this object from ancestry inspection through termination. Stop never reopens a PID.
+    result.process=OpenProcess(0x00101401, false, pid);
+    if (result.process.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+    var name=new StringBuilder(32768); uint size=32768;
+    if (!QueryFullProcessImageName(result.process, 0, name, ref size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    if (!String.Equals(name.ToString(), expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("OpenSSH worker identity changed.");
+    long created, exited, kernel, user;
+    if (!GetProcessTimes(result.process, out created, out exited, out kernel, out user)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    BasicInformation info; int returned; int length=Marshal.SizeOf(typeof(BasicInformation));
+    int status=NtQueryInformationProcess(result.process, 0, out info, length, out returned);
+    if (status!=0 || returned!=length || info.UniqueProcessId.ToUInt64()!=pid || info.InheritedFromUniqueProcessId.ToUInt64()>UInt32.MaxValue || created<=0)
+     throw new InvalidOperationException("OpenSSH native ancestry could not be verified.");
+    result.ProcessId=pid; result.ParentProcessId=(uint)info.InheritedFromUniqueProcessId.ToUInt64();
+    result.CreatedFileTime=created; result.ExecutablePath=name.ToString();
+    if (!result.Alive) throw new InvalidOperationException("OpenSSH worker exited during ownership inspection.");
+    return result;
+   } catch { result.Dispose(); throw; }
+  }
+  public void Stop() {
+   if (!Alive) return;
+   if (!TerminateProcess(process, 1)) {
+    int error=Marshal.GetLastWin32Error();
+    if (WaitForSingleObject(process, 0)!=0) throw new Win32Exception(error);
+   }
+   if (WaitForSingleObject(process, 5000)!=0) throw new InvalidOperationException("Owned OpenSSH worker did not stop.");
+  }
+  public void Dispose() { if (process!=null) { process.Dispose(); process=null; } }
  }
 }
 '@
-        }
-        $Terminate={param($worker) [DeskBridge.ManagedWorkerStop]::Stop([int]$worker.ProcessId,[string]$worker.ExecutablePath)}
+}
+function Stop-ManagedSessionWorkers {
+    param([Parameter(Mandatory=$true)][scriptblock] $BeforeStop,
+          [string] $WindowsDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows),
+          [scriptblock] $Inventory = { @(Get-CimInstance -ClassName Win32_Process -Filter "Name='sshd.exe' OR Name='sshd-session.exe' OR Name='sshd-auth.exe'" -ErrorAction Stop) },
+          [scriptblock] $ServiceInventory = { @(Get-CimInstance -ClassName Win32_Service -Filter "Name='sshd'" -ErrorAction Stop) },
+          [scriptblock] $Capture,[scriptblock] $Terminate,[scriptblock] $Release)
+    # The verified deployment caller supplies the account/service stop transaction. No mutation
+    # may occur until every worker is proven to descend from this live service instance.
+    $services=@(& $ServiceInventory)
+    if ($services.Count -ne 1) { throw 'The dedicated OpenSSH service could not be inspected. Review manually.' }
+    $service=$services[0]
+    foreach ($field in @('Name','State','ProcessId','PathName')) {
+        if (-not $service.PSObject.Properties[$field]) { throw 'Incomplete OpenSSH service identity. Review manually.' }
     }
-    foreach ($worker in $workers) { & $Terminate $worker }
-    # A successful stop call is not evidence that no child/session remains.
-    if (@(& $Inventory).Count -ne 0) { throw 'OpenSSH workers remain. Access stays disabled; review manually before resuming.' }
+    $expected=$WindowsDirectory+'\System32\OpenSSH\sshd.exe'
+    Assert-OpenSSHServicePath $service $expected
+    if ($service.Name -ine 'sshd' -or $service.State -cnotin @('Running','Stopped') -or
+        -not ($service.ProcessId -is [uint32] -or $service.ProcessId -is [int]) -or $service.ProcessId -lt 0 -or
+        ($service.State -ceq 'Stopped' -and $service.ProcessId -ne 0) -or ($service.State -ceq 'Running' -and $service.ProcessId -le 0)) {
+        throw 'OpenSSH service lifetime is ambiguous. Review manually before changing access.'
+    }
+    $workers=@(& $Inventory)
+    foreach ($worker in $workers) {
+        if (-not (Test-SystemOpenSSHWorkerPath $worker $WindowsDirectory) -or
+            -not $worker.PSObject.Properties['ProcessId'] -or
+            -not ($worker.ProcessId -is [uint32] -or $worker.ProcessId -is [int]) -or $worker.ProcessId -le 0) {
+            throw 'Unknown OpenSSH worker identity. Review the dedicated service manually.'
+        }
+    }
+    if ($service.State -ceq 'Stopped' -and $workers.Count -gt 0) {
+        # A persisted PID, executable path or orphan's parent PID cannot prove service ownership.
+        throw 'OpenSSH workers remain without a live managed service ancestor. No workers were stopped; manual recovery is required.'
+    }
+    if ($service.State -ceq 'Running' -and @($workers | Where-Object {$_.ProcessId -eq $service.ProcessId -and $_.Name -ieq 'sshd.exe'}).Count -ne 1) {
+        throw 'The live OpenSSH service process was not found. No workers were stopped; review manually.'
+    }
+    if (($Capture -or $Terminate -or $Release) -and -not ($Capture -and $Terminate -and $Release)) {
+        throw 'Synthetic worker callbacks must supply capture, termination and release together.'
+    }
+    if (-not $Capture -and $workers.Count -gt 0) {
+        Initialize-ManagedWorkerHandle
+        $Capture={param($worker) [DeskBridge.ManagedWorkerHandle]::Capture([uint32]$worker.ProcessId,[string]$worker.ExecutablePath)}
+        $Terminate={param($identity) $identity.Stop()}
+        $Release={param($identity) $identity.Dispose()}
+    }
+    $handles=New-Object 'Collections.Generic.List[object]'
+    $byPid=@{}
+    try {
+        # Capture the service root first. Native parent PID, time and image all come from
+        # the held process object, not from a stale CIM projection or a command-line guess.
+        foreach ($worker in @($workers | Sort-Object {$_.ProcessId -ne $service.ProcessId})) {
+            $identity=& $Capture $worker
+            if ($null -eq $identity) { throw 'OpenSSH ownership capture returned no handle.' }
+            $handles.Add($identity)
+            foreach ($field in @('ProcessId','ParentProcessId','CreatedFileTime','ExecutablePath','Alive')) {
+                if (-not $identity.PSObject.Properties[$field]) { throw 'Incomplete OpenSSH ownership handle.' }
+            }
+            if ($identity.ProcessId -ne $worker.ProcessId -or $identity.ExecutablePath -ine $worker.ExecutablePath -or
+                $identity.CreatedFileTime -isnot [long] -or $identity.CreatedFileTime -le 0 -or
+                -not ($identity.ParentProcessId -is [uint32] -or $identity.ParentProcessId -is [int]) -or $identity.ParentProcessId -lt 0 -or
+                $identity.Alive -isnot [bool] -or -not $identity.Alive -or $byPid.ContainsKey([string]$identity.ProcessId)) {
+                throw 'OpenSSH ownership changed during capture. No workers were stopped; review manually.'
+            }
+            $byPid[[string]$identity.ProcessId]=$identity
+        }
+        foreach ($identity in $handles) {
+            $cursor=$identity; $visited=@{}
+            while ($cursor.ProcessId -ne $service.ProcessId) {
+                $key=[string]$cursor.ProcessId
+                $parentKey=[string]$cursor.ParentProcessId
+                if ($visited.ContainsKey($key) -or -not $byPid.ContainsKey($parentKey)) {
+                    throw 'An OpenSSH worker has no proven managed service ancestry. No workers were stopped; review unrelated deployments manually.'
+                }
+                $visited[$key]=$true; $parent=$byPid[$parentKey]
+                if ($parent.CreatedFileTime -ge $cursor.CreatedFileTime) {
+                    throw 'OpenSSH parent identity was reused or ambiguous. No workers were stopped; review manually.'
+                }
+                $cursor=$parent
+            }
+        }
+        $current=@(& $ServiceInventory)
+        if ($current.Count -ne 1 -or $current[0].Name -ine 'sshd' -or $current[0].State -cne $service.State -or
+            $current[0].ProcessId -ne $service.ProcessId -or $current[0].PathName -cne $service.PathName) {
+            throw 'OpenSSH service changed during ownership inspection. No workers were stopped; review manually.'
+        }
+        foreach ($identity in $handles) {
+            if (-not $identity.Alive) { throw 'OpenSSH ancestry exited during inspection. No workers were stopped; review manually.' }
+        }
+        & $BeforeStop | Out-Null
+        # Descendants first, using only the captured handles. A later PID reuse cannot
+        # retarget termination, and a newly observed worker is never adopted here.
+        foreach ($identity in @($handles | Sort-Object CreatedFileTime -Descending)) { & $Terminate $identity }
+        # Stop success is not inactivity evidence: new/unknown workers force manual review.
+        if (@(& $Inventory).Count -ne 0) { throw 'OpenSSH workers remain. Access inactivity is unproven; review manually before resuming.' }
+        $stopped=@(& $ServiceInventory)
+        if ($stopped.Count -ne 1 -or $stopped[0].Name -ine 'sshd' -or $stopped[0].State -cne 'Stopped' -or
+            $stopped[0].ProcessId -ne 0 -or $stopped[0].PathName -cne $service.PathName) {
+            throw 'OpenSSH service inactivity could not be verified. Review manually before resuming.'
+        }
+    } finally {
+        foreach ($identity in $handles) { & $Release $identity }
+    }
 }
 function Save-DeskBridgeConnectionReply([object] $Reply,[object] $Dialog) {
     # Only local export is recoverable here. Backend/reply identity validation stays with the caller.
@@ -531,4 +765,4 @@ function Assert-ProtectedMetadata([string] $Path,[switch] $WindowsBinary) {
         throw 'Managed metadata ownership/permissions are not protected. 관리자가 해당 폴더와 권한을 확인하세요. 기존 폴더는 자동으로 변경하거나 삭제하지 않습니다.'
     }
 }
-Export-ModuleMember -Function Test-ManagedMetadataAcl,Initialize-ConnectionExportDirectory,Get-CanonicalPublicKey,Get-KeyFingerprint,Get-PrivateIPv4,ConvertFrom-MacSetup,Read-MacSetup,Get-ManagedDeploymentAction,Assert-ProtectedMetadata,Resolve-DesktopUser,Assert-OpenSSHServicePath,Remove-NewEmptyDirectory,Write-ManagedRecoveryRecord,Assert-DesktopSetupToken,Resolve-ManagedTransferUser,Get-ManagedDeployment,Assert-ProtectedDirectory,Assert-ProtectedFile,Assert-ManagedConfig,Assert-NoReparsePath,Get-ManagedDirectoryRecords,Set-ManagedConfigAcl,Assert-PrivateHostKey,Test-ManagedFirewallPolicy,Get-ManagedFirewallPolicy,Test-FileAccessInactive,Get-FileAccessInactivityProjection,Test-SystemOpenSSHWorkerPath,Invoke-ProtectedCompilation,Stop-ManagedSessionWorkers,Save-DeskBridgeConnectionReply,Get-NamedManagedFirewallRules,Remove-ManagedFirewallAccess
+Export-ModuleMember -Function Assert-NoOpenSSHWorkers,Enter-DeskBridgeLifecycleLease,Test-ManagedMetadataAcl,Initialize-ConnectionExportDirectory,Get-CanonicalPublicKey,Get-KeyFingerprint,Get-PrivateIPv4,ConvertFrom-MacSetup,Read-MacSetup,Get-ManagedDeploymentAction,Assert-ProtectedMetadata,Resolve-DesktopUser,Assert-OpenSSHServicePath,Remove-NewEmptyDirectory,Write-ManagedRecoveryRecord,Assert-DesktopSetupToken,Resolve-ManagedTransferUser,Get-ManagedDeployment,Assert-ProtectedDirectory,Assert-ProtectedFile,Assert-ManagedConfig,Assert-NoReparsePath,Get-ManagedDirectoryRecords,Set-ManagedConfigAcl,Assert-PrivateHostKey,Test-ManagedFirewallPolicy,Get-ManagedFirewallPolicy,Test-FileAccessInactive,Get-FileAccessInactivityProjection,Test-SystemOpenSSHWorkerPath,Invoke-ProtectedCompilation,Stop-ManagedSessionWorkers,Save-DeskBridgeConnectionReply,Get-NamedManagedFirewallRules,Remove-ManagedFirewallAccess

@@ -162,6 +162,27 @@ internal static class Checks
             catch (TargetInvocationException error) when (error.InnerException is InvalidDataException) { count++; continue; }
             throw new Exception("Unsafe native bootstrap path accepted");
         }
+        var nativeOwner = new[] { "--bootstrap-path", @"C:\Knot\DeskBridge-Windows.exe", "--bootstrap-pid", "1234", "--bootstrap-created", "133000000000000000" };
+        Expect((string)bootstrap.Invoke(null, new object[] { nativeOwner })! == nativeOwner[1], "Native update owner metadata was rejected");
+        var ownerPID = launcher.GetField("BootstrapParentID", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var ownerTime = launcher.GetField("BootstrapCreationFileTime", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Expect((int)ownerPID.GetValue(null)! == 1234 && (long)ownerTime.GetValue(null)! == 133000000000000000L,
+            "Native update owner metadata changed");
+        bootstrap.Invoke(null, new object[] { new[] { "--bootstrap-path", @"C:\Knot\DeskBridge-Windows.exe" } });
+        Expect((int)ownerPID.GetValue(null)! == 0 && (long)ownerTime.GetValue(null)! == 0,
+            "Legacy handoff retained another invocation's updater owner");
+        foreach (var invalidOwner in new[] {
+            new[] { "--bootstrap-path", nativeOwner[1], "--bootstrap-pid", "0", "--bootstrap-created", nativeOwner[5] },
+            new[] { "--bootstrap-path", nativeOwner[1], "--bootstrap-pid", "-1", "--bootstrap-created", nativeOwner[5] },
+            new[] { "--bootstrap-path", nativeOwner[1], "--bootstrap-pid", "1234", "--bootstrap-created", "0" },
+            new[] { "--bootstrap-path", nativeOwner[1], "--bootstrap-pid", "1234", "--bootstrap-created", "9223372036854775808" },
+            new[] { "--bootstrap-path", nativeOwner[1], "--elevated-operation", "1234", "--bootstrap-created", nativeOwner[5] }
+        }) {
+            bool rejected = false;
+            try { bootstrap.Invoke(null, new object[] { invalidOwner }); }
+            catch (TargetInvocationException error) when (error.InnerException is InvalidDataException) { rejected = true; }
+            Expect(rejected, "Malformed native update ownership metadata was admitted");
+        }
         var broker = launcher.GetMethod("ParseBrokerArguments", BindingFlags.Static | BindingFlags.NonPublic)!;
         var msiPath = launcher.GetMethod("ValidateMsiPath", BindingFlags.Static | BindingFlags.NonPublic)!;
         var sunshinePin = launcher.GetMethod("ParseSunshinePin", BindingFlags.Static | BindingFlags.NonPublic)!;

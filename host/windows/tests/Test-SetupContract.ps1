@@ -122,6 +122,10 @@ Expect-SourceOrder $enableSource 'Set-ManagedConfigAcl $config' '& $sshd -t' 'Pu
 Expect-SourceOrder $enableSource 'Assert-PrivateHostKey' 'Start-Service sshd' 'Host key permission checks precede activation in source'
 $resumeSource=[IO.File]::ReadAllText((Join-Path $root 'Resume-DeskBridgeSFTP.ps1'))
 Expect-SourceOrder $resumeSource 'Start-Service sshd' 'Set-Service -Name sshd -StartupType Automatic' 'Automatic startup follows successful reactivation in source'
+Expect-SourceOrder $disableSource 'Stop-ManagedSessionWorkers -BeforeStop {' 'Stop-Service -Name sshd' 'Revocation service stop is inside the proven ownership transaction'
+Expect-SourceOrder $resumeSource 'Stop-ManagedSessionWorkers -BeforeStop {' 'Disable-LocalUser -SID $user.SID' 'Reactivation ownership proof precedes its account mutation'
+Expect ($enableSource.Contains("if (`$service.Status -ne 'Stopped') { throw")) 'Initial setup refuses an unexpectedly active service'
+Expect ($enableSource.Contains('if ($startedService -or $wroteConfig) {') -and -not $enableSource.Contains('if ($createdState -or $startedService -or $wroteConfig) { Stop-Service')) 'A created state directory alone cannot authorize service stop'
 Expect-SourceOrder $resumeSource 'Set-Service -Name sshd -StartupType $record.StartupBefore' "'sshd_config.failed-'" 'Failed reactivation restores startup before config archive in source'
 Expect-SourceOrder $resumeSource 'Set-ManagedConfigAcl $config' '& $sshd -t' 'Restored config protection precedes server validation in source'
 $gui=[IO.File]::ReadAllText((Join-Path $root 'Setup-DeskBridge.ps1'))
@@ -234,32 +238,231 @@ foreach ($state in @('Installed','InstalledPendingRestart','RemovalPending','Rec
 Expect ((Get-KnotHeadlessAvailabilityText 'manifest-invalid') -match '새 Knot 배포') 'Invalid package metadata has distinct recovery guidance'
 Expect ((Get-KnotHeadlessAvailabilityText 'upstream-ipc-review') -match '보안 검토') 'Driver policy hold keeps its existing explanation'
 # Parse every shipped PowerShell file, without running the GUI or elevated backend.
-foreach ($file in Get-ChildItem -LiteralPath $root -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') }) {
- $tokens=$null;$errors=$null
- [void][Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
- Expect ($errors.Count -eq 0) ('PowerShell parse: ' + $file.Name)
+$repository=Split-Path (Split-Path $root -Parent) -Parent
+foreach ($scriptRoot in @($root,(Join-Path $repository 'scripts'),(Join-Path $repository 'packaging'))) {
+ foreach ($file in Get-ChildItem -LiteralPath $scriptRoot -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') }) {
+  # Windows PowerShell 5.1 treats BOM-less source as ANSI. Require explicit
+  # UTF-8 for translated text before parsing, including installer tooling.
+  $bytes=[IO.File]::ReadAllBytes($file.FullName); $asciiOnly=$true
+  foreach ($byte in $bytes) { if ($byte -gt 127) { $asciiOnly=$false; break } }
+  $utf8Bom=$bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191
+  Expect ($asciiOnly -or $utf8Bom) ('PowerShell 5.1 source encoding: ' + $file.Name)
+  $tokens=$null;$errors=$null
+  [void][Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
+  Expect ($errors.Count -eq 0) ('PowerShell parse: ' + $file.Name)
+ }
 }
 @{status='passed';checks=$count;scope='pure synthetic contract and syntax checks, no Windows configuration or GUI'} | ConvertTo-Json
 
-# Inert inventories and termination callbacks exercise revocation without any OS inventory.
-$script:stopCalls=0; $script:inventoryCalls=0
-$worker=[pscustomobject]@{Name='sshd-session.exe';ExecutablePath='C:\Windows\System32\OpenSSH\sshd-session.exe';ProcessId=[uint32]1234}
-Stop-ManagedSessionWorkers -WindowsDirectory 'C:\Windows' -Inventory {
-    $script:inventoryCalls++; if ($script:inventoryCalls -eq 1) { $worker }
-} -Terminate {param($item) $script:stopCalls++}
-Expect ($script:stopCalls -eq 1 -and $script:inventoryCalls -eq 2) 'Worker stop requires post-inventory'
-foreach ($invalid in @(
-    [pscustomobject]@{Name='sshd-session.exe';ExecutablePath=$null;ProcessId=[uint32]1234},
-    [pscustomobject]@{Name='sshd.exe';ExecutablePath='C:\Other\sshd.exe';ProcessId=[uint32]1234},
-    [pscustomobject]@{Name='sshd.exe';ExecutablePath='C:\Windows\System32\OpenSSH\sshd.exe';ProcessId=0}
-)) {
-    $before=$script:stopCalls
-    Reject {Stop-ManagedSessionWorkers -WindowsDirectory 'C:\Windows' -Inventory { $invalid } -Terminate {param($item) $script:stopCalls++}}
-    Expect ($script:stopCalls -eq $before) 'Unknown worker must be rejected before termination'
+# Compile the actual native definition without calling any Windows native function.
+# This also runs on Windows PowerShell 5.1 CI; no protected production compiler path is invoked.
+$moduleAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'SetupContract.psm1'),[ref]$null,[ref]$null)
+$initializer=$moduleAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Initialize-ManagedWorkerHandle'},$true)
+$nativeDefinition=$initializer.Find({param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] -and $node.StringConstantType -eq 'SingleQuotedHereString'},$true)
+Expect ($null -ne $nativeDefinition) 'Native ownership definition is present in the actual source'
+if (-not ('DeskBridge.ManagedWorkerHandle' -as [type])) {Add-Type -TypeDefinition $nativeDefinition.Value -ErrorAction Stop}
+$nativeType='DeskBridge.ManagedWorkerHandle' -as [type]
+$basic=$nativeType.GetNestedType('BasicInformation',[Reflection.BindingFlags]::NonPublic)
+$expectedSize=if ([IntPtr]::Size -eq 8) {48} else {24}
+Expect ([Runtime.InteropServices.Marshal]::SizeOf([type]$basic) -eq $expectedSize) 'Native process basic information matches the active x86/x64 ABI size'
+$offsets=if ([IntPtr]::Size -eq 8) {@(0,8,16,24,32,40)} else {@(0,4,8,12,16,20)}
+$nativeFields=@('ExitStatus','PebBaseAddress','AffinityMask','BasePriority','UniqueProcessId','InheritedFromUniqueProcessId')
+for ($i=0;$i -lt $nativeFields.Count;$i++) {
+ Expect ([Runtime.InteropServices.Marshal]::OffsetOf([type]$basic,$nativeFields[$i]).ToInt32() -eq $offsets[$i]) ('Native ownership ABI offset: '+$nativeFields[$i])
 }
-Reject {Stop-ManagedSessionWorkers -WindowsDirectory 'C:\Windows' -Inventory {$worker} -Terminate {param($item)}}
-Reject {Stop-ManagedSessionWorkers -WindowsDirectory 'C:\Windows' -Inventory {throw 'synthetic inventory denied'} -Terminate {param($item)}}
-Write-Output ('Worker-stop synthetic checks completed; total checks: ' + $count)
+# Fixed-width inert copies check both layouts even when the runner has one architecture.
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+[StructLayout(LayoutKind.Sequential)] public struct KnotOwnershipLayout32 {
+ public int ExitStatus, PebBaseAddress, AffinityMask, BasePriority, UniqueProcessId, InheritedFromUniqueProcessId;
+}
+[StructLayout(LayoutKind.Sequential)] public struct KnotOwnershipLayout64 {
+ public int ExitStatus; public long PebBaseAddress, AffinityMask;
+ public int BasePriority; public long UniqueProcessId, InheritedFromUniqueProcessId;
+}
+'@
+Expect ([Runtime.InteropServices.Marshal]::SizeOf([type][KnotOwnershipLayout32]) -eq 24) 'Inert x86 process basic information layout'
+Expect ([Runtime.InteropServices.Marshal]::SizeOf([type][KnotOwnershipLayout64]) -eq 48) 'Inert x64 process basic information layout'
+
+function Reject-NativeOwnershipGuard([scriptblock] $Body,[string] $ExpectedMessage,[string] $Boundary) {
+ $failure=$null
+ try {& $Body | Out-Null} catch {
+  $failure=$_.Exception
+  while ($failure.InnerException) {$failure=$failure.InnerException}
+ }
+ Expect ($failure -is [InvalidOperationException] -and $failure.Message -ceq $ExpectedMessage) ('Actual native ownership guard did not reject at '+$Boundary)
+}
+# Member-access property reads suppress .NET getter exceptions in PowerShell.
+# Invoke the actual getter METHOD so the assertion observes its precise guard,
+# rather than mistaking a silent null result or a binder error for a rejection.
+$closedProbe=New-Object DeskBridge.ManagedWorkerHandle
+try {
+ $closedProbe.Dispose()
+ Reject-NativeOwnershipGuard {$closedProbe.get_Alive()} 'OpenSSH ownership handle is closed.' 'fresh empty/disposed handle'
+} finally {$closedProbe.Dispose()}
+
+# On Windows only, exercise the actual native class against one NEW child owned by
+# this test process. Never inspect sshd/CIM/services/accounts/firewall or existing PIDs.
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+ $nativeFixtureTimer=[Diagnostics.Stopwatch]::StartNew()
+ $childScript=Join-Path ([IO.Path]::GetTempPath()) ('knot-owned-native-child-'+[guid]::NewGuid().ToString('N')+'.ps1')
+ $childScriptCreated=$false;$ownedChild=$null;$ownedHandle=$null;$childStarted=$false
+ try {
+  $stream=[IO.File]::Open($childScript,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  $childScriptCreated=$true
+  try {
+   $bytes=[Text.Encoding]::UTF8.GetBytes('Start-Sleep -Seconds 18')
+   $stream.Write($bytes,0,$bytes.Length)
+  } finally {$stream.Dispose()}
+  $currentHost=[Diagnostics.Process]::GetCurrentProcess()
+  try {$hostExecutable=$currentHost.MainModule.FileName} finally {$currentHost.Dispose()}
+  $start=New-Object Diagnostics.ProcessStartInfo
+  $start.FileName=$hostExecutable
+  $start.Arguments='-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$childScript+'"'
+  $start.UseShellExecute=$false;$start.CreateNoWindow=$true
+  $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+  $ownedChild=New-Object Diagnostics.Process;$ownedChild.StartInfo=$start
+  if (-not $ownedChild.Start()) {throw 'Could not start the fresh native ownership child fixture'}
+  $childStarted=$true
+  $ownedHandle=[DeskBridge.ManagedWorkerHandle]::Capture([uint32]$ownedChild.Id,$hostExecutable)
+  Expect ($ownedHandle.ProcessId -eq $ownedChild.Id -and $ownedHandle.ParentProcessId -eq [uint32]$PID -and $ownedHandle.CreatedFileTime -gt 0 -and $ownedHandle.Alive) 'Actual Windows native capture binds the fresh child PID, current test parent, creation time, image and liveness'
+  Reject-NativeOwnershipGuard {[DeskBridge.ManagedWorkerHandle]::Capture([uint32]$ownedChild.Id,'C:\SyntheticWrongImage\sshd.exe')} 'OpenSSH worker identity changed.' 'fresh child wrong expected image'
+  Expect (-not $ownedChild.HasExited -and $ownedHandle.Alive) 'Rejecting a wrong expected image never terminates the fresh child'
+  $ownedHandle.Stop()
+  Expect ($ownedChild.WaitForExit(5000) -and -not $ownedHandle.Alive) 'Actual native stop terminates only the same held test-child object'
+  $ownedHandle.Dispose()
+  Reject-NativeOwnershipGuard {$ownedHandle.get_Alive()} 'OpenSSH ownership handle is closed.' 'disposed held child handle'
+ } finally {
+  if ($ownedHandle) {$ownedHandle.Dispose()}
+  if ($ownedChild) {
+   try {
+    # This Process instance retains the handle obtained from Start; never reopen a PID.
+    if ($childStarted -and -not $ownedChild.HasExited) {$ownedChild.Kill();[void]$ownedChild.WaitForExit(5000)}
+   } finally {$ownedChild.Dispose()}
+  }
+  if ($childScriptCreated) {[IO.File]::Delete($childScript)}
+ }
+ $nativeFixtureTimer.Stop()
+ Expect ($nativeFixtureTimer.Elapsed.TotalSeconds -lt 30) 'Native owned-child fixture completes within its bounded lifetime'
+ Write-Output 'Native worker handle fixture: passed on Windows using one fresh owned child only'
+} else {
+ Write-Output 'Native worker handle fixture: skipped (Windows APIs unavailable); actual definition compilation and ABI projections passed'
+}
+
+# Actual transaction with wholly inert service/process inventories and held-handle projections.
+# No Get-CimInstance, Stop-Service, process termination or native API is called by these fixtures.
+function New-OwnershipWorker([uint32] $Id,[uint32] $Parent,[long] $Created,[string] $Name='sshd.exe') {
+ [pscustomobject]@{Name=$Name;ExecutablePath=('C:\Windows\System32\OpenSSH\'+$Name);ProcessId=$Id;
+  NativeParent=$Parent;NativeCreated=$Created;NativeAlive=$true;CommandLine='unused: never an ownership signal'}
+}
+function Invoke-OwnershipFixture([hashtable] $Case) {
+ $service=[pscustomobject]@{Name='sshd';State='Running';ProcessId=[uint32]100;PathName='C:\Windows\System32\OpenSSH\sshd.exe'}
+ $workers=@((New-OwnershipWorker 100 4 1000),(New-OwnershipWorker 101 100 2000 'sshd-session.exe'),(New-OwnershipWorker 102 101 3000 'sshd-auth.exe'))
+ if ($Case.ContainsKey('Workers')) {$workers=@($Case.Workers)}
+ if ($Case.ContainsKey('Stopped') -and $Case.Stopped) {$service.State='Stopped';$service.ProcessId=[uint32]0}
+ $script:ownership=[pscustomobject]@{Case=$Case;Service=$service;Workers=$workers;InventoryCalls=0;ServiceCalls=0;
+  Captured=@();Terminated=@();Released=@();BeforeCalls=0;Events=@();Succeeded=$false;Error=''}
+ try {
+  Stop-ManagedSessionWorkers -WindowsDirectory 'C:\Windows' -BeforeStop {
+   $o=$script:ownership; $o.BeforeCalls++; $o.Events+=@('before-stop')
+   $o.Service.State='Stopped'; $o.Service.ProcessId=[uint32]0
+   if ($o.Case.ContainsKey('BeforeFailure')) {throw 'synthetic stop callback failure'}
+  } -Inventory {
+   $o=$script:ownership; $o.InventoryCalls++
+   if ($o.InventoryCalls -eq 1) {
+    if ($o.Case.ContainsKey('InventoryFailure')) {throw 'synthetic inventory denied'}
+    return $o.Workers
+   }
+   if ($o.Case.ContainsKey('PostInventoryFailure')) {throw 'synthetic post inventory denied'}
+   if ($o.Case.ContainsKey('PostWorkers')) {return $o.Case.PostWorkers}
+  } -ServiceInventory {
+   $o=$script:ownership; $o.ServiceCalls++
+   if ($o.Case.ContainsKey('MissingService')) {return}
+   if ($o.ServiceCalls -eq 2) {
+    if ($o.Case.ContainsKey('RecheckPid')) {$o.Service.ProcessId=[uint32]200}
+    if ($o.Case.ContainsKey('RecheckPath')) {$o.Service.PathName='C:\Other\sshd.exe'}
+    if ($o.Case.ContainsKey('RecheckState')) {$o.Service.State='Stopped';$o.Service.ProcessId=[uint32]0}
+    if ($o.Case.ContainsKey('RecheckExit')) {$o.Captured[0].Alive=$false}
+   }
+   if ($o.ServiceCalls -eq 3 -and $o.Case.ContainsKey('PostServiceActive')) {$o.Service.State='Running';$o.Service.ProcessId=[uint32]200}
+   # Project a value snapshot, matching fresh CIM instances rather than a shared mutable object.
+   [pscustomobject]@{Name=$o.Service.Name;State=$o.Service.State;ProcessId=$o.Service.ProcessId;PathName=$o.Service.PathName}
+  } -Capture {
+   param($worker)
+   $o=$script:ownership
+   if ($o.Case.ContainsKey('CaptureFailure') -and $worker.ProcessId -eq 101) {throw 'synthetic handle open denied'}
+   $identity=[pscustomobject]@{ProcessId=$worker.ProcessId;ParentProcessId=$worker.NativeParent;CreatedFileTime=[long]$worker.NativeCreated;
+    ExecutablePath=$worker.ExecutablePath;Alive=$worker.NativeAlive;Token=[guid]::NewGuid().ToString('N')}
+   if ($o.Case.ContainsKey('CapturePidMismatch') -and $worker.ProcessId -eq 101) {$identity.ProcessId=[uint32]201}
+   if ($o.Case.ContainsKey('CaptureImageMismatch') -and $worker.ProcessId -eq 101) {$identity.ExecutablePath='C:\Other\sshd.exe'}
+   $o.Captured+=@($identity); $o.Events+=@('capture-'+$worker.ProcessId)
+   $identity
+  } -Terminate {
+   param($identity)
+   $o=$script:ownership
+   if ($o.BeforeCalls -ne 1) {throw 'Termination preceded ownership preflight/stop callback'}
+   $held=@($o.Captured | Where-Object {$_.Token -ceq $identity.Token})
+   if ($held.Count -ne 1 -or -not [object]::ReferenceEquals($held[0],$identity)) {throw 'Termination reopened or replaced the held object'}
+   $o.Terminated+=@($identity);$o.Events+=@('terminate-'+$identity.ProcessId)
+   if ($o.Case.ContainsKey('TerminateFailure')) {throw 'synthetic termination denied'}
+  } -Release {
+   param($identity)
+   $o=$script:ownership;$o.Released+=@($identity);$o.Events+=@('release-'+$identity.ProcessId)
+  }
+  $script:ownership.Succeeded=$true
+ } catch {$script:ownership.Error=$_.Exception.Message}
+ return $script:ownership
+}
+$owned=Invoke-OwnershipFixture @{}
+Expect ($owned.Succeeded -and $owned.BeforeCalls -eq 1 -and $owned.InventoryCalls -eq 2 -and $owned.ServiceCalls -eq 3) 'Proven live service transaction requires final worker and service inventories'
+Expect (($owned.Terminated.ProcessId -join ',') -ceq '102,101,100') 'Held descendants stop before their service root'
+Expect ($owned.Captured.Count -eq 3 -and $owned.Released.Count -eq 3) 'Every captured process object is released after successful termination'
+$permuted=Invoke-OwnershipFixture @{Workers=@((New-OwnershipWorker 102 101 3000 'sshd-auth.exe'),(New-OwnershipWorker 101 100 2000 'sshd-session.exe'),(New-OwnershipWorker 100 4 1000))}
+Expect ($permuted.Succeeded -and $permuted.Captured[0].ProcessId -eq 100) 'Service handle is captured first regardless of inventory order'
+$stopped=Invoke-OwnershipFixture @{Stopped=$true;Workers=@()}
+Expect ($stopped.Succeeded -and $stopped.BeforeCalls -eq 1 -and $stopped.Captured.Count -eq 0) 'A stopped service with no workers may finish the verified transaction'
+$foreign=New-OwnershipWorker 200 44 4000
+$foreign.CommandLine='sshd.exe -f C:\independent.conf -p 2222'
+$cases=@(
+ @{Name='independent same-system-binary alternate config';Workers=@((New-OwnershipWorker 100 4 1000),$foreign)},
+ @{Name='independent daemon with an identical command line';Workers=@((New-OwnershipWorker 100 4 1000),(New-OwnershipWorker 200 44 4000))},
+ @{Name='stopped service with a remnant';Stopped=$true;Workers=@((New-OwnershipWorker 101 100 2000 'sshd-session.exe'))},
+ @{Name='missing live service root';Workers=@((New-OwnershipWorker 101 100 2000 'sshd-session.exe'))},
+ @{Name='missing intermediate ancestor';Workers=@((New-OwnershipWorker 100 4 1000),(New-OwnershipWorker 102 101 3000 'sshd-auth.exe'))},
+ @{Name='orphan whose parent PID is absent';Workers=@((New-OwnershipWorker 100 4 1000),(New-OwnershipWorker 102 999 3000 'sshd-auth.exe'))},
+ @{Name='reused parent PID is younger than the child';Workers=@((New-OwnershipWorker 100 4 3000),(New-OwnershipWorker 101 100 2000 'sshd-session.exe'))},
+ @{Name='equal creation times cannot prove ancestry';Workers=@((New-OwnershipWorker 100 4 1000),(New-OwnershipWorker 101 100 1000 'sshd-session.exe'))},
+ @{Name='cyclic ancestry';Workers=@((New-OwnershipWorker 100 4 1000),(New-OwnershipWorker 101 102 2000),(New-OwnershipWorker 102 101 3000))},
+ @{Name='duplicate PID';Workers=@((New-OwnershipWorker 100 4 1000),(New-OwnershipWorker 101 100 2000),(New-OwnershipWorker 101 100 2000))},
+ @{Name='worker inventory denied';InventoryFailure=$true},@{Name='service inventory absent';MissingService=$true},
+ @{Name='kernel handle capture denied';CaptureFailure=$true},@{Name='PID changed during capture';CapturePidMismatch=$true},
+ @{Name='image changed during capture';CaptureImageMismatch=$true},@{Name='service PID changed before stop';RecheckPid=$true},
+ @{Name='service image changed before stop';RecheckPath=$true},@{Name='service stopped before ownership completed';RecheckState=$true},
+ @{Name='held ancestor exited before stop';RecheckExit=$true}
+)
+foreach ($invalid in $cases) {
+ $result=Invoke-OwnershipFixture $invalid
+ Expect (-not $result.Succeeded -and $result.BeforeCalls -eq 0 -and $result.Terminated.Count -eq 0) ('Ambiguous ownership refuses before any stop callback: '+$invalid.Name)
+ Expect ($result.Released.Count -eq $result.Captured.Count) ('Every partial capture is released after refusal: '+$invalid.Name)
+}
+$badPath=New-OwnershipWorker 101 100 2000;$badPath.ExecutablePath='C:\Other\sshd.exe'
+$badPid=New-OwnershipWorker 101 100 2000;$badPid.ProcessId=0
+$noImage=New-OwnershipWorker 101 100 2000;$noImage.ExecutablePath=$null
+$dead=New-OwnershipWorker 101 100 2000;$dead.NativeAlive=$false
+foreach ($invalid in @($badPath,$badPid,$noImage,$dead)) {
+ $result=Invoke-OwnershipFixture @{Workers=@((New-OwnershipWorker 100 4 1000),$invalid)}
+ Expect (-not $result.Succeeded -and $result.BeforeCalls -eq 0 -and $result.Terminated.Count -eq 0) 'Malformed or exited worker never authorizes mutation'
+ Expect ($result.Released.Count -eq $result.Captured.Count) 'Malformed worker failure releases every opened object'
+}
+foreach ($failure in @(@{BeforeFailure=$true},@{TerminateFailure=$true},@{PostInventoryFailure=$true},@{PostServiceActive=$true},@{PostWorkers=@((New-OwnershipWorker 101 100 2000 'sshd-session.exe'))})) {
+ $result=Invoke-OwnershipFixture $failure
+ Expect (-not $result.Succeeded -and $result.BeforeCalls -eq 1) 'A failed stop or failed final inactivity projection cannot report completion'
+ Expect ($result.Released.Count -eq $result.Captured.Count) 'Stop/post-inventory failure releases all held objects'
+}
+$newWorker=Invoke-OwnershipFixture @{PostWorkers=@($foreign)}
+Expect (-not $newWorker.Succeeded -and $newWorker.Terminated.Count -eq 3 -and 200 -notin $newWorker.Terminated.ProcessId) 'A newly observed independent worker is never adopted or terminated and prevents completion'
+Reject {Stop-ManagedSessionWorkers -BeforeStop {} -WindowsDirectory 'C:\Windows' -Inventory {throw 'synthetic inventory denied'} -ServiceInventory {[pscustomobject]@{Name='sshd';State='Stopped';ProcessId=[uint32]0;PathName='C:\Windows\System32\OpenSSH\sshd.exe'}} -Terminate {param($item)}}
+Write-Output ('Worker ownership synthetic checks completed; total checks: ' + $count)
 
 # Query only the managed rule; classify provider-generated absence, never access/store errors.
 $script:firewallMode='present'; $script:queriedName=''
@@ -303,3 +506,14 @@ try {
     }
 } finally { [IO.Directory]::Delete($exportFixture,$true) }
 Write-Output ('Final export + contract checks: ' + $count)
+
+# The reactivation fixture runs the actual script control flow through inert platform seams.
+& (Join-Path $PSScriptRoot 'Test-SFTPReactivation.ps1')
+
+# Global serialization is exercised only with inert factories or fresh GUID test names.
+& (Join-Path $PSScriptRoot 'Test-LifecycleLease.ps1')
+
+# Bounded loopback startup/open/PIN checks use fake transports and inert UI leaves.
+# This suite therefore runs under both existing Windows PowerShell 5.1 and PS7 CI lanes.
+& (Join-Path $PSScriptRoot 'Test-SetupReadiness.ps1')
+& (Join-Path $PSScriptRoot 'Test-Enrollment.ps1')

@@ -447,8 +447,8 @@ public final class VideoDecoder {
     /// gate-ON edge and by a VideoToolbox decode failure, resolved at the
     /// submit boundary. Either way the reference chain is broken, so feeding
     /// any P-frame would macroblock.
-    /// `decodeGateDisposition` either clears it on a genuine IDR (feed it -
-    /// the resync IDR won the race) or converts it into DR_NEED_IDR exactly
+    /// `commitReservedDecode` clears it only after reserving a genuine IDR.
+    /// `decodeGateDisposition` converts it into DR_NEED_IDR exactly
     /// once, handing the wait to the depacketizer's EXISTING wait-for-IDR
     /// recovery gate (`requestDecoderRefresh` - the same reference-
     /// invalidation flush the sustained-backlog-stall path reuses). Guarded

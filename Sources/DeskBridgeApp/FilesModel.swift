@@ -13,6 +13,15 @@ final class FilesModel: ObservableObject {
     @Published var pinnedHostKey: String
     @Published var generatedPublicKey = ""
     @Published var setupAddresses = ""
+    @Published var enrollmentBindAddress = ""
+    @Published var enrollmentLink = ""
+    var enrollmentServer: EnrollmentServer?
+    var enrollmentOperation: Task<Void, Never>?
+    var enrollmentGeneration = UUID()
+    @Published var enrollmentConfirmation: UUID?
+    @Published var enrollmentModalActive = false
+    var enrollmentActive: Bool { enrollmentServer != nil || enrollmentOperation != nil || enrollmentConfirmation != nil || enrollmentModalActive }
+    var activityAllowed: Bool { !KnotUpdates.shared.installationPending && !enrollmentModalActive }
     var keyFingerprint: String {
         // Reuse exactly the transport's key parser, independently of unfinished
         // address/user/key-file drafts. This constructor performs no I/O.
@@ -36,12 +45,28 @@ final class FilesModel: ObservableObject {
     private let desktop: DesktopModel
     var desktopForSetup: DesktopModel { desktop }
     static func failureMessage(_ error: any Error) -> String {
-        if error is SFTPError || error is AppFailure || error is EndpointPolicy.Failure || error is BoundedRegularFile.Failure || error is SettingsStore.Failure || error is CorePrivateStorageFailure {
+        if error is SFTPError || error is AppFailure || error is EndpointPolicy.Failure || error is BoundedRegularFile.Failure || error is SettingsStore.Failure || error is CorePrivateStorageFailure || error is EnrollmentProtocol.Failure {
             return error.localizedDescription
         }
         return "파일 작업을 완료하지 못했습니다. 설정 파일과 개인 키의 접근 권한을 확인한 뒤 다시 시도하세요."
     }
-    var canExchangeSetup: Bool { !shuttingDown && desktop.supportsFiles && !busy && !connected && !desktop.busy && !desktop.streaming }
+    var canExchangeSetup: Bool { activityAllowed && !shuttingDown && desktop.supportsFiles && !busy && !connected && desktop.canChoosePC }
+    struct KeyReplacementSnapshot: Equatable {
+        let savedPath: String
+        let draftPath: String
+        var requiresConfirmation: Bool {
+            [savedPath, draftPath].contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+    }
+    var keyReplacementSnapshot: KeyReplacementSnapshot {
+        .init(savedPath: desktop.settings.sshIdentityPath, draftPath: identityPath)
+    }
+    var requiresKeyReplacementConfirmation: Bool { keyReplacementSnapshot.requiresConfirmation }
+    func requireKeyReplacementSelection(_ snapshot: KeyReplacementSnapshot) throws {
+        guard keyReplacementSnapshot == snapshot else {
+            throw AppFailure("저장된 SSH 키나 입력 중인 키가 바뀌었습니다. 현재 키를 확인한 뒤 다시 시도하세요.")
+        }
+    }
     static func connectionMatches(connected: Bool, connectedAddress: String?, validatedAddress: String) -> Bool {
         guard connected, let connectedAddress,
               let canonical = try? EndpointPolicy.validatedAddress(validatedAddress), canonical == validatedAddress else { return false }
@@ -59,8 +84,8 @@ final class FilesModel: ObservableObject {
         desktop.fileActivity = self
     }
     var selectedEntry: SFTPEntry? { entries.first { $0.path == selection } }
-    func perform(_ body: @escaping @MainActor () async throws -> Void) {
-        guard !shuttingDown, desktop.supportsFiles, !busy else { return }
+    func perform(allowDuringUpdate: Bool = false, _ body: @escaping @MainActor () async throws -> Void) {
+        guard !shuttingDown, desktop.supportsFiles, !busy, (allowDuringUpdate || activityAllowed) else { return }
         busy = true; errorMessage = nil; progress = nil; committedTransfer = nil
         let current = UUID(); generation = current
         operation = Task { [weak self] in
@@ -86,7 +111,7 @@ final class FilesModel: ObservableObject {
     }
     func recordCommittedTransfer(_ message: String) { committedTransfer = message }
     func connect(address input: String? = nil) {
-        guard !shuttingDown, desktop.supportsFiles, !busy, !connected else { return }
+        guard activityAllowed, !shuttingDown, desktop.supportsFiles, !busy, !connected else { return }
         let host: String
         do {
             try desktop.assertStorageReady()
@@ -135,7 +160,7 @@ final class FilesModel: ObservableObject {
             let next = path ?? currentPath
             let listed = try await client.list(path: next)
             entries = listed; currentPath = next; selection = nil
-            status = "\(listed.count)개 항목"
+            status = "표시된 \(listed.count)개 항목"
         }
     }
     func parent() {
@@ -146,7 +171,7 @@ final class FilesModel: ObservableObject {
         try desktop.assertFileCapability()
         guard connected, let client else { throw SFTPError.disconnected }
         guard connectedAddress == (try? EndpointPolicy.validatedAddress(desktop.address)) else {
-            throw SFTPError.connectionLost("대상 PC가 바뀌었습니다. 파일 연결을 다시 하세요.")
+            throw SFTPError.targetChanged
         }
         return client
     }
@@ -157,13 +182,13 @@ final class FilesModel: ObservableObject {
         if let previous { await previous.disconnect() }
     }
     func upload() {
-        guard desktop.supportsFiles, !busy, connected else { return }
+        guard activityAllowed, desktop.supportsFiles, !busy, connected else { return }
         let targetAddress = connectedAddress
         let panel = NSOpenPanel()
         panel.title = "Windows로 보낼 파일"; panel.canChooseDirectories = false
         panel.canChooseFiles = true; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard desktop.supportsFiles, !busy, connected, connectedAddress == targetAddress else { return }
+        guard activityAllowed, desktop.supportsFiles, !busy, connected, connectedAddress == targetAddress else { return }
         perform { [self] in
             let client = try checkedClient()
             status = "Windows로 보내는 중…"
@@ -174,7 +199,7 @@ final class FilesModel: ObservableObject {
         }
     }
     func download() {
-        guard desktop.supportsFiles, !busy, connected, let entry = selectedEntry, entry.kind == .file else { return }
+        guard activityAllowed, desktop.supportsFiles, !busy, connected, let entry = selectedEntry, entry.kind == .file else { return }
         let targetAddress = connectedAddress
         let panel = NSOpenPanel()
         panel.title = "Mac에 받을 폴더"
@@ -183,7 +208,7 @@ final class FilesModel: ObservableObject {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         let url = folder.appendingPathComponent(entry.name)
-        guard desktop.supportsFiles, !busy, connected, connectedAddress == targetAddress else { return }
+        guard activityAllowed, desktop.supportsFiles, !busy, connected, connectedAddress == targetAddress else { return }
         guard !FileManager.default.fileExists(atPath: url.path) else {
             errorMessage = SFTPError.destinationExists.localizedDescription
             return
@@ -209,32 +234,40 @@ final class FilesModel: ObservableObject {
         }
     }
     func cancel() {
+        if enrollmentActive { cancelEnrollment(); return }
         operation?.cancel(); client?.cancel(); connected = false
         connectedAddress = nil; entries = []; selection = nil; progress = nil
         status = "취소 중…"
     }
     func disconnect() {
         guard !busy else { cancel(); return }
-        perform { [self] in
+        perform(allowDuringUpdate: true) { [self] in
             await clearConnection()
             status = "파일 연결을 끊었습니다."
         }
     }
-    func generateKey() {
-        guard !shuttingDown, desktop.supportsFiles, !connected else { return }
+    func generateKey(replacingIdentity confirmedIdentity: KeyReplacementSnapshot? = nil) {
+        guard activityAllowed, !shuttingDown, desktop.supportsFiles, !busy, !connected else { return }
+        let requestedIdentity = keyReplacementSnapshot
+        guard !requestedIdentity.requiresConfirmation || confirmedIdentity == requestedIdentity else {
+            errorMessage = "설정된 SSH 키를 바꾸려면 먼저 확인하세요. 새 공개 키는 Windows에 다시 등록해야 합니다."
+            return
+        }
         perform { [self] in
             try desktop.assertStorageReady()
+            try requireKeyReplacementSelection(requestedIdentity)
             let directory = desktop.store.directory
             let result = try await Task.detached(priority: .userInitiated) { try SSHKeyManager.generate(in: directory) }.value
             try Task.checkCancellation()
             guard !connected else { throw AppFailure("파일 연결을 끊은 뒤 키를 변경하세요.") }
+            try requireKeyReplacementSelection(requestedIdentity)
             try desktop.rememberFileIdentity(path: result.privateKey.path)
             identityPath = result.privateKey.path; generatedPublicKey = result.publicKey
             status = "Mac 전용 키를 만들었습니다. 아래 공개 키를 Windows 설정 도우미에 등록하세요."
         }
     }
     func chooseKey() {
-        guard !shuttingDown, desktop.supportsFiles, !busy, !connected else { return }
+        guard activityAllowed, !shuttingDown, desktop.supportsFiles, !busy, !connected else { return }
         let panel = NSOpenPanel()
         panel.title = "이 연결에 사용할 SSH 개인 키"; panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -248,7 +281,7 @@ final class FilesModel: ObservableObject {
     /// Recheck after the modal run loop; publish only after storage succeeds.
     func applySelectedIdentity(_ url: URL) throws {
         try desktop.assertFileCapability()
-        guard !shuttingDown, desktop.supportsFiles, !busy, !connected else { throw AppFailure("파일 작업과 연결을 마친 뒤 키를 변경하세요.") }
+        guard activityAllowed, !shuttingDown, desktop.supportsFiles, !busy, !connected else { throw AppFailure("파일 작업과 연결을 마친 뒤 키를 변경하세요.") }
         guard url.isFileURL else { throw AppFailure("이 연결에 사용할 Mac의 키 파일을 선택하세요.") }
         guard url.pathExtension.lowercased() != "pub" else {
             throw AppFailure(".pub 공개 키가 아닌 개인 키 파일을 선택하세요. 공개 키는 설정 파일을 만들 때 따로 읽습니다.")
@@ -258,6 +291,7 @@ final class FilesModel: ObservableObject {
         errorMessage = nil
     }
     func beginShutdown() {
+        cancelEnrollment()
         shuttingDown = true
         generation = UUID()
         operation?.cancel(); client?.revoke()

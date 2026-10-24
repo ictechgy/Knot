@@ -12,7 +12,7 @@ try {
     # EngineStore is compiled to retain the real EngineLease type. No installation method runs.
     [IO.File]::WriteAllText($pin,'namespace DeskBridge.Reverse { internal static class EnginePin { internal const string Version="synthetic", Url="https://github.com/synthetic", SHA256="unused"; internal const long Bytes=1; internal static readonly RuntimeEntry[] Entries=new RuntimeEntry[0]; } }')
     $executable=Join-Path $directory 'Lifecycle.exe'
-    $sources=@('client/windows/EngineProcess.cs','client/windows/EngineStore.cs','client/windows/PrivateFiles.cs','client/windows/ConnectionPolicy.cs','client/windows/ReverseErrors.cs','scripts/tests/EngineProcessLifecycle.cs') | ForEach-Object {Join-Path $repository $_}
+    $sources=@('client/windows/EngineProcess.cs','client/windows/StreamQualityPolicy.cs','client/windows/EngineStore.cs','client/windows/PrivateFiles.cs','client/windows/ConnectionPolicy.cs','client/windows/ReverseErrors.cs','scripts/tests/EngineProcessLifecycle.cs') | ForEach-Object {Join-Path $repository $_}
     & $compiler /nologo /target:exe /platform:x64 /langversion:5 /main:DeskBridge.Reverse.EngineProcessLifecycle ("/out:"+$executable) /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll @sources $pin
     if ($LASTEXITCODE -ne 0) {throw 'Lifecycle fixture compilation failed'}
     $start=New-Object Diagnostics.ProcessStartInfo

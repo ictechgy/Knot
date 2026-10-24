@@ -47,6 +47,13 @@ $quick=Join-Path (Split-Path $file -Parent) ('Knot-'+$version+'-windows-x64-quic
 Copy-Item -LiteralPath (Join-Path $root 'build\windows\Knot-Windows.exe') -Destination $quick -Force
 $notice=Join-Path (Split-Path $file -Parent) 'WindowsRuntime-NOTICE.txt'
 Copy-Item -LiteralPath (Join-Path $root 'Vendor\WindowsRuntime\NOTICE') -Destination $notice -Force
-@($file,$quick,$notice) | ForEach-Object {
+$records=@('Knot-Windows.build.json','Knot-Windows.checks.json') | ForEach-Object {
+ $source=Join-Path $root ('build\windows\'+$_)
+ if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {throw 'The exact helper build/check records are required for distribution'}
+ $destination=Join-Path (Split-Path $file -Parent) $_
+ Copy-Item -LiteralPath $source -Destination $destination -Force
+ $destination
+}
+(@($file,$quick,$notice)+@($records)) | ForEach-Object {
  (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($_)
 } | Set-Content -LiteralPath (Join-Path (Split-Path $file -Parent) 'WINDOWS-SHA256SUMS') -Encoding ASCII

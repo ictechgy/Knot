@@ -14,6 +14,10 @@ import Foundation
     func finish() { running = false; onExit?() }
 }
 
+@MainActor private final class SyntheticMacHostDownloadOwner {
+    weak var model: MacHostModel?
+}
+
 @MainActor func runMacHostChecks(temporary: URL) async throws -> Int {
     var count = 0
     func expect(_ value: Bool, _ message: String) throws {
@@ -93,6 +97,10 @@ import Foundation
     model.acknowledged = true; model.start(); model.start()
     try await settle { model.phase == .running }
     try expect(starts == 1 && model.invitation != nil, "duplicate host start or missing running invitation")
+    let runningStatus = model.status
+    model.download(to: fixture.appendingPathComponent("running-not-created.dmg"))
+    try expect(!model.canDownload && !model.downloading && downloads == 0 && model.status == runningStatus,
+               "running host allowed a download to replace sharing guidance")
     let invitation = model.invitation!
     try expect(invitation.platform == .macos, "Mac host invitation lost its explicit OS role")
     try expect(try ConnectionInvitation(text: invitation.url.absoluteString) == invitation,
@@ -100,9 +108,82 @@ import Foundation
     guard let png = MacHostQR.png(invitation) else { throw ModelCheckFailure(message: "synthetic host QR not generated") }
     try expect(try ConnectionQRReader.decode(data: png) == invitation, "host QR not decoded by actual QR reader")
     model.stop(); try expect(child.stops == 1 && model.phase == .stopping && model.invitation == nil, "stop did not revoke published invitation")
+    model.download(to: fixture.appendingPathComponent("stopping-not-created.dmg"))
+    try expect(!model.canDownload && !model.downloading && downloads == 0, "stopping host accepted a download")
     child.finish(); try expect(model.phase == .stopped && model.errorMessage == nil, "requested host stop reported failure")
     model.download(to: fixture.appendingPathComponent("synthetic.dmg")); try await settle { !model.downloading }
     try expect(downloads == 1 && model.downloadedURL != nil && starts == 1, "download launched a host")
+
+    // A normal provider return means the exclusive final copy committed. A
+    // cancellation request at that boundary must preserve its published URL.
+    let committedOwner = SyntheticMacHostDownloadOwner()
+    let committedDestination = fixture.appendingPathComponent("synthetic-committed.dmg")
+    let committedHost = MacHostModel(operations: .init(installed: { true }, addresses: { addresses },
+        start: { _, _, _ in SyntheticMacHostChild() }, download: { _ in committedOwner.model?.cancelDownload() }))
+    committedOwner.model = committedHost
+    committedHost.download(to: committedDestination)
+    try await settle { !committedHost.downloading }
+    try expect(committedHost.downloadedURL == committedDestination && committedHost.errorMessage == nil &&
+               committedHost.status == "취소를 요청했지만 DMG 저장을 마쳤습니다.",
+               "cancellation racing a committed provider return hid the saved DMG or claimed cancellation")
+    let uncommittedHost = MacHostModel(operations: .init(installed: { true }, addresses: { addresses },
+        start: { _, _, _ in SyntheticMacHostChild() }, download: { _ in throw CancellationError() }))
+    uncommittedHost.download(to: fixture.appendingPathComponent("synthetic-uncommitted.dmg"))
+    try await settle { !uncommittedHost.downloading }
+    try expect(uncommittedHost.downloadedURL == nil && uncommittedHost.errorMessage == nil && uncommittedHost.status == "다운로드 취소됨",
+               "pre-commit provider cancellation was reported as a committed download")
+
+    // Application activation reads installation presence only; no UI, preferences, or network.
+    let activationCenter = NotificationCenter()
+    let activationChild = SyntheticMacHostChild()
+    var installationPresent = false, installationReads = 0, addressReads = 0
+    let activationModel = MacHostModel(operations: .init(installed: {
+        installationReads += 1; return installationPresent
+    }, addresses: { addressReads += 1; return addresses }, start: { _, _, _ in activationChild }, download: { _ in }),
+        activationCenter: activationCenter)
+    activationModel.refresh()
+    try expect(!activationModel.installed && installationReads == 1 && addressReads == 1,
+               "synthetic installation baseline did not refresh")
+    installationPresent = true
+    activationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+    try await settle { activationModel.installed }
+    try expect(installationReads == 2 && addressReads == 1, "activation did not refresh installation independently")
+    activationModel.acknowledged = true; activationModel.start()
+    try await settle { activationModel.phase == .running }
+    let activationStatus = activationModel.status, activationAddress = activationModel.selectedAddress
+    let activeAddressReads = addressReads
+    installationPresent = false
+    activationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+    try await settle { !activationModel.installed }
+    try expect(activationModel.phase == .running && activationModel.status == activationStatus &&
+               activationModel.selectedAddress == activationAddress && addressReads == activeAddressReads,
+               "activation replaced running share state or refreshed its selected address")
+    let readsBeforeShutdown = installationReads
+    activationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil) // Already queued at shutdown.
+    activationModel.beginShutdown(); activationChild.finish()
+    installationPresent = true
+    activationCenter.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+    activationModel.refresh()
+    try await Task.sleep(for: .milliseconds(20))
+    try expect(installationReads == readsBeforeShutdown && !activationModel.installed && !activationModel.canDownload,
+               "activation or refresh restarted installation work after shutdown")
+
+    var releaseDownload: CheckedContinuation<Void, Never>?
+    var downloadStarts = 0, blockedHostStarts = 0
+    let downloadingHost = MacHostModel(operations: .init(installed: { true }, addresses: { addresses },
+        start: { _, _, _ in blockedHostStarts += 1; return SyntheticMacHostChild() }, download: { _ in
+            downloadStarts += 1; await withCheckedContinuation { releaseDownload = $0 }
+        }))
+    downloadingHost.refresh(); downloadingHost.acknowledged = true
+    downloadingHost.download(to: fixture.appendingPathComponent("cancelled-not-created.dmg"))
+    try await settle { releaseDownload != nil }
+    downloadingHost.start(); downloadingHost.download(to: fixture.appendingPathComponent("duplicate-not-created.dmg"))
+    try expect(blockedHostStarts == 0 && downloadStarts == 1 && downloadingHost.phase == .stopped && !downloadingHost.canDownload,
+               "download allowed a concurrent host start or duplicate download")
+    downloadingHost.beginShutdown(); releaseDownload!.resume()
+    try await settle { !downloadingHost.downloading }
+    try expect(downloadingHost.downloadedURL == nil && blockedHostStarts == 0,
+               "cancelled download published a verified DMG after shutdown")
     let exited = SyntheticMacHostChild()
     let failed = MacHostModel(operations: .init(installed: { true }, addresses: { addresses }, start: { _, _, _ in exited }, download: { _ in }))
     failed.refresh(); failed.acknowledged = true; failed.start(); try await settle { failed.phase == .running }
@@ -144,6 +225,16 @@ import Foundation
     let windows = DesktopModel(storageDirectory: windowsRoot, identitySuite: windowsSuite)
     let linux = DesktopModel(storageDirectory: linuxRoot, identitySuite: linuxSuite, platform: .linux)
     let transfers = FilesModel(desktop: windows)
+    transfers.identityPath = windowsRoot.appendingPathComponent("not-opened-configured-key").path
+    let configuredIdentity = transfers.identityPath
+    try expect(transfers.requiresKeyReplacementConfirmation, "configured SSH identity did not require replacement confirmation")
+    transfers.generateKey()
+    try expect(!transfers.busy && transfers.identityPath == configuredIdentity && transfers.errorMessage != nil,
+               "key generation replaced configured identity without explicit confirmation")
+    transfers.errorMessage = nil
+    transfers.generateKey(replacingIdentity: .init(savedPath: transfers.keyReplacementSnapshot.savedPath, draftPath: configuredIdentity + "-stale"))
+    try expect(!transfers.busy && transfers.identityPath == configuredIdentity && transfers.errorMessage != nil,
+               "key generation accepted confirmation for a different identity")
     var releaseQuit: CheckedContinuation<Void, Never>?
     var hostCleaned = false, quitReplied = false, touchedOperation = false
     let termination = DesktopTermination()
@@ -452,6 +543,7 @@ private final class SyntheticMacHostRedirectResult: @unchecked Sendable {
     let forkStarted = temporary.appendingPathComponent("fork-escaped.started")
     let forkDenied = temporary.appendingPathComponent("fork-escaped.denied")
     let companionMarker = temporary.appendingPathComponent("companion-completed")
+    let lingerReady = temporary.appendingPathComponent("linger-ready")
     let code = """
     #include <unistd.h>
     #include <stdio.h>
@@ -474,7 +566,11 @@ private final class SyntheticMacHostRedirectResult: @unchecked Sendable {
           usleep(30000); return 0;
         }
       } else if (strcmp(argv[1], "linger") == 0) {
-        signal(SIGTERM, SIG_IGN);
+        if (signal(SIGTERM, SIG_IGN) == SIG_ERR) return 6;
+        FILE *ready = fopen(argv[2], "wx"); if (!ready) return 7;
+        int written = fputs("SYNTHETIC SIGTERM READY", ready);
+        int closed = fclose(ready);
+        if (written == EOF || closed != 0) return 8;
         for (;;) pause();
       }
       usleep(400000);
@@ -504,8 +600,18 @@ private final class SyntheticMacHostRedirectResult: @unchecked Sendable {
           FileManager.default.fileExists(atPath: companionMarker.path) else {
         throw ModelCheckFailure(message: "owned host fork was not denied or cleanup affected unrelated companion")
     }
-    let linger = try MacHostChild(executable: executable, arguments: ["linger", forkMarker.path])
-    try await Task.sleep(for: .milliseconds(30))
+    let linger = try MacHostChild(executable: executable, arguments: ["linger", lingerReady.path])
+    defer { linger.forceStop() }
+    // Spawning the supervisor does not mean its sandboxed child has exec'd.
+    // Stop only after the inert child confirms its SIGTERM handler is installed.
+    let ready = Data("SYNTHETIC SIGTERM READY".utf8)
+    let readinessDeadline = ContinuousClock.now + .seconds(5)
+    while linger.running && (try? Data(contentsOf: lingerReady)) != ready && ContinuousClock.now < readinessDeadline {
+        try await Task.sleep(for: .milliseconds(2))
+    }
+    guard linger.running, (try? Data(contentsOf: lingerReady)) == ready else {
+        throw ModelCheckFailure(message: "owned process fixture did not become ready for forced group stop")
+    }
     linger.stop(); try await Task.sleep(for: .milliseconds(20))
     guard linger.running else { throw ModelCheckFailure(message: "fixture did not exercise forced group stop") }
     linger.forceStop()

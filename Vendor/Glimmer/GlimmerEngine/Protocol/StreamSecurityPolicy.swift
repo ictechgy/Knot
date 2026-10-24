@@ -4,7 +4,7 @@ import Foundation
 
 public enum StreamSecurityPolicy {
     public static let requiredFeatures: UInt32 = 0x07 // control V2, video GCM, audio CBC
-    public enum Failure: Error, LocalizedError {
+    public enum Failure: Error, LocalizedError, Sendable, Equatable {
         case plaintextSignalling, missingEncryption(UInt32)
         public var errorDescription: String? {
             switch self {

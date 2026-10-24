@@ -25,6 +25,7 @@ private final class SFTPFixtureTransport: SFTPTransport, @unchecked Sendable {
     private var failNextClose = false
     private var nextReceiveFailure: (any Error)?
     private var readDirectoryRequests = 0
+    private var readFileRequests = 0
     private var closed = false
     let version: UInt32
     let listingMode: ListingMode
@@ -33,11 +34,13 @@ private final class SFTPFixtureTransport: SFTPTransport, @unchecked Sendable {
         if listingMode == .longPaths { directories.insert(Self.longParent) }
     }
     func contents(_ path: String) -> Data? { lock.lock(); defer { lock.unlock() }; return files[path] }
+    func insertSyntheticFile(_ name: String) { lock.lock(); defer { lock.unlock() }; files["/files/" + name] = Data() }
     func injectMismatchedID() { lock.lock(); mismatch = true; lock.unlock() }
     func injectDirectoryStatus(_ code: UInt32) { lock.lock(); nextDirectoryStatus = code; lock.unlock() }
     func injectCloseFailure() { lock.lock(); failNextClose = true; lock.unlock() }
     func injectReceiveFailure(_ error: any Error) { lock.lock(); nextReceiveFailure = error; lock.unlock() }
     var directoryRequestCount: Int { lock.lock(); defer { lock.unlock() }; return readDirectoryRequests }
+    var fileReadRequestCount: Int { lock.lock(); defer { lock.unlock() }; return readFileRequests }
     var isClosed: Bool { lock.lock(); defer { lock.unlock() }; return closed }
     func send(_ payload: Data) throws {
         lock.lock(); defer { lock.unlock() }
@@ -115,6 +118,7 @@ private final class SFTPFixtureTransport: SFTPTransport, @unchecked Sendable {
             // Empty directories use EOF, which is what an actual server may return.
             replies.append(paths.isEmpty ? status(1) : reply.data)
         case 5:
+            readFileRequests += 1
             let handle = try request.bytes(), offset = try request.uint64(), length = try request.uint32()
             guard let path = handles[handle], let data = files[path] else { replies.append(status(9)); return }
             guard offset < data.count else { replies.append(status(1)); return }
@@ -177,7 +181,8 @@ public func runSFTPChecks() async throws -> Int {
     var checks = try await runSFTPSSHDiagnosticsChecks()
     let untrusted = "synthetic-server-path /private/fixture <script>unsafe</script>"
     for error in [SFTPError.remoteStatus(2, untrusted), .remoteStatus(3, untrusted), .remoteStatus(99, untrusted),
-                  .protocolViolation(untrusted), .connectionLost(untrusted)] {
+                  .protocolViolation(untrusted), .connectionLost(untrusted), .invalidPath(untrusted),
+                  .invalidConfiguration(untrusted), .localIO(untrusted)] {
         try sftpCheck(!error.localizedDescription.contains(untrusted) && !error.localizedDescription.contains("/private/fixture"),
                       "untrusted SFTP response detail escaped into UI guidance"); checks += 1
     }
@@ -212,10 +217,14 @@ public func runSFTPChecks() async throws -> Int {
     catch { checks += 1 }
 
     let peer = SFTPFixtureTransport(), client = SFTPClient(configuration: config, transportFactory: { peer })
+    let unsupportedNames = ["hidden\u{200B}.txt", "invoice\u{202E}cod.exe", "family👩\u{200D}👧.txt"]
+    for name in unsupportedNames { peer.insertSyntheticFile(name) }
     try await client.connect()
     let entries = try await client.list(path: "/files")
     try sftpCheck(entries.contains { $0.name == "한글 [draft].txt" && $0.kind == .file && $0.size == 140_123 }, "structured directory listing lost a filename"); checks += 1
     try sftpCheck(!entries.contains { $0.name == "." || $0.name == ".." }, "ordinary dot entries were retained"); checks += 1
+    try sftpCheck(entries.count == 2 && !entries.contains { unsupportedNames.contains($0.name) } && !peer.isClosed,
+                  "unsupported names blocked safe siblings or escaped listing filtering"); checks += 1
     do { _ = try await client.list(path: "/files/../escape"); throw SFTPCheckFailure(message: "traversal accepted") }
     catch is SFTPCheckFailure { throw SFTPCheckFailure(message: "traversal accepted") }
     catch { checks += 1 }
@@ -227,10 +236,16 @@ public func runSFTPChecks() async throws -> Int {
     try sftpCheck(received == peer.contents("/files/한글 [draft].txt"), "short-read download corrupted data"); checks += 1
     let values = progress.snapshot()
     try sftpCheck(values.count > 3 && values.last?.bytesTransferred == 140_123 && values.last?.fractionCompleted == 1, "download byte progress incorrect"); checks += 1
+    let readsBeforeCollision = peer.fileReadRequestCount
     do { try await client.download(remotePath: "/files/한글 [draft].txt", destinationURL: destination); throw SFTPCheckFailure(message: "existing destination replaced") }
     catch SFTPError.destinationExists { checks += 1 }
     let contentsAfterCollision = try Data(contentsOf: destination)
     try sftpCheck(contentsAfterCollision == received, "collision changed existing contents"); checks += 1
+    let dangling = fixtureRoot.appendingPathComponent("existing-dangling-link")
+    try FileManager.default.createSymbolicLink(atPath: dangling.path, withDestinationPath: fixtureRoot.appendingPathComponent("never-created-target").path)
+    do { try await client.download(remotePath: "/files/한글 [draft].txt", destinationURL: dangling); throw SFTPCheckFailure(message: "dangling destination link accepted") }
+    catch SFTPError.destinationExists { checks += 1 }
+    try sftpCheck(peer.fileReadRequestCount == readsBeforeCollision, "existing destinations were detected only after remote file reads"); checks += 1
     do { try await client.download(remotePath: "/files/link", destinationURL: fixtureRoot.appendingPathComponent("link")); throw SFTPCheckFailure(message: "symlink followed") }
     catch SFTPError.unsupportedFile { checks += 1 }
 
@@ -240,6 +255,18 @@ public func runSFTPChecks() async throws -> Int {
     try sftpCheck(uploadedPath.hasPrefix("/files/deskbridge-") && uploadedPath.hasSuffix("/hello [x] $value.txt") && peer.contents(uploadedPath) == uploadData, "binary upload or unique destination incorrect"); checks += 1
     let secondUpload = try await client.upload(localURL: upload)
     try sftpCheck(secondUpload != uploadedPath && peer.contents(uploadedPath) == uploadData, "repeated upload overwrote prior file"); checks += 1
+    let decomposedName = (String(repeating: "한", count: 81) + ".txt").decomposedStringWithCanonicalMapping
+    let decomposedUpload = fixtureRoot.appendingPathComponent(decomposedName)
+    try uploadData.write(to: decomposedUpload)
+    let canonicalUpload = try await client.upload(localURL: decomposedUpload)
+    let canonicalSuffix = "/" + decomposedName.precomposedStringWithCanonicalMapping
+    try sftpCheck(Array(canonicalUpload.utf8).suffix(canonicalSuffix.utf8.count).elementsEqual(canonicalSuffix.utf8) && peer.contents(canonicalUpload) == uploadData,
+                  "decomposed Korean upload names must use canonical composed Windows filenames"); checks += 1
+    for name in ["invoice\u{202E}cod.exe", "hidden\u{200B}.txt"] {
+        let obscured = fixtureRoot.appendingPathComponent(name); try Data([1]).write(to: obscured)
+        do { _ = try await client.upload(localURL: obscured); throw SFTPCheckFailure(message: "format scalar filename accepted") }
+        catch SFTPError.invalidPath { checks += 1 }
+    }
     for download in [false, true] {
         let committedPeer = SFTPFixtureTransport(), cancellation = SFTPCommitCancellation()
         let committedClient = SFTPClient(configuration: config, transferCommitted: { cancellation.cancel() },
@@ -374,7 +401,7 @@ public func runSFTPChecks() async throws -> Int {
 
     // This is the same typed connection policy consumed by FilesModel.
     for error: any Error in [SFTPError.protocolViolation("fixture"), SFTPError.disconnected,
-                             SFTPError.cancelled, SFTPError.timedOut, CancellationError(),
+                             SFTPError.cancelled, SFTPError.timedOut, SFTPError.targetChanged, CancellationError(),
                              SFTPError.remoteStatus(6, "fixture"), SFTPError.remoteStatus(7, "fixture")] {
         try sftpCheck(SFTPError.requiresReconnect(after: error), "terminal failure did not require reconnect"); checks += 1
     }

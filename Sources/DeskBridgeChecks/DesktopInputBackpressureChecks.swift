@@ -65,10 +65,11 @@ private struct DesktopInputBackpressureChecks {
             owner.setKey(a, pressed: true, capturedAt: capturedAt)
             try require(owner.desktopTextTask != nil && owner.desktopEvents.count == 1,
                         "fixture did not exercise a pending text task and later key")
+            let revokedTextTask = owner.desktopTextTask!
             let attemptsBeforeLoss = peer.textAttempts
             if terminal { owner.stop() } else { owner.setFocused(false); owner.setFocused(true) }
             peer.blockText = false
-            try await Task.sleep(for: .milliseconds(120))
+            await revokedTextTask.value
             try require(peer.textAttempts == attemptsBeforeLoss && peer.accepted.isEmpty,
                         "revoked text or key was replayed after focus loss or stop")
             try require(owner.desktopTextTask == nil && owner.desktopEvents.isEmpty,

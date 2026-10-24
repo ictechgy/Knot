@@ -1178,6 +1178,8 @@ recovery_constants = "\n".join(re.findall(
     (ENGINE / "Session/StreamSession+FrameWatchdog.swift").read_text(), re.M))
 assert len(recovery_constants.splitlines()) == 5
 recovery_contract = "\n".join([
+    (ENGINE / "Protocol/StreamSecurityPolicy.swift").read_text(),
+    (ROOT / "Sources/DeskBridgeApp/DesktopSecurityGuidance.swift").read_text().replace("import GlimmerEngine\n", ""),
     block(recovery_types, "public enum StreamEvent:"),
     block(recovery_types, "public enum ConnectionQuality:"),
     block(recovery_types, "public enum StreamError:"),

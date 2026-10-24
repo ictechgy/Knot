@@ -36,6 +36,10 @@ extension StreamSession {
         waitingForVideo = false
         initialServerInfoTask?.cancel()
         launchTask?.cancel()
+        // Local-only stop cannot undo a request already accepted by the host,
+        // but it must cancel the inner HTTP task as well as its outer waiter.
+        // The host-cancel disposition keeps its bounded late-success cleanup.
+        if hostDisposition.cancellation == nil { pendingLaunch?.cancel() }
         let pendingPreparation = mediaPreparation
         pendingPreparation?.cancel()
         await teardown.run { await self.performStop(cause: cause, pendingPreparation: pendingPreparation) }

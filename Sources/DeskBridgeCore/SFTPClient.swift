@@ -286,12 +286,14 @@ private final class SFTPSession {
                 guard count > 0, count <= 4096, count <= 100_000 - rawEntries else {
                     throw SFTPError.protocolViolation("directory entry limit exceeded")
                 }
-                rawEntries += count // Charge dot entries before filtering them out.
+                rawEntries += count // Charge every name before filtering unsupported entries.
                 for _ in 0..<count {
                     let name = try body.string(); _ = try body.bytes(maximum: 16384)
                     let attrs = try SFTPAttributes.decode(&body)
                     if name == "." || name == ".." { continue }
-                    let fullPath = try SFTPPaths.append(name, to: path)
+                    let fullPath: String
+                    do { fullPath = try SFTPPaths.append(name, to: path) }
+                    catch SFTPError.invalidPath(_) { continue }
                     let stringBytes = name.utf8.count + fullPath.utf8.count
                     guard stringBytes <= 32 * 1024 * 1024 - retainedStringBytes else {
                         throw SFTPError.protocolViolation("directory path byte limit exceeded")
@@ -316,7 +318,7 @@ private final class SFTPSession {
 
     func upload(localURL: URL, remoteDirectory: String, progress: SFTPClient.ProgressHandler) throws -> String {
         guard localURL.isFileURL else { throw SFTPError.invalidPath("choose a local file") }
-        let filename = localURL.lastPathComponent
+        let filename = localURL.lastPathComponent.precomposedStringWithCanonicalMapping
         try SFTPPaths.windowsFilename(filename)
         let local = Darwin.open(localURL.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard local >= 0 else { throw SFTPError.localIO("cannot open source file") }
@@ -327,7 +329,7 @@ private final class SFTPSession {
             throw SFTPError.unsupportedFile
         }
         let size = UInt64(initial.st_size)
-        guard size <= maximumFileSize else { throw SFTPError.localIO("file exceeds 128 GiB MVP limit") }
+        guard size <= maximumFileSize else { throw SFTPError.unsupportedFile }
         let parent = try checkedPath(remoteDirectory, directory: true)
         let job = try SFTPPaths.append("deskbridge-\(UUID().uuidString.lowercased())", to: parent)
         _ = try status(request(14) { $0.string(job); $0.uint32(0) })
@@ -373,25 +375,35 @@ private final class SFTPSession {
         guard destinationURL.isFileURL else { throw SFTPError.invalidPath("choose a local destination") }
         let filename = destinationURL.lastPathComponent
         guard !filename.isEmpty, filename != ".", filename != "..",
-              !filename.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+              !filename.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0.properties.generalCategory == .format }) else {
             throw SFTPError.invalidPath("invalid local destination")
         }
-        let remote = try checkedPath(remotePath, directory: false)
-        let handle = try open(path: remote, flags: 1)
-        var remoteClosed = false
-        defer { if !remoteClosed { try? close(handle: handle) } }
-        let initial = try attributes(handle: handle)
-        guard initial.kind == .file, let size = initial.size, size <= maximumFileSize else { throw SFTPError.unsupportedFile }
         let directory = destinationURL.deletingLastPathComponent().resolvingSymlinksInPath()
         let dirFD = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard dirFD >= 0 else { throw SFTPError.localIO("cannot open destination folder") }
         defer { Darwin.close(dirFD) }
+        var existing = stat()
+        if fstatat(dirFD, filename, &existing, AT_SYMLINK_NOFOLLOW) == 0 { throw SFTPError.destinationExists }
+        guard errno == ENOENT else { throw SFTPError.localIO("cannot inspect destination name") }
         let temporaryName = ".deskbridge-\(UUID().uuidString).part"
         let local = openat(dirFD, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard local >= 0 else { throw SFTPError.localIO("cannot create exclusive partial file") }
         let file = FileHandle(fileDescriptor: local, closeOnDealloc: true)
         var moved = false
         defer { try? file.close(); if !moved { unlinkat(dirFD, temporaryName, 0) } }
+        // Check destination-volume support before requesting file bytes. The
+        // marker stays on this same exclusive inode through final publication.
+        let quarantine = Data("0081;\(String(Int(Date().timeIntervalSince1970), radix: 16));Knot;".utf8)
+        let marked = quarantine.withUnsafeBytes {
+            fsetxattr(local, "com.apple.quarantine", $0.baseAddress, $0.count, 0, 0)
+        }
+        guard marked == 0 else { throw SFTPError.localIO("cannot mark downloaded file for macOS quarantine") }
+        let remote = try checkedPath(remotePath, directory: false)
+        let handle = try open(path: remote, flags: 1)
+        var remoteClosed = false
+        defer { if !remoteClosed { try? close(handle: handle) } }
+        let initial = try attributes(handle: handle)
+        guard initial.kind == .file, let size = initial.size, size <= maximumFileSize else { throw SFTPError.unsupportedFile }
         var offset: UInt64 = 0
         progress(TransferProgress(bytesTransferred: 0, totalBytes: size))
         while offset < size {
@@ -407,13 +419,6 @@ private final class SFTPSession {
         let final = try attributes(handle: handle)
         guard final.size == initial.size, final.modificationTime == initial.modificationTime else { throw SFTPError.sourceChanged }
         try close(handle: handle); remoteClosed = true
-        // Label remote bytes on the open exclusive inode before publishing its name.
-        // Do not include private endpoint/path metadata or mark content user-approved.
-        let quarantine = Data("0081;\(String(Int(Date().timeIntervalSince1970), radix: 16));Knot;".utf8)
-        let marked = quarantine.withUnsafeBytes {
-            fsetxattr(local, "com.apple.quarantine", $0.baseAddress, $0.count, 0, 0)
-        }
-        guard marked == 0 else { throw SFTPError.localIO("cannot mark downloaded file for macOS quarantine") }
         try file.synchronize(); try file.close()
         guard renameatx_np(dirFD, temporaryName, dirFD, filename, UInt32(RENAME_EXCL)) == 0 else {
             if errno == EEXIST { throw SFTPError.destinationExists }

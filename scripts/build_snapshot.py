@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Shared build/package provenance checks. Only reads this source tree and its build artifacts."""
 from pathlib import Path
-import hashlib, io, json, stat, struct, subprocess, tarfile
+import hashlib, io, json, os, stat, struct, subprocess, tarfile
 
 
 class BuildSnapshotError(ValueError):
@@ -9,11 +9,11 @@ class BuildSnapshotError(ValueError):
 
 REQUIRED_CHECK_STAGES = {"synthetic-checks", "synthetic-model-checks", "build-contract-checks", "system-dependency-policy-checks",
                          "input-batching-checks", "control-hardening-checks", "desktop-input-backpressure-checks",
-                         "video-frame-lifecycle-checks", "media-receive-lifecycle-checks", "audio-notice-power-checks",
+                         "video-frame-lifecycle-checks", "stream-launch-lifecycle-checks", "media-receive-lifecycle-checks", "audio-notice-power-checks",
                          "rtsp-replay-checks", "inspect-app-entitlements", "inspect-dependencies",
                          "compile-host-supervisor", "sign-host-supervisor", "verify-host-supervisor",
                          "inspect-host-supervisor-entitlements", "inspect-host-supervisor-dependencies",
-                         "mac-host-lifetime-checks", "private-storage-checks"}
+                         "mac-host-lifetime-checks", "private-storage-checks", "update-policy-checks", "enrollment-protocol-checks"}
 
 
 def unchanged_supervisor_digest(supervisor, expected):
@@ -65,7 +65,7 @@ def source_snapshot(root):
     # These inputs are consumed outside the recursively scanned roots as well.
     paths.update(root / name for name in ["LICENSE", "INSTALLATION.md", "VERSION"])
     # Include new, not-yet-indexed compiler/resource inputs as well.
-    for name in ["Sources", "Assets", "Vendor/Glimmer", "Vendor/QRCodegen", "Vendor/ZXingNet", "Vendor/WindowsRuntime", "host/windows", "host/macos", "host/linux", "client", "scripts", "packaging", ".github"]:
+    for name in ["Sources", "Assets", "Vendor/Glimmer", "Vendor/QRCodegen", "Vendor/ZXingNet", "Vendor/WindowsRuntime", "Vendor/UpdateRuntime", "host/windows", "host/macos", "host/linux", "client", "scripts", "packaging", ".github"]:
         for path in (root / name).rglob("*"):
             # Only tooling bytecode is generated bookkeeping. A cache-named directory
             # under compiler/resource roots may still contain actual shipped inputs.
@@ -83,7 +83,17 @@ def tree_snapshot(root):
     result = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
-            raise BuildSnapshotError("Unexpected app bundle symlink")
+            # Sparkle's versioned framework requires these exact, pinned links.
+            # No other application symlink is admitted or followed.
+            from update_runtime import sparkle_links
+            expected = {"Contents/Frameworks/" + name: target for name, target in sparkle_links(Path(__file__).resolve().parent.parent).items()}
+            relative = path.relative_to(root).as_posix()
+            target = os.readlink(path)
+            framework = (root / "Contents/Frameworks/Sparkle.framework").resolve()
+            if expected.get(relative) != target or not path.resolve().is_relative_to(framework):
+                raise BuildSnapshotError("Unexpected app bundle symlink")
+            result[relative] = {"sha256": hashlib.sha256(target.encode()).hexdigest(), "mode": 0o777, "symlink": target}
+            continue
         if path.is_file():
             result[path.relative_to(root).as_posix()] = {
                 "sha256": _ordinary_file(root, path),

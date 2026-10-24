@@ -57,6 +57,19 @@ extension StreamSession {
         return min(decoded, gateLift)
     }
 
+    /// One decoder rebuild is bounded when packets still arrive but this
+    /// connection has produced no output. A hidden/gated span gets a fresh
+    /// visible allowance at gate lift; a paused encoder is still allowed to wait.
+    package static func watchdogFailedDecodeReconnect(
+        didReconnect: Bool, presentSuppressed: Bool, decodeGated: Bool,
+        sinceDecoded: Double, sinceGateLift: Double, sinceArm: Double, receiveIdle: Double
+    ) -> Bool {
+        didReconnect && !presentSuppressed && !decodeGated
+            && receiveIdle < decodeOnlyStallThreshold
+            && (!sinceDecoded.isFinite || sinceDecoded > sinceArm)
+            && min(sinceArm, sinceGateLift) >= decodeOnlyReconnectSeconds
+    }
+
     /// Install the frame-arrival watchdog: 1 Hz on the main run loop, gated on decoded frames rather
     /// than bytes, so video the Mac can't decode ends in an error instead of a black screen.
     package func startFrameWatchdog() async {
@@ -77,7 +90,8 @@ extension StreamSession {
     /// trips nothing; stopConnection clears the gate, so it can never shield a dead session from teardown.
     package nonisolated func frameWatchdogTick(decoder dec: VideoDecoder) {
         if dec.decodeGated { return }
-        let sinceArm = uptimeSeconds - frameWatchdogArmedAt
+        let watchdogArm = frameWatchdogArmedAt
+        let sinceArm = uptimeSeconds - watchdogArm
         let sinceDecoded = dec.secondsSinceLastDecodedFrame()
         let decodeIdle = Self.watchdogDecodeIdle(
             sinceDecoded: sinceDecoded, sinceGateLift: dec.secondsSinceDecodeGateLifted(), sinceArm: sinceArm)
@@ -87,8 +101,7 @@ extension StreamSession {
             // ENet-alive hold (a broken bring-up, not a paused desktop).
             if frameWatchdogArmedAt > 0, sinceArm > Self.frameWatchdogTimeout {
                 Task { [weak self] in
-                    await self?.handleWatchdogTimeout(
-                        decodeIdleSeconds: sinceArm, receiveIdleSeconds: receiveIdle, neverDecodedFirstFrame: true)
+                    await self?.handleWatchdogTimeout(decoder: dec, armedAt: watchdogArm)
                 }
             }
             return
@@ -112,7 +125,7 @@ extension StreamSession {
         }
         guard decodeIdle > Self.frameWatchdogTimeout else { return }
         Task { [weak self] in
-            await self?.handleWatchdogTimeout(decodeIdleSeconds: decodeIdle, receiveIdleSeconds: receiveIdle)
+            await self?.handleWatchdogTimeout(decoder: dec, armedAt: watchdogArm)
         }
     }
 
@@ -192,12 +205,34 @@ extension StreamSession {
         }
     }
 
-    private func handleWatchdogTimeout(
-        decodeIdleSeconds: Double, receiveIdleSeconds: Double,
-        neverDecodedFirstFrame: Bool = false
-    ) async {
+    private func handleWatchdogTimeout(decoder dec: VideoDecoder, armedAt expectedArm: Double) async {
         // A reconnect episode has the connection down on purpose and owns the bounded give-up.
-        guard isStreaming, !stopInProgress, !isReconnecting else { return }
+        guard isStreaming, !stopInProgress, !isReconnecting, videoDecoder === dec else { return }
+        let currentArm = await MainActor.run { self.frameWatchdogArmedAt }
+        // A queued tick must not terminate a replacement attempt or a decoder
+        // that recovered while the actor was busy. Reread all progress here.
+        guard isStreaming, !stopInProgress, !isReconnecting, videoDecoder === dec,
+              currentArm == expectedArm, currentArm > 0, !dec.decodeGated else { return }
+        let sinceArm = uptimeSeconds - currentArm
+        let sinceDecoded = dec.secondsSinceLastDecodedFrame()
+        let sinceGateLift = dec.secondsSinceDecodeGateLifted()
+        let latestDecodeIdle = Self.watchdogDecodeIdle(
+            sinceDecoded: sinceDecoded, sinceGateLift: sinceGateLift, sinceArm: sinceArm)
+        let neverDecodedFirstFrame = !latestDecodeIdle.isFinite
+        let decodeIdleSeconds = neverDecodedFirstFrame ? sinceArm : latestDecodeIdle
+        let receiveIdleSeconds = dec.secondsSinceLastReceivedFrame()
+        guard decodeIdleSeconds > Self.frameWatchdogTimeout else { return }
+
+        if Self.watchdogFailedDecodeReconnect(
+            didReconnect: didReconnectForDecodeStall, presentSuppressed: dec.presentSuppressed,
+            decodeGated: dec.decodeGated, sinceDecoded: sinceDecoded,
+            sinceGateLift: sinceGateLift, sinceArm: sinceArm, receiveIdle: receiveIdleSeconds) {
+            Diag.error("Video still arrived without decoded output after a decoder reconnect - tearing down", "Stream")
+            noteTelemetryDisconnect(.watchdogStall)
+            bridge?.emit(.connectionTerminated(errorCode: Self.noVideoFrameTerminationCode))
+            await stop()
+            return
+        }
 
         // HOLD-IF-ALIVE: a 10 s stall with fresh ENet ACKs is a paused encoder (the Windows sign-in
         // desktop), not a dead session; ENet's dead-peer detection owns that teardown. A connection

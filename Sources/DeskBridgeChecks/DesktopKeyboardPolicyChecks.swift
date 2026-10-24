@@ -12,6 +12,17 @@ func runDesktopKeyboardPolicyChecks() throws -> Int {
         count += 1
     }
     try check(DesktopKeyboardPolicy.modifierByte(control: true, shift: false, option: false) == 2)
+    for (mac, windows): (UInt16, UInt16) in [(0, 0x41), (8, 0x43), (9, 0x56), (7, 0x58),
+                                           (6, 0x5A), (1, 0x53), (3, 0x46), (37, 0x4C)] {
+        try check(DesktopKeyboardPolicy.commandControlKey(keyCode: mac, command: true, control: false, option: false) == windows)
+        for (command, control, option) in [(false, false, false), (true, true, false),
+                                           (true, false, true), (true, true, true)] {
+            try check(DesktopKeyboardPolicy.commandControlKey(keyCode: mac, command: command, control: control, option: option) == nil)
+        }
+    }
+    for key: UInt16 in [12, 13, 48, 49, 123, 124, 125, 126] { // Q/W/Tab/Space/arrows remain outside this remap.
+        try check(DesktopKeyboardPolicy.commandControlKey(keyCode: key, command: true, control: false, option: false) == nil)
+    }
     for (mac, windows): (UInt16, UInt16) in [(123, 0x25), (124, 0x27), (51, 0x08), (117, 0x2E)] {
         for shift in [false, true] {
             let command = DesktopKeyboardPolicy.editingCommand(keyCode: mac, command: false, option: true,

@@ -150,7 +150,7 @@ final class SFTPSSHTransport: SFTPTransport, @unchecked Sendable {
         let state = stateLock.withLock { (closed, receivedPacket) }
         if state.0 { return .cancelled }
         guard !state.1 else { return .disconnected }
-        diagnostics.waitForEOF(timeout: 0.2)
+        diagnostics.waitForEOF(timeout: 1)
         if stateLock.withLock({ closed }) { return .cancelled }
         if let failure = diagnostics.failure { return .sshConnectionFailure(failure) }
         // Exit 255 alone is ambiguous. Unknown stderr and EOF retain a fixed,

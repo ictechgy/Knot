@@ -8,6 +8,8 @@ param([Parameter(Mandatory=$true)][string] $ClientPublicKey,[Parameter(Mandatory
       [Parameter(Mandatory=$true)][string] $DesktopUserSid)
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'SetupContract.psm1') -Force
+$lifecycleLease=Enter-DeskBridgeLifecycleLease
+try {
 $key=Get-CanonicalPublicKey $ClientPublicKey
 $desktopUser=Resolve-DesktopUser $DesktopUserSid
 $addresses=@($AllowedClientAddress | ForEach-Object {Get-PrivateIPv4 $_})
@@ -18,13 +20,29 @@ $bin=$deployment.Bin; $sshd=$deployment.Sshd; $service=$deployment.Service
 $template=$deployment.Template; $config=$deployment.Config; $keyPath=$deployment.KeyPath
 $exists=$deployment.ConfigExists; $configMatches=$exists
 $oldKey=Get-CanonicalPublicKey ([IO.File]::ReadAllText($keyPath).Trim())
-$rule=Get-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -ErrorAction SilentlyContinue
-$addressMatch=Test-ManagedFirewallPolicy (Get-ManagedFirewallPolicy) $addresses
+# Validate an existing rule against its OWN prior address set before any stop or replacement.
+# A requested address change is allowed; an altered/unknown rule is never adopted by name.
+$priorRules=@(Get-NamedManagedFirewallRules PersistentStore)
+$priorPolicy=Get-ManagedFirewallPolicy
+if ($priorRules.Count -gt 1 -or $null -eq $priorPolicy -or -not $priorPolicy.PSObject.Properties['RuleCount'] -or
+    $priorPolicy.RuleCount -ne $priorRules.Count) {throw 'The retained firewall rule cannot be verified. Review manually before reactivation.'}
+$rule=$null
+if ($priorRules.Count -eq 1) {
+ if (-not $priorPolicy.PSObject.Properties['RemoteAddress'] -or
+     -not (Test-ManagedFirewallPolicy $priorPolicy @($priorPolicy.RemoteAddress))) {
+  throw 'The retained firewall rule differs from the managed policy. No service or rule was changed; review manually.'
+ }
+ $rule=$priorRules[0]
+}
+$addressMatch=Test-ManagedFirewallPolicy $priorPolicy $addresses
 $action=Get-ManagedDeploymentAction -ConfigExists $exists -ConfigMatches $configMatches -ServiceRunning ($service.State -eq 'Running') -AccountEnabled $user.Enabled -KeyMatches ($oldKey -ceq $key) -AddressesMatch $addressMatch -Validated ($record.Phase -ceq 'Validated')
 if ($action -eq 'Reuse') {return}
-# Stop retained session workers before changing a key, even when the service is already stopped.
-Disable-LocalUser -SID $user.SID
-Stop-ManagedSessionWorkers
+# A live ancestor proves ownership; stopped-service remnants require manual recovery.
+Stop-ManagedSessionWorkers -BeforeStop {
+ Disable-LocalUser -SID $user.SID
+ Stop-Service -Name sshd
+}
+$resumeCreatedFirewall=@(); $resumeAccountEnableAttempted=$false
 try {
  [IO.File]::WriteAllText($keyPath,$key + "`n",(New-Object Text.UTF8Encoding($false)))
  $keygen=Join-Path $bin 'ssh-keygen.exe'
@@ -55,20 +73,24 @@ try {
  Assert-ManagedConfig $config $record.ConfigSha256
  $defaultRule=Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
  if ($defaultRule) {Disable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'}
- if ($rule) {Remove-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP'}
- New-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -DisplayName 'DeskBridge SFTP from approved Mac addresses' -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress $addresses -Action Allow -Profile Any | Out-Null
+ if ($rule) {Remove-NetFirewallRule -InputObject $rule}
+ $resumeCreatedFirewall=@(New-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -DisplayName 'DeskBridge SFTP from approved Mac addresses' -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress $addresses -Action Allow -Profile Any)
+ if ($resumeCreatedFirewall.Count -ne 1) {throw 'The new managed firewall rule could not be identified. Manual review is required.'}
  # A stopped service may retain Disabled startup. Permit this start without
  # leaving an automatic service behind if account enable/start fails.
  Set-Service -Name sshd -StartupType Manual
+ $resumeAccountEnableAttempted=$true
  Enable-LocalUser -SID $user.SID
  Start-Service sshd
  Set-Service -Name sshd -StartupType Automatic
 } catch {
- Stop-Service sshd -ErrorAction SilentlyContinue
- Disable-LocalUser -SID $user.SID -ErrorAction SilentlyContinue
+ # Revoke future authentication and our rule even if ownership inspection must fail closed.
+ if ($resumeAccountEnableAttempted) {Disable-LocalUser -SID $user.SID -ErrorAction SilentlyContinue}
+ foreach ($createdRule in $resumeCreatedFirewall) {Remove-NetFirewallRule -InputObject $createdRule -ErrorAction SilentlyContinue}
+ Stop-ManagedSessionWorkers -BeforeStop {Stop-Service -Name sshd}
  Set-Service -Name sshd -StartupType $record.StartupBefore -ErrorAction SilentlyContinue
- Stop-ManagedSessionWorkers
- Remove-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -ErrorAction SilentlyContinue
  if (Test-Path -LiteralPath $config) {Move-Item -LiteralPath $config -Destination (Join-Path $state ('sshd_config.failed-' + [Guid]::NewGuid().ToString('N'))) }
  throw
 }
+
+} finally {$lifecycleLease.Dispose()}

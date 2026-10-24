@@ -10,6 +10,7 @@ public enum SFTPError: Error, LocalizedError, Sendable, Equatable {
     case cancelled
     case timedOut
     case connectionLost(String)
+    case targetChanged
     case destinationExists
     case sourceChanged
     case unsupportedFile
@@ -21,7 +22,7 @@ public enum SFTPError: Error, LocalizedError, Sendable, Equatable {
         if error is CancellationError { return true }
         guard let error = error as? SFTPError else { return false }
         switch error {
-        case .protocolViolation, .disconnected, .sshConnectionFailure, .cancelled, .timedOut, .connectionLost:
+        case .protocolViolation, .disconnected, .sshConnectionFailure, .cancelled, .timedOut, .connectionLost, .targetChanged:
             return true
         case .remoteStatus(let code, _):
             return code == 6 || code == 7 // SSH_FX_NO_CONNECTION / SSH_FX_CONNECTION_LOST
@@ -32,8 +33,8 @@ public enum SFTPError: Error, LocalizedError, Sendable, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidConfiguration(let reason): return "SFTP 접속 설정을 확인하세요: \(reason)"
-        case .invalidPath(let reason): return "파일 경로를 확인하세요: \(reason)"
+        case .invalidConfiguration: return "파일 접속 설정을 확인하세요. PC 주소·SSH 포트·파일 전용 계정·Mac 개인 키·Windows 호스트 공개 키를 확인한 뒤 다시 접속하세요."
+        case .invalidPath: return "파일 이름과 경로를 확인하세요. 공유 폴더 안의 경로를 사용하고 Windows에서 지원하지 않는 이름·제어 문자·숨은 서식 문자를 피하세요."
         case .protocolViolation: return "파일 서버 응답을 확인하지 못했습니다. 파일 연결을 끊고 다시 접속하세요."
         case .remoteStatus(let code, _):
             switch code {
@@ -56,10 +57,11 @@ public enum SFTPError: Error, LocalizedError, Sendable, Equatable {
         case .cancelled: return "파일 전송을 취소했습니다. Windows에 미완료 업로드가 남을 수 있습니다."
         case .timedOut: return "파일 작업 시간이 초과되었습니다. 다시 접속하세요."
         case .connectionLost: return "파일 연결이 끊어졌습니다. PC 주소와 네트워크를 확인한 뒤 다시 접속하세요."
+        case .targetChanged: return "대상 PC가 바뀌어 파일 연결을 끊었습니다. PC 주소를 확인한 뒤 다시 접속하세요."
         case .destinationExists: return "같은 이름의 파일이 있습니다. 다른 이름을 선택하세요."
         case .sourceChanged: return "전송 중 원본 파일이 바뀌었습니다. 다시 시도하세요."
-        case .unsupportedFile: return "일반 파일만 전송할 수 있습니다. 심볼릭 링크는 지원하지 않습니다."
-        case .localIO(let reason): return "Mac에서 파일 작업을 완료하지 못했습니다: \(reason)"
+        case .unsupportedFile: return "128GiB 이하의 일반 파일을 선택하세요. 폴더·앱 패키지·심볼릭 링크는 전송하지 않습니다."
+        case .localIO: return "Mac에서 파일 작업을 완료하지 못했습니다. 저장 폴더의 접근 권한·남은 공간을 확인하고, 다운로드는 macOS 격리 표식을 지원하는 로컬 폴더에 저장하세요."
         }
     }
 }
@@ -167,7 +169,7 @@ struct SFTPAttributes: Sendable {
 enum SFTPPaths {
     static func remote(_ path: String) throws -> String {
         guard path.hasPrefix("/"), path.utf8.count <= 8192,
-              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0.properties.generalCategory == .format }),
               !path.contains("\\"), !path.contains(":") else {
             throw SFTPError.invalidPath("use an absolute SFTP path inside the configured share")
         }
@@ -186,7 +188,7 @@ enum SFTPPaths {
     static func windowsFilename(_ name: String) throws {
         guard !name.isEmpty, name.utf16.count <= 240, name != ".", name != "..",
               !name.hasSuffix(" "), !name.hasSuffix("."),
-              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0.properties.generalCategory == .format }),
               name.rangeOfCharacter(from: CharacterSet(charactersIn: "<>:\"/\\|?*")) == nil else {
             throw SFTPError.invalidPath("filename is not supported by Windows")
         }

@@ -70,6 +70,98 @@ try {
         }
     }
 } finally { [IO.Directory]::Delete($root,$true) }
+# Execute the real refresh function with only event pumping, native scan creation and
+# stopwatch creation replaced by inert leaves. No Form, display API or device inventory is used.
+$uiPath=Join-Path (Split-Path $PSScriptRoot -Parent) 'Show-HeadlessSetup.ps1'
+$uiAst=[Management.Automation.Language.Parser]::ParseFile($uiPath,[ref]$tokens,[ref]$errors)
+$refresh=@($uiAst.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'Update-HeadlessState'})
+Check ($errors.Count -eq 0 -and $refresh.Count -eq 1) 'Refresh fixture extracts one complete actual production function'
+$refreshSource=$refresh[0].Extent.Text
+Check ([regex]::Matches($refreshSource,[regex]::Escape('[Windows.Forms.Application]::DoEvents()')).Count -eq 3 -and
+       [regex]::Matches($refreshSource,[regex]::Escape('[Knot.Headless.Native]::ScanAsync()')).Count -eq 1 -and
+       [regex]::Matches($refreshSource,[regex]::Escape('[Diagnostics.Stopwatch]::StartNew()')).Count -eq 1) 'Every refresh fixture platform leaf is explicitly enumerated'
+$refreshFixture=$refreshSource.Replace('[Windows.Forms.Application]::DoEvents()','Invoke-InertHeadlessEvents').Replace('[Knot.Headless.Native]::ScanAsync()','Get-InertHeadlessScan').Replace('[Diagnostics.Stopwatch]::StartNew()','New-InertHeadlessTimer')
+$ownedId='ROOT\KNOTVDD\0123456789ABCDEF0123456789ABCDEF'
+$probeCases=@(
+ @{Status='Installed';Mode='Failed';Managed=$true;Remove=$true},
+ @{Status='InstalledPendingRestart';Mode='Timeout';Managed=$true;Remove=$true},
+ @{Status='RemovalPending';Mode='Failed';Managed=$true;Remove=$true},
+ @{Status='RecoveryRequired';Mode='Timeout';Managed=$true;Remove=$true},
+ @{Status='Installed';Mode='InitializeFailed';Managed=$true;Remove=$true},
+ @{Status='Installed';Mode='StateFailed';Managed=$true;Remove=$false},
+ @{Status='Installed';Mode='Failed';Managed=$false;Remove=$false},
+ @{Status='Installed';Mode='Failed';Managed='true';Remove=$false},
+ @{Status='Installed';Mode='Failed';Managed=$null;Remove=$false},
+ @{Status='Installed';Mode='Failed';Managed=$true;InstanceId='ROOT\FOREIGN\0000';Remove=$false},
+ @{Status='Installed';Mode='Failed';Managed=$true;InstanceId='ROOT\KNOTVDD\0123456789abcdef0123456789abcdef';Remove=$false},
+ @{Status='Absent';Mode='Failed';Managed=$false;Remove=$false;InstallEnabled=$true},
+ @{Status='Absent';Mode='Timeout';Managed=$false;Remove=$false;InstallEnabled=$true},
+ @{Status='Absent';Mode='Success';Managed=$false;Remove=$false;InstallEnabled=$false;ExpectedScans=0},
+ @{Status='Absent';Mode='Success';Managed=$false;Remove=$false;InstallEnabled=$true;Install=$true},
+ @{Status='Installed';Mode='Success';Managed=$true;Remove=$true},
+ @{Status='Installed';Mode='Foreign';Managed=$true;Remove=$false},
+ @{Status='RecoveryRequired';Mode='Foreign';Managed=$true;Remove=$false},
+ @{Status='Installed';Mode='Missing';Managed=$true;Remove=$false},
+ @{Status='RecoveryRequired';Mode='Missing';Managed=$true;Remove=$true}
+)
+foreach ($blockedStatus in @('Conflict','LegacyRecoveryRequired','Unsupported','BootEvidenceUnavailable','DeviceIdentityUnavailable','unknown','installed','')) {
+ $probeCases+=@{Status=$blockedStatus;Mode='Failed';Managed=$true;Remove=$false;ExpectedScans=0}
+}
+$probeRoot=Join-Path ([IO.Path]::GetTempPath()) ('knot-headless-refresh-'+[guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($probeRoot)
+try {
+ $statusModule=Join-Path (Split-Path $PSScriptRoot -Parent) 'HeadlessStatus.psm1'
+ $setupModule=Join-Path (Split-Path $PSScriptRoot -Parent) 'SetupStatus.psm1'
+ foreach ($case in $probeCases) {
+  $id=$ownedId;if ($case.ContainsKey('InstanceId')) {$id=$case.InstanceId}
+  $enabled=$false;if ($case.ContainsKey('InstallEnabled')) {$enabled=$case.InstallEnabled}
+  $payload=[pscustomobject]@{Mode=$case.Mode;Enabled=$enabled;State=[pscustomobject]@{Status=$case.Status;Managed=$case.Managed;InstanceId=$id;RebootRequired=$false}}
+  $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 4 -Compress)))
+  $prefix=@'
+$ErrorActionPreference='Stop'
+$script:headlessFixture=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
+Import-Module '__STATUS_MODULE__' -Force
+Import-Module '__SETUP_MODULE__' -Force
+$script:scan=$null;$script:canInstall=$false;$script:canRemove=$false;$script:headlessBusy=$false;$script:scanCalls=0
+$status=[pscustomobject]@{Text=''}
+function Invoke-InertHeadlessEvents {}
+function New-InertHeadlessTimer {[pscustomobject]@{Elapsed=[pscustomobject]@{TotalSeconds=16}}}
+function Get-KnotHeadlessState {
+ if ($script:headlessFixture.Mode -ceq 'StateFailed') {throw 'synthetic journal read failed'}
+ $script:headlessFixture.State
+}
+function Get-KnotHeadlessAvailability {[pscustomobject]@{Enabled=$script:headlessFixture.Enabled;Reason='upstream-ipc-review'}}
+function Initialize-KnotHeadlessNative {if ($script:headlessFixture.Mode -ceq 'InitializeFailed') {throw 'synthetic native initialization failed'}}
+function Set-HeadlessBusy {param([bool]$Busy)}
+function Get-InertHeadlessScan {
+ $script:scanCalls++
+ $scan=[pscustomobject]@{IsCompleted=($script:headlessFixture.Mode -cne 'Timeout')}
+ $scan | Add-Member ScriptMethod GetAwaiter {return $this}
+ $scan | Add-Member ScriptMethod GetResult {
+  if ($script:headlessFixture.Mode -ceq 'Failed') {throw 'synthetic optional display scan failed'}
+  $devices=@()
+  if ($script:headlessFixture.Mode -ceq 'Foreign') {$devices=@([pscustomobject]@{InstanceId='ROOT\FOREIGN\0000'})}
+  elseif ($script:headlessFixture.Mode -cne 'Missing' -and $script:headlessFixture.State.Status -cne 'Absent') {$devices=@([pscustomobject]@{InstanceId=$script:headlessFixture.State.InstanceId})}
+  [pscustomobject]@{Devices=$devices;Displays=@()}
+ }
+ $scan
+}
+'@
+  $prefix=$prefix.Replace('__PAYLOAD__',$encoded).Replace('__STATUS_MODULE__',$statusModule.Replace("'","''")).Replace('__SETUP_MODULE__',$setupModule.Replace("'","''"))
+  $tail="Update-HeadlessState; [pscustomobject]@{canInstall=`$script:canInstall;canRemove=`$script:canRemove;scanCalls=`$script:scanCalls;text=`$status.Text} | ConvertTo-Json -Compress"
+  $fixturePath=Join-Path $probeRoot ([guid]::NewGuid().ToString('N')+'.ps1')
+  [IO.File]::WriteAllText($fixturePath,($prefix+[Environment]::NewLine+$refreshFixture+[Environment]::NewLine+$tail),(New-Object Text.UTF8Encoding($true)))
+  $output=@(& $runner -NoLogo -NoProfile -NonInteractive -File $fixturePath)
+  Check ($LASTEXITCODE -eq 0 -and $output.Count -eq 1) ('Inert actual refresh failed: '+$case.Status+'/'+$case.Mode)
+  $actual=$output[0] | ConvertFrom-Json
+  $install=$false;if ($case.ContainsKey('Install')) {$install=$case.Install}
+  Check ($actual.canRemove -is [bool] -and $actual.canRemove -eq $case.Remove) ('Removal admission mismatch: '+$case.Status+'/'+$case.Mode)
+  Check ($actual.canInstall -is [bool] -and $actual.canInstall -eq $install) ('Install must require a fresh successful scan: '+$case.Status+'/'+$case.Mode)
+  if ($case.ContainsKey('ExpectedScans')) {Check ($actual.scanCalls -eq $case.ExpectedScans) ('A refused/policy-held state unexpectedly probed: '+$case.Status)}
+  if ($case.Remove -and $case.Mode -cin @('Failed','Timeout','InitializeFailed')) {Check ($actual.text -match '관리자.*다시 검증') 'Probe failure with owned removal must explain the fresh elevated verification'}
+ }
+} finally {[IO.Directory]::Delete($probeRoot,$true)}
+
 [pscustomobject]@{status='passed';checks=$count;freshSyntheticOnly=$true;nativeApisInvoked=$false;bootstrapPolicyComposed=[bool]$BootstrapPolicyRunner} | ConvertTo-Json -Compress
 # Expected failing child fixtures must not become the successful checker's process status.
 $global:LASTEXITCODE=0

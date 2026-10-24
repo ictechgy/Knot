@@ -1140,6 +1140,57 @@ diff --git a/GlimmerEngine/Network/InputBatcher.swift b/GlimmerEngine/Network/In
 +            channel: absMouseChannel, timing: timing) else { return false }
 @@ -569,0 +595 @@
 +        return true
+diff --git a/GlimmerEngine/Network/Network+Support.swift b/GlimmerEngine/Network/Network+Support.swift
+--- a/GlimmerEngine/Network/Network+Support.swift
++++ b/GlimmerEngine/Network/Network+Support.swift
+@@ -23 +23,4 @@
+-
++    static let maximumSourceBytes = 4 * 1024 * 1024
++    static let maximumDepth = 64
++    static let maximumNodes = 16_384
++    static let maximumTextBytes = 4 * 1024 * 1024
+@@ -26,0 +30,2 @@
++    private var nodeCount = 0
++    private var textBytes = 0
+@@ -28,0 +34 @@
++        guard data.count <= maximumSourceBytes else { throw budgetError() }
+@@ -46 +52 @@
+-        guard parser.parse() else {
++        guard parser.parse(), builder.parseError == nil else {
+@@ -68,0 +75,5 @@
++        guard parseError == nil else { return }
++        guard stack.count < Self.maximumDepth, nodeCount < Self.maximumNodes else {
++            rejectBudget(parser); return
++        }
++        nodeCount += 1
+@@ -76 +87,2 @@
+-        guard !stack.isEmpty else { return }
++        guard parseError == nil, !stack.isEmpty else { return }
++        guard retainText(string.utf8.count, parser: parser) else { return }
+@@ -81 +93 @@
+-        guard !stack.isEmpty,
++        guard parseError == nil, !stack.isEmpty,
+@@ -82,0 +95 @@
++        guard retainText(decoded.utf8.count, parser: parser) else { return }
+@@ -90 +103 @@
+-        guard let finished = stack.popLast() else { return }
++        guard parseError == nil, let finished = stack.popLast() else { return }
+@@ -100 +113,14 @@
+-        self.parseError = parseError
++        if self.parseError == nil { self.parseError = parseError }
++    }
++    private static func budgetError() -> NSError {
++        NSError(domain: "Glimmer.XML", code: -3,
++                userInfo: [NSLocalizedDescriptionKey: "XML response exceeds the supported parsing limits"])
++    }
++    private func rejectBudget(_ parser: XMLParser) {
++        parseError = Self.budgetError()
++        parser.abortParsing()
++    }
++    private func retainText(_ count: Int, parser: XMLParser) -> Bool {
++        guard count <= Self.maximumTextBytes - textBytes else { rejectBudget(parser); return false }
++        textBytes += count
++        return true
 diff --git a/GlimmerEngine/Network/Network.swift b/GlimmerEngine/Network/Network.swift
 --- a/GlimmerEngine/Network/Network.swift
 +++ b/GlimmerEngine/Network/Network.swift
@@ -1591,7 +1642,7 @@ new file mode 100644
 +
 +public enum StreamSecurityPolicy {
 +    public static let requiredFeatures: UInt32 = 0x07 // control V2, video GCM, audio CBC
-+    public enum Failure: Error, LocalizedError {
++    public enum Failure: Error, LocalizedError, Sendable, Equatable {
 +        case plaintextSignalling, missingEncryption(UInt32)
 +        public var errorDescription: String? {
 +            switch self {
@@ -1695,10 +1746,14 @@ diff --git a/GlimmerEngine/Session/NativeBackend.swift b/GlimmerEngine/Session/N
 @@ -32,0 +39,2 @@
 +    // DeskBridge desktop edits share one reliable channel; game/controller defaults remain unchanged.
 +    var desktopInputOrdering = false
-@@ -220,0 +229,2 @@
+@@ -200,0 +209,3 @@
++        if let failure = error as? StreamSecurityPolicy.Failure {
++            return .securityNegotiation(failure)
++        }
+@@ -220,0 +232,2 @@
 +        teardownLock.lock()
 +        defer { teardownLock.unlock() }
-@@ -250,0 +261,2 @@
+@@ -250,0 +264,2 @@
 +        teardownLock.lock()
 +        defer { teardownLock.unlock() }
 diff --git a/GlimmerEngine/Session/NativeConnectionEvents.swift b/GlimmerEngine/Session/NativeConnectionEvents.swift
@@ -1781,6 +1836,71 @@ diff --git a/GlimmerEngine/Session/StreamSession+Connect.swift b/GlimmerEngine/S
 @@ -107 +107 @@
 -            encryptionFlags: 0,
 +            encryptionFlags: Int32(StreamSecurityPolicy.requiredFeatures),
+@@ -192 +192 @@
+-                throw StreamError.sessionFailed(code)
++                throw error as? StreamError ?? .sessionFailed(code)
+diff --git a/GlimmerEngine/Session/StreamSession+FrameWatchdog.swift b/GlimmerEngine/Session/StreamSession+FrameWatchdog.swift
+--- a/GlimmerEngine/Session/StreamSession+FrameWatchdog.swift
++++ b/GlimmerEngine/Session/StreamSession+FrameWatchdog.swift
+@@ -57,0 +58,13 @@
++    }
++
++    /// One decoder rebuild is bounded when packets still arrive but this
++    /// connection has produced no output. A hidden/gated span gets a fresh
++    /// visible allowance at gate lift; a paused encoder is still allowed to wait.
++    package static func watchdogFailedDecodeReconnect(
++        didReconnect: Bool, presentSuppressed: Bool, decodeGated: Bool,
++        sinceDecoded: Double, sinceGateLift: Double, sinceArm: Double, receiveIdle: Double
++    ) -> Bool {
++        didReconnect && !presentSuppressed && !decodeGated
++            && receiveIdle < decodeOnlyStallThreshold
++            && (!sinceDecoded.isFinite || sinceDecoded > sinceArm)
++            && min(sinceArm, sinceGateLift) >= decodeOnlyReconnectSeconds
+@@ -80 +93,2 @@
+-        let sinceArm = uptimeSeconds - frameWatchdogArmedAt
++        let watchdogArm = frameWatchdogArmedAt
++        let sinceArm = uptimeSeconds - watchdogArm
+@@ -90,2 +104 @@
+-                    await self?.handleWatchdogTimeout(
+-                        decodeIdleSeconds: sinceArm, receiveIdleSeconds: receiveIdle, neverDecodedFirstFrame: true)
++                    await self?.handleWatchdogTimeout(decoder: dec, armedAt: watchdogArm)
+@@ -115 +128 @@
+-            await self?.handleWatchdogTimeout(decodeIdleSeconds: decodeIdle, receiveIdleSeconds: receiveIdle)
++            await self?.handleWatchdogTimeout(decoder: dec, armedAt: watchdogArm)
+@@ -195,4 +208 @@
+-    private func handleWatchdogTimeout(
+-        decodeIdleSeconds: Double, receiveIdleSeconds: Double,
+-        neverDecodedFirstFrame: Bool = false
+-    ) async {
++    private func handleWatchdogTimeout(decoder dec: VideoDecoder, armedAt expectedArm: Double) async {
+@@ -200 +210,26 @@
+-        guard isStreaming, !stopInProgress, !isReconnecting else { return }
++        guard isStreaming, !stopInProgress, !isReconnecting, videoDecoder === dec else { return }
++        let currentArm = await MainActor.run { self.frameWatchdogArmedAt }
++        // A queued tick must not terminate a replacement attempt or a decoder
++        // that recovered while the actor was busy. Reread all progress here.
++        guard isStreaming, !stopInProgress, !isReconnecting, videoDecoder === dec,
++              currentArm == expectedArm, currentArm > 0, !dec.decodeGated else { return }
++        let sinceArm = uptimeSeconds - currentArm
++        let sinceDecoded = dec.secondsSinceLastDecodedFrame()
++        let sinceGateLift = dec.secondsSinceDecodeGateLifted()
++        let latestDecodeIdle = Self.watchdogDecodeIdle(
++            sinceDecoded: sinceDecoded, sinceGateLift: sinceGateLift, sinceArm: sinceArm)
++        let neverDecodedFirstFrame = !latestDecodeIdle.isFinite
++        let decodeIdleSeconds = neverDecodedFirstFrame ? sinceArm : latestDecodeIdle
++        let receiveIdleSeconds = dec.secondsSinceLastReceivedFrame()
++        guard decodeIdleSeconds > Self.frameWatchdogTimeout else { return }
++
++        if Self.watchdogFailedDecodeReconnect(
++            didReconnect: didReconnectForDecodeStall, presentSuppressed: dec.presentSuppressed,
++            decodeGated: dec.decodeGated, sinceDecoded: sinceDecoded,
++            sinceGateLift: sinceGateLift, sinceArm: sinceArm, receiveIdle: receiveIdleSeconds) {
++            Diag.error("Video still arrived without decoded output after a decoder reconnect - tearing down", "Stream")
++            noteTelemetryDisconnect(.watchdogStall)
++            bridge?.emit(.connectionTerminated(errorCode: Self.noVideoFrameTerminationCode))
++            await stop()
++            return
++        }
 diff --git a/GlimmerEngine/Session/StreamSession+Lifecycle.swift b/GlimmerEngine/Session/StreamSession+Lifecycle.swift
 --- a/GlimmerEngine/Session/StreamSession+Lifecycle.swift
 +++ b/GlimmerEngine/Session/StreamSession+Lifecycle.swift
@@ -1788,6 +1908,11 @@ diff --git a/GlimmerEngine/Session/StreamSession+Lifecycle.swift b/GlimmerEngine
 -        setWaitingForVideo(false)
 +        // Stop is terminal; clearing the hold must not announce old video as live.
 +        waitingForVideo = false
+@@ -37,0 +39,4 @@
++        // Local-only stop cannot undo a request already accepted by the host,
++        // but it must cancel the inner HTTP task as well as its outer waiter.
++        // The host-cancel disposition keeps its bounded late-success cleanup.
++        if hostDisposition.cancellation == nil { pendingLaunch?.cancel() }
 diff --git a/GlimmerEngine/Session/StreamSession+Public.swift b/GlimmerEngine/Session/StreamSession+Public.swift
 --- a/GlimmerEngine/Session/StreamSession+Public.swift
 +++ b/GlimmerEngine/Session/StreamSession+Public.swift
@@ -2107,9 +2232,25 @@ diff --git a/GlimmerEngine/Session/StreamSession+Reconnect.swift b/GlimmerEngine
 diff --git a/GlimmerEngine/Session/StreamSession+Start.swift b/GlimmerEngine/Session/StreamSession+Start.swift
 --- a/GlimmerEngine/Session/StreamSession+Start.swift
 +++ b/GlimmerEngine/Session/StreamSession+Start.swift
-@@ -42,0 +43 @@
+@@ -25,0 +26 @@
++        reachedLiveState = false
+@@ -42,0 +44 @@
 +        refreshPowerAssertion()
-@@ -180 +181 @@
+@@ -78,3 +80,10 @@
+-        let launch = try await launchWithDeadline(network: network, appID: appID, config: config, info: serverInfo)
+-        try checkAttempt()
+-        takeoverAuthorized = false
++        let launch: LaunchResponse
++        do {
++            launch = try await launchWithDeadline(network: network, appID: appID, config: config, info: serverInfo)
++            takeoverAuthorized = false
++        } catch {
++            // The shell reuses this paired client for the next PC refresh. An
++            // expired launch budget must never poison a later retry or pairing.
++            await network.setRequestDeadline(nil)
++            throw error
++        }
+@@ -180 +189 @@
 -        services.refreshActivity(videoDecoder?.presentSuppressed ?? false)
 +        services.refreshActivity((videoDecoder ?? publicMedia?.video)?.presentSuppressed ?? false)
 diff --git a/GlimmerEngine/Session/StreamSession+Wake.swift b/GlimmerEngine/Session/StreamSession+Wake.swift
@@ -2165,3 +2306,122 @@ diff --git a/GlimmerEngine/Video/VideoDecoder+Decode.swift b/GlimmerEngine/Video
 +        // In-place reconnect reuses this decoder after stop/cleanup. Rearm on
 +        // its serial queue before accepting frames for the new transport.
 +        decodeQueue.sync { self.didFireFirstDecodedFrame = false }
+@@ -170 +172,0 @@
+-        let epoch: UInt
+@@ -172,2 +174,2 @@
+-        case .feed(let fedEpoch):
+-            epoch = fedEpoch
++        case .feed:
++            break
+@@ -228,13 +230,7 @@
+-            // INTENTIONAL NON-PRESENTATION ≠ LOSS. When presentation is suppressed
+-            // (window backgrounded / occluded / minimized), the present path has
+-            // stopped retiring frames, so the backlog overflows even though the
+-            // wire is healthy. Treating that like a reference-break and flushing
+-            // to IDR is exactly the "rfis/idrs and backflows when the window
+-            // isn't focused" bug. Drain the pacer FIFO to the freshest frame so
+-            // it can't grow unbounded, then return DR_OK (NOT DR_NEED_IDR): no
+-            // wire IDR, no depacketizer wait-for-IDR. The drop is still counted
+-            // above as a benign overflow, so telemetry stays measurable. The
+-            // single clean-repaint IDR for the whole episode is owned by the
+-            // refocus resync in `setPresentSuppressed(false)`.
+-            if presentSuppressed {
+-                framePacer?.dropToNewest(reason: "suppressed_backlog")
++            // The compressed drop broke references. While still hidden, latch
++            // the decode gate and resync obligation atomically, without a wire
++            // IDR. Discard retained presentation too; resume must not repaint
++            // an image decoded against the broken chain. A racing resume/stop
++            // instead takes the ordinary depacketizer wait-for-IDR path.
++            if gateAfterHiddenReferenceDrop() {
++                framePacer?.clearQueue(reason: "hidden_reference_drop")
+@@ -242,0 +239,19 @@
++            return StreamProtocol.DR_NEED_IDR
++        }
++
++        let epoch: UInt
++        switch commitReservedDecode(isIDR: isIDR) {
++        case .feed(let committedEpoch):
++            epoch = committedEpoch
++        case .dropQuietly:
++            if forceSessionRecreate {
++                // Reservation abandoned the wedged session's backlog. A gate
++                // may refuse this IDR, but cannot cancel that replacement:
++                // retire the session before any later receive-thread submit
++                // can enqueue its resumed IDR on this same serial queue.
++                decodeQueue.async { [self] in self.tearDownDecompressionSession() }
++            }
++            releaseInFlightDecode()
++            return StreamProtocol.DR_OK
++        case .resyncToIdr:
++            releaseInFlightDecode()
+diff --git a/GlimmerEngine/Video/VideoDecoder+Suppression.swift b/GlimmerEngine/Video/VideoDecoder+Suppression.swift
+--- a/GlimmerEngine/Video/VideoDecoder+Suppression.swift
++++ b/GlimmerEngine/Video/VideoDecoder+Suppression.swift
+@@ -134,5 +134,3 @@
+-    /// process another packet). The one-shot resync latch is cleared on
+-    /// BOTH non-gated outcomes - on `.feed`-of-an-IDR because the reference
+-    /// chain is reset by the keyframe itself, and on `.resyncToIdr` because
+-    /// the wait now lives in the depacketizer, which stops emitting non-IDR
+-    /// frames entirely until a real one arrives.
++    /// process another packet). An IDR decision is observational: only a
++    /// successfully reserved IDR may advance the epoch and clear its resync
++    /// obligation. A non-IDR transfers the one-shot wait to the depacketizer.
+@@ -139,0 +138,13 @@
++        decodeGateDisposition(isIDR: isIDR, committingReservedSlot: false)
++    }
++
++    /// Reservation succeeded. Recheck the gate and resync latch because a
++    /// visibility timer or VT error may have changed them during reservation.
++    /// The caller releases its slot if the frame is no longer eligible to feed.
++    nonisolated func commitReservedDecode(isIDR: Bool) -> DecodeGateDisposition {
++        decodeGateDisposition(isIDR: isIDR, committingReservedSlot: true)
++    }
++
++    private nonisolated func decodeGateDisposition(
++        isIDR: Bool, committingReservedSlot: Bool
++    ) -> DecodeGateDisposition {
+@@ -153,2 +164,4 @@
+-            _idrEpoch &+= 1
+-            _awaitingResyncIdr = false
++            if committingReservedSlot {
++                _idrEpoch &+= 1
++                _awaitingResyncIdr = false
++            }
+@@ -159,0 +173,15 @@
++    }
++
++    /// A real compressed-frame drop breaks references even while hidden.
++    /// Stop further decode feed quietly until resume; never request a wire
++    /// IDR for a hidden window. A racing resume/stop must win this recheck.
++    nonisolated func gateAfterHiddenReferenceDrop() -> Bool {
++        presentSuppressedLock.lock()
++        let gated = isStreaming && _presentSuppressed
++        if gated {
++            _decodeGated = true
++            _awaitingResyncIdr = true
++        }
++        presentSuppressedLock.unlock()
++        if gated { TelemetryCounters.shared.setDecodeGated(true) }
++        return gated
+diff --git a/GlimmerEngine/Video/VideoDecoder.swift b/GlimmerEngine/Video/VideoDecoder.swift
+--- a/GlimmerEngine/Video/VideoDecoder.swift
++++ b/GlimmerEngine/Video/VideoDecoder.swift
+@@ -450,2 +450,2 @@
+-    /// `decodeGateDisposition` either clears it on a genuine IDR (feed it -
+-    /// the resync IDR won the race) or converts it into DR_NEED_IDR exactly
++    /// `commitReservedDecode` clears it only after reserving a genuine IDR.
++    /// `decodeGateDisposition` converts it into DR_NEED_IDR exactly
+diff --git a/GlimmerEngine/Models/StreamFailure.swift b/GlimmerEngine/Models/StreamFailure.swift
+--- a/GlimmerEngine/Models/StreamFailure.swift
++++ b/GlimmerEngine/Models/StreamFailure.swift
+@@ -64 +64 @@
+-        case .crypto: return .security
++        case .crypto, .securityNegotiation: return .security
+diff --git a/GlimmerEngine/Models/Types.swift b/GlimmerEngine/Models/Types.swift
+--- a/GlimmerEngine/Models/Types.swift
++++ b/GlimmerEngine/Models/Types.swift
+@@ -249,0 +250,2 @@
++    /// Preserve the negotiated channel failure without exposing remote diagnostics.
++    case securityNegotiation(StreamSecurityPolicy.Failure)
+@@ -285,0 +288 @@
++        case .securityNegotiation(let failure): return failure.localizedDescription

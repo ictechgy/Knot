@@ -7,6 +7,7 @@ import GlimmerEngine
     var info: ServerInfo
     var requiredIDs: [String?] = []
     var opened: [ServerInfo] = []
+    var configurations: [StreamConfiguration] = []
     var failure: (any Error)?
     var suspendRefresh = false
     var continuation: CheckedContinuation<Void, Never>?
@@ -22,10 +23,79 @@ import GlimmerEngine
             if suspendRefresh { await withCheckedContinuation { continuation = $0 } }
             if let failure { throw failure }
             return info
-        }, appList: { [self] _ in [app] }, openStream: { [self] _, _, snapshot, _, _ in
+        }, appList: { [self] _ in [app] }, openStream: { [self] _, _, snapshot, _, configuration in
             opened.append(snapshot)
+            configurations.append(configuration)
         })
     }
+}
+
+/// Checks the actual model -> engine configuration boundary without opening a stream.
+@MainActor
+func runDesktopQualityChecks(temporary: URL) async throws -> Int {
+    var count = 0
+    func expect(_ condition: Bool, _ message: String) throws {
+        guard condition else { throw ModelCheckFailure(message: message) }; count += 1
+    }
+    func settle(_ model: DesktopModel) async throws {
+        for _ in 0..<1000 {
+            if !model.busy { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        throw ModelCheckFailure(message: "synthetic quality operation did not settle")
+    }
+    let host = SyntheticDesktopHost()
+    let directory = temporary.appendingPathComponent("desktop-quality")
+    var settings = SavedSettings(); settings.address = host.info.address
+    settings.host = SavedHost(address: host.info.address, uniqueID: host.info.uniqueId, name: host.info.serverName,
+        certificatePEM: host.info.serverCertPEM!, httpPort: 47989, httpsPort: 47984)
+    let store = SettingsStore(directory: directory)
+    try store.save(settings)
+    let suite = "org.deskbridge.synthetic." + UUID().uuidString
+    defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+    let model = DesktopModel(storageDirectory: directory, identitySuite: suite, operations: host.operations)
+    try expect(model.resolution == 1080 && model.frameRate == 60 && model.bitrateKbps == 0,
+        "existing default quality changed")
+    model.connect(); try await settle(model)
+    // Literal expectations independently pin horizontal sizes and automatic bitrates.
+    for (height, width, automatic) in [(1080, 1920, 20000), (1440, 2560, 30000), (2160, 3840, 60000)] {
+        for fps in [30, 60] {
+            for bitrate in [0, 10000, 20000, 30000, 40000, 60000, 80000, 100000] {
+                model.resolution = height; model.frameRate = fps; model.bitrateKbps = bitrate
+                let before = host.configurations.count
+                model.start(host.app); try await settle(model)
+                guard let config = host.configurations.last else { throw ModelCheckFailure(message: "quality did not reach openStream") }
+                try expect(host.configurations.count == before + 1 && config.width == width && config.height == height &&
+                    config.fps == fps && config.bitrateKbps == (bitrate == 0 ? automatic : bitrate),
+                    "actual model passed incorrect quality to the engine")
+            }
+        }
+    }
+    for (height, fps, bitrate) in [(4320,60,0),(2160,120,0),(2160,60,-1),(2160,60,100001),(Int.max,Int.max,Int.max)] {
+        model.resolution = height; model.frameRate = fps; model.bitrateKbps = bitrate
+        let before = host.configurations.count, fetches = host.requiredIDs.count
+        model.start(host.app); try await settle(model)
+        try expect(host.configurations.count == before && host.requiredIDs.count == fetches && model.errorMessage != nil,
+            "invalid quality reached network refresh or stream open")
+    }
+    model.resolution = 2160; model.frameRate = 60; model.bitrateKbps = 80000
+    host.suspendRefresh = true
+    model.start(host.app)
+    for _ in 0..<1000 {
+        if host.continuation != nil { break }
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    guard let continuation = host.continuation else { throw ModelCheckFailure(message: "quality refresh never suspended") }
+    model.resolution = 1080; model.frameRate = 30; model.bitrateKbps = 10000
+    continuation.resume(); host.continuation = nil
+    try await settle(model)
+    let config = host.configurations.last!
+    try expect(config.width == 3840 && config.height == 2160 && config.fps == 60 && config.bitrateKbps == 80000,
+        "in-flight refresh changed the selected quality snapshot")
+    let persisted = try store.load()
+    try expect(persisted.address == settings.address && persisted.host?.certificatePEM == settings.host?.certificatePEM &&
+        persisted.host?.uniqueID == settings.host?.uniqueID, "quality changed persistent connection trust")
+    return count
 }
 
 @MainActor

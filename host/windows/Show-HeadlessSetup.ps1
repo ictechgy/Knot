@@ -9,6 +9,10 @@ Import-Module (Join-Path $PSScriptRoot 'HeadlessStatus.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SetupDownload.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'SetupStatus.psm1') -Force
 $window=New-Object Windows.Forms.Form
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'AppIcon.ico') -PathType Leaf) {
+    $window.Icon=New-Object Drawing.Icon((Join-Path $PSScriptRoot 'AppIcon.ico'))
+    $window.Add_Disposed({ param($sender,$eventArgs) if ($sender.Icon) { $sender.Icon.Dispose() } })
+}
 $window.Text='Knot · 모니터 없이 사용'; $window.Size=New-Object Drawing.Size(740,740)
 $window.MinimumSize=New-Object Drawing.Size(600,480); $window.StartPosition='CenterParent'
 $window.AutoScaleDimensions=New-Object Drawing.SizeF(96,96); $window.AutoScaleMode='Dpi'
@@ -68,6 +72,11 @@ function Update-HeadlessState {
         $state=Get-KnotHeadlessState
         $recordText=Get-KnotHeadlessStatusText $state.Status
         if ($state.Status -cin @('Conflict','LegacyRecoveryRequired','Unsupported','BootEvidenceUnavailable','DeviceIdentityUnavailable') -or $state.Status -cnotin @('Absent','Installed','InstalledPendingRestart','RemovalPending','RecoveryRequired')) { $status.Text=$recordText; return }
+        # A validated managed journal admits a removal REQUEST independently of the optional
+        # display scan. The elevated backend still revalidates journal/device identity before mutation.
+        $script:canRemove=($state.Managed -is [bool] -and $state.Managed -and
+            $state.Status -cin @('Installed','InstalledPendingRestart','RemovalPending','RecoveryRequired') -and
+            $state.InstanceId -is [string] -and $state.InstanceId -cmatch '^ROOT\\KNOTVDD\\[0-9A-F]{32}\z')
         $availability=Get-KnotHeadlessAvailability
         if (-not (Test-KnotHeadlessDeviceProbeRequired $state.Status ([bool]$availability.Enabled))) {
             # No install/removal action is available. Avoid compiling/scanning native code just to display policy.
@@ -80,17 +89,21 @@ function Update-HeadlessState {
         while (-not $script:scan.IsCompleted -and $timer.Elapsed.TotalSeconds -lt 15) {
             [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 80
         }
-        if (-not $script:scan.IsCompleted) { $status.Text=$recordText+' 장치 확인이 지연되고 있습니다. 작업 버튼은 잠겨 있습니다. 잠시 뒤 상태 새로고침을 누르세요.'; return }
+        if (-not $script:scan.IsCompleted) {
+            $status.Text=$recordText+' 화면 확인이 지연되고 있습니다. 설치는 잠겨 있습니다. 잠시 뒤 상태를 새로고침하세요.'
+            if ($script:canRemove) { $status.Text+=' 관리형 제거는 관리자 확인 후 기록과 장치를 다시 검증합니다.' }
+            return
+        }
         try { $inventory=$script:scan.GetAwaiter().GetResult() } finally { $script:scan=$null }
         $foreign=@($inventory.Devices | Where-Object { $_.InstanceId -ine $state.InstanceId })
         if ($foreign.Count -gt 0) {
+            $script:canRemove=$false
             $status.Text=$recordText+[Environment]::NewLine+'기존 가상 디스플레이 또는 변경된 설정이 있습니다. Knot이 설치하거나 제거하지 않습니다. 기존 드라이버의 관리 도구를 사용하세요.'; return
         }
         if ($state.Status -eq 'Absent') {
             $script:canInstall=[bool]$availability.Enabled
             $status.Text='Knot 가상 화면이 없습니다. 설치 후 Sunshine에서 사용할 화면을 한 번 지정하세요.'; return
         }
-        $script:canRemove=[bool]$state.Managed
         if ($state.Status -cnotin @('Installed','InstalledPendingRestart')) {
             $status.Text=$recordText; return
         }
@@ -103,7 +116,11 @@ function Update-HeadlessState {
             $status.Text='가상 화면 활성 (진단용 이름, Sunshine ID 아님): '+$names+'. Sunshine의 device_id와 실제 원격 연결을 확인하세요.'
         } else { $status.Text='가상 디스플레이 장치는 설치되어 있지만 활성 화면을 확인하지 못했습니다. Windows 디스플레이 설정에서 화면을 확장하거나 재시작한 뒤 다시 확인하세요.' }
         if ($state.RebootRequired) { $status.Text+=' 설치 때 재시작이 요청되었습니다. 아직 재시작하지 않았다면 먼저 재시작하세요.' }
-    } catch { $script:scan=$null; $script:canInstall=$false; $script:canRemove=$false; $status.Text=$recordText+' 장치 상태를 확인하지 못해 작업 버튼을 잠갔습니다. 기존 복구 기록은 보존했습니다. 잠시 뒤 상태를 새로고침하세요.' }
+    } catch {
+        $script:scan=$null; $script:canInstall=$false
+        $status.Text=$recordText+' 화면 상태를 확인하지 못해 설치를 잠갔습니다. 기존 복구 기록은 보존했습니다. 잠시 뒤 상태를 새로고침하세요.'
+        if ($script:canRemove) { $status.Text+=' 관리형 제거는 관리자 확인 후 기록과 장치를 다시 검증합니다.' }
+    }
     finally { Set-HeadlessBusy $script:headlessBusy }
 }
 function Invoke-HeadlessBroker([string] $Operation,[string] $Archive) {

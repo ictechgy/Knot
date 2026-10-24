@@ -14,7 +14,7 @@ _DEPENDENCY = re.compile(
 )
 
 
-def parse_system_dependencies(output: bytes, executable) -> tuple[str, ...]:
+def parse_system_dependencies(output: bytes, executable, *, allowed_frameworks=()) -> tuple[str, ...]:
     """Return canonical system paths, rejecting missing or malformed inspection data.
 
     This is a lexical install-name policy: it does not follow filesystem links or
@@ -36,7 +36,8 @@ def parse_system_dependencies(output: bytes, executable) -> tuple[str, ...]:
         if match is None:
             raise SystemDependencyError("Malformed dynamic dependency inspection line.")
         path = match.group("path")
-        if (not path.startswith(("/usr/lib/", "/System/Library/"))
+        permitted_framework = path in allowed_frameworks and path == "@rpath/Sparkle.framework/Versions/B/Sparkle"
+        if ((not path.startswith(("/usr/lib/", "/System/Library/")) and not permitted_framework)
                 or any(part in ("", ".", "..") for part in path.split("/")[1:])
                 or path != path.strip(" ")
                 or any(unicodedata.category(character) == "Cc" for character in path)):

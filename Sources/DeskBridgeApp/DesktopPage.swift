@@ -31,9 +31,10 @@ struct DesktopPage: View {
                 } else { hostCard }
                 if let pin = model.pairingPIN {
                     VStack(alignment: .leading, spacing: 12) {
-                        Label("Sunshine의 PIN 페이지에 입력하세요", systemImage: "key").font(.headline)
+                        Label("\(model.platformName) 브라우저의 Sunshine PIN 페이지에 입력하세요", systemImage: "key").font(.headline)
                         Text(pin).font(.system(size: 42, weight: .semibold, design: .monospaced)).textSelection(.enabled)
-                        Text("\(model.platformName)에서 번호를 입력하면 이 Mac의 페어링을 확인합니다.")
+                        Text("\(model.platformName)에서 https://localhost:47990/pin 을 열고 위 번호를 입력하세요. Sunshine은 별도 창 없이 백그라운드에서 실행될 수 있습니다.")
+                            .textSelection(.enabled)
                             .font(.callout).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(20).quietPanel()
                 }
@@ -104,14 +105,14 @@ struct DesktopPage: View {
             HStack(spacing: 20) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("\(model.platformName)를\n하나의 Space로.").font(.system(size: 25, weight: .bold))
-                    Text(model.streaming ? "전체 화면 Space에서 작업 중입니다." : "전체 화면으로 열고,\n익숙한 단축키로 Mac과 오가세요.")
+                    Text(model.streaming ? "화면 연결이 열려 있습니다." : "전체 화면으로 열고,\n익숙한 단축키로 Mac과 오가세요.")
                         .font(.callout).foregroundStyle(.secondary).lineSpacing(3)
                     primaryAction.padding(.top, 3)
                     if model.paired && model.apps.count > 1 {
                         Picker("열 화면", selection: appSelection) {
                             if launchApp == nil { Text("화면 선택").tag(Optional<Int>.none) }
                             ForEach(model.apps) { app in Text(app.name).tag(Optional(app.id)) }
-                        }.frame(maxWidth: 260).disabled(model.busy || model.stream.isEngaged || model.peerEngaged)
+                        }.frame(maxWidth: 260).disabled(model.busy || model.stream.isEngaged || model.peerEngaged || model.enrollmentEngaged)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 MonitorIllustration(platform: model.platformName).frame(width: 190)
@@ -126,7 +127,7 @@ struct DesktopPage: View {
                 Label(launchApp?.name.localizedCaseInsensitiveContains("desktop") == false ? "앱 열기" : "\(model.platformName) 열기",
                       systemImage: "arrow.up.left.and.arrow.down.right")
                     .padding(.horizontal, 5).padding(.vertical, 4)
-            }.buttonStyle(.borderedProminent).disabled(model.busy || model.stream.isEngaged || model.peerEngaged || launchApp == nil)
+            }.buttonStyle(.borderedProminent).disabled(model.busy || model.stream.isEngaged || model.peerEngaged || model.enrollmentEngaged || launchApp == nil)
             if model.apps.isEmpty {
                 Text("Sunshine에 Desktop 앱을 추가한 뒤 PC를 다시 확인하세요.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -135,7 +136,7 @@ struct DesktopPage: View {
             Button("저장된 PC 다시 확인") { model.connect() }
                 .buttonStyle(.borderedProminent).disabled(!model.canVerifyCurrentPC)
         } else if !model.serverName.isEmpty {
-            Button("PIN으로 연결") { model.pair() }.buttonStyle(.borderedProminent).disabled(model.busy)
+            Button("PIN으로 연결") { model.pair() }.buttonStyle(.borderedProminent).disabled(model.busy || model.enrollmentEngaged)
         } else {
             Button(model.settings.host == nil ? "PC 확인" : "저장된 PC 확인") { model.connect() }
                 .buttonStyle(.borderedProminent).disabled(!model.canVerifyCurrentPC || model.address.isEmpty)
@@ -144,18 +145,33 @@ struct DesktopPage: View {
     private var screenSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("화면 설정").font(.callout.weight(.semibold)).foregroundStyle(.secondary)
-            HStack(spacing: 0) {
+            VStack(spacing: 0) {
+              HStack(spacing: 0) {
                 setting("해상도") {
                     Picker("해상도", selection: $model.resolution) {
-                        Text("1080p").tag(1080); Text("1440p").tag(1440)
+                        ForEach(DesktopVideoPolicy.resolutions, id: \.self) { value in
+                            Text(value == 2160 ? "4K (2160p)" : "\(value)p").tag(value)
+                        }
                     }
-                }.disabled(model.busy || model.streaming)
+                }.disabled(model.busy || model.stream.isEngaged || model.streaming)
                 Divider().padding(.vertical, 12)
                 setting("프레임") {
                     Picker("프레임", selection: $model.frameRate) {
-                        Text("30 fps").tag(30); Text("60 fps").tag(60)
+                        ForEach(DesktopVideoPolicy.frameRates, id: \.self) { value in
+                            Text("\(value) fps").tag(value)
+                        }
                     }
-                }.disabled(model.busy || model.streaming)
+                }.disabled(model.busy || model.stream.isEngaged || model.streaming)
+              }.fixedSize(horizontal: false, vertical: true)
+              Divider()
+              HStack(spacing: 0) {
+                setting("비트레이트") {
+                    Picker("비트레이트", selection: $model.bitrateKbps) {
+                        ForEach(DesktopVideoPolicy.bitratesKbps, id: \.self) { value in
+                            Text(value == 0 ? "자동 (해상도 기준)" : "\(value / 1000) Mbps").tag(value)
+                        }
+                    }
+                }.disabled(model.busy || model.stream.isEngaged || model.streaming)
                 Divider().padding(.vertical, 12)
                 setting("키보드") {
                     Picker("키보드 입력", selection: $model.keyboardMode) {
@@ -163,7 +179,10 @@ struct DesktopPage: View {
                         Text("물리 키보드").tag(DesktopKeyboardMode.physicalKeys)
                     }
                 }.disabled(model.busy)
-            }.fixedSize(horizontal: false, vertical: true).quietPanel()
+              }.fixedSize(horizontal: false, vertical: true)
+            }.quietPanel()
+            Text("4K는 상대 PC의 화면·캡처·인코더 지원이 필요합니다. 비트레이트를 높이면 네트워크 사용량이 늘어납니다. 화질 설정은 다음 화면 연결에 적용됩니다.")
+                .font(.callout).foregroundStyle(.secondary)
             Text(model.platform == .linux ? "Linux 입력기를 영문으로 두고 Mac 입력기를 사용하거나 물리 키보드 모드를 선택하세요. Linux 한·영 전환은 해당 데스크톱의 입력기 설정을 확인하세요." : model.keyboardMode == .localIME
                  ? "Mac 입력기를 쓸 때는 Windows 입력기를 영문으로 두세요. Option+문자는 Mac 특수문자를 입력합니다. Windows Alt 단축키는 물리 키보드 모드를 선택하세요."
                  : "Windows 한·영 전환은 Alt+Shift 또는 Windows에서 설정한 입력 언어 단축키를 사용하세요. 전용 한/영 키는 보내지 않습니다.")

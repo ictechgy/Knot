@@ -81,6 +81,18 @@ namespace DeskBridge.Reverse
         }
         private static void Run(string root)
         {
+            string profileRoot = Path.Combine(root, "profile-case");
+            PrivateFiles.CreatePrivate(profileRoot);
+            using (ProfileLease first = EngineProfile.Prepare(profileRoot, "192.168.1.20"))
+            {
+                bool refused = false;
+                try { using (ProfileLease second = EngineProfile.Prepare(profileRoot, "192.168.1.20")) { } }
+                catch (ReverseUserException error) { refused = error.Message == ReverseErrors.Fixed(ReverseFailure.ProfilePolicy); }
+                Check(refused, "an occupied profile gives local profile guidance");
+                Check(Directory.Exists(first.Path), "profile contention preserves the first identity");
+            }
+            using (ProfileLease reopened = EngineProfile.Prepare(profileRoot, "192.168.1.20"))
+                Check(Directory.Exists(reopened.Path), "a released profile can be reopened");
             string foreignDirectory = Path.Combine(root, "foreign-case"); Directory.CreateDirectory(foreignDirectory);
             using (Process foreign = Process.Start(StartInfo("--foreign", foreignDirectory)))
             {

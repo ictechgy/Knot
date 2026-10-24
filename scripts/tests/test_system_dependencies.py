@@ -110,7 +110,7 @@ class SystemDependencyTests(unittest.TestCase):
                         self.assertIn(label, labels)
                         self.assertEqual(argv[:2], ["/usr/bin/otool", "-L"])
                         return (argv[2] + ":\n\t" + path + self.metadata + "\n").encode()
-                    namespace = {"__builtins__": {}, "str": str, "run": run,
+                    namespace = {"__builtins__": {}, "str": str, "run": run, "update_publisher": None,
                                  "supervisor": Path("/synthetic/Contents/Helpers/KnotHostSupervisor"),
                                  "macos": Path("/synthetic/Contents/MacOS"),
                                  "parse_system_dependencies": parse_system_dependencies}

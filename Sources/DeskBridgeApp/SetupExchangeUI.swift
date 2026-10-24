@@ -26,7 +26,7 @@ extension FilesModel {
         }
     }
     /// Reads only the .pub companion of the identity explicitly selected in this UI.
-    private func selectedPublicKey() throws -> String {
+    func selectedPublicKey() throws -> String {
         guard !identityPath.isEmpty else { throw AppFailure("먼저 Mac 전용 키를 만들거나 선택하세요.") }
         let url = URL(fileURLWithPath: identityPath).appendingPathExtension("pub")
         let data: Data

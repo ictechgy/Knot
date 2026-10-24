@@ -6,6 +6,7 @@ import argparse, hashlib, importlib.util, json, os, shutil, subprocess, tempfile
 from windows_resources import NativePE, validate_bootstrap
 from build_snapshot import source_snapshot
 from test_reverse_client import run as run_reverse_client
+from test_windows_updates import check as run_update_checks
 from windows_check_record import HEADLESS_SOURCE_PATHS, MAC_INTEROP_SOURCE_PATHS, MINIMUM_WINDOWS_CHECKS, REQUIRED_WINDOWS_SUITES, validate_windows_check_record
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,7 +76,7 @@ if __name__ == '__main__':
         if hashlib.sha256(native_bytes).hexdigest() != record['sha256']:
             raise ValueError('Native bootstrap differs from build manifest')
         managed_bytes = NativePE(native_bytes).resource(10, 101)
-        validate_bootstrap(native_bytes, managed_bytes)
+        validate_bootstrap(native_bytes, managed_bytes, record['version'])
         if hashlib.sha256(managed_bytes).hexdigest() != record['managedSha256']:
             raise ValueError('Embedded managed helper differs from build manifest')
         managed = root / 'DeskBridge-Managed.exe'
@@ -95,6 +96,22 @@ if __name__ == '__main__':
             if result.returncode:
                 raise RuntimeError(label + ' failed:\n' + entry['stdout'] + entry['stderr'])
             return entry
+
+        if os.name == 'nt':
+            # Real Windows GetFileVersionInfo catches a writer/parser pair that
+            # agrees on bytes which Explorer cannot actually read. No EXE runs.
+            version_check = root / 'Check-NativeVersion.ps1'
+            version_check.write_text('''$ErrorActionPreference='Stop'
+$v=[Diagnostics.FileVersionInfo]::GetVersionInfo($args[0])
+if ($v.ProductName -cne 'Knot' -or $v.FileDescription -cne 'Knot Windows' -or
+    $v.OriginalFilename -cne 'Knot-Windows.exe' -or $v.FileVersion -cne $args[1] -or $v.ProductVersion -cne $args[1]) {
+ throw 'Native Windows shell product metadata differs from Knot release metadata.'
+}
+@{status='passed';product=$v.ProductName;version=$v.ProductVersion} | ConvertTo-Json -Compress
+''')
+            system_powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+            invoke('native-windows-shell-product-version', [system_powershell, '-NoProfile', '-NonInteractive',
+                   '-File', version_check, native, record['version']], timeout=30)
 
         invoke('compile-managed-payload-checker', [args.dotnet, 'build', root / 'Checks.csproj', '--configuration', 'Release', '--nologo', '--verbosity', 'quiet'])
         bmp = root / 'windows-connection-qr.bmp'
@@ -131,6 +148,7 @@ if __name__ == '__main__':
         if not compiler or not references:
             raise ValueError('Supply --compiler and --references for source-bound reverse checks')
         reverse = run_reverse_client(args.dotnet, compiler, references)
+        updates = run_update_checks(compiler, references, args.dotnet if str(compiler).lower().endswith('.dll') else None)
         reverse_qr = fixture_module('test_reverse_qr').run(args.dotnet)
         if (reverse_qr.get('status') != 'PASS' or type(reverse_qr.get('checks')) is not int or reverse_qr['checks'] < 65 or
                 reverse_qr.get('actualDecoder') is not True or reverse_qr.get('freshSyntheticOnly') is not True):
@@ -153,7 +171,7 @@ if __name__ == '__main__':
                    'headless-native': headless['headless-native']['checks'], 'headless-setup': headless['headless-setup']['checks'],
                    'headless-status': headless['headless-status']['checks']},
         **{key: record[key] for key in ('sha256', 'managedSha256', 'sourceManifest')},
-        'reverseClient': reverse, 'reverseQR': reverse_qr, 'reverseQRWindows': reverse_qr_windows, 'headless': headless,
+        'updates': updates, 'reverseClient': reverse, 'reverseQR': reverse_qr, 'reverseQRWindows': reverse_qr_windows, 'headless': headless,
         'embeddedDecoderBindingTested': payload_result['embeddedDecoderBindingTested'],
         'embeddedDecoderSha256': payload_result['embeddedDecoderSha256'],
         'decoderResolverIdentityTested': payload_result['decoderResolverIdentityTested'],

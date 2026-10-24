@@ -19,7 +19,9 @@ function Write-SetupSuccessReceipt {
     $receipt=[IO.File]::Open((Join-Path $PSScriptRoot 'operation-success'),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
     $receipt.Dispose()
 }
+$lifecycleLease=$null
 try {
+    $lifecycleLease=Enter-DeskBridgeLifecycleLease
     if ($Operation -eq 'DisableFiles') {
         if (Test-FileAccessInactive (Get-FileAccessInactivityProjection)) {
             Write-Output 'DeskBridge file access is already inactive. No configuration, accounts, services, firewall rules, metadata or shared files were changed.'
@@ -77,7 +79,9 @@ try {
     Write-SetupSuccessReceipt
     exit 0
 } catch {
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    $failure=$_
+    if ($lifecycleLease) {try {$lifecycleLease.Dispose()} finally {$lifecycleLease=$null}}
+    Write-Host $failure.Exception.Message -ForegroundColor Red
     if (-not $NoPause) {
         [void](Read-Host 'Setup failed. Press Enter to close this administrator window')
         # Only a displayed and acknowledged interactive error is reported as handled.
@@ -85,3 +89,4 @@ try {
     }
     exit 1
 }
+ finally {if ($lifecycleLease) {$lifecycleLease.Dispose()}}

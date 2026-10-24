@@ -10,7 +10,7 @@ function New-DeskBridgeConnectionLink([string] $PCName, [string[]] $Address) {
     }
     $checked=@($Address | ForEach-Object { Get-PrivateIPv4 $_ })
     if (@($checked | Select-Object -Unique).Count -ne $checked.Count) { throw 'Duplicate PC addresses.' }
-    $link='deskbridge://connect?v=1&name=' + [Uri]::EscapeDataString($PCName)
+    $link='deskbridge://connect?v=2&platform=windows&name=' + [Uri]::EscapeDataString($PCName)
     foreach ($ip in $checked) { $link += '&address=' + [Uri]::EscapeDataString($ip) }
     if ([Text.Encoding]::UTF8.GetByteCount($link) -gt 1536) { throw 'Connection link is too large.' }
     return $link

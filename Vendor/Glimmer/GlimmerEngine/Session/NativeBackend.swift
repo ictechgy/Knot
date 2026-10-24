@@ -206,6 +206,9 @@ package final class NativeBackend: StreamingBackend, @unchecked Sendable {
 
     static func mapToStreamError(_ error: Error) -> StreamError {
         if let streamError = error as? StreamError { return streamError }
+        if let failure = error as? StreamSecurityPolicy.Failure {
+            return .securityNegotiation(failure)
+        }
         switch error as? RtspError {
         case .connectTimeout(let port): return .streamPortsBlocked(proto: "TCP", port: port)
         // The PC took the connection and went quiet: the shared couldn't-reach copy, not a stream code.

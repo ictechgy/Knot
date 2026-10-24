@@ -111,6 +111,19 @@ func runSFTPSSHDiagnosticsChecks() async throws -> Int {
     }
     do {
         let pipe = Pipe()
+        let drainer = try SFTPSSHStderrDrain(input: pipe.fileHandleForReading)
+        defer { drainer.close(); try? pipe.fileHandleForWriting.close() }
+        let writer = Task.detached {
+            try await Task.sleep(for: .milliseconds(250))
+            try pipe.fileHandleForWriting.write(contentsOf: Data("Host key verification failed.".utf8))
+            try pipe.fileHandleForWriting.close()
+        }
+        try diagnosticsCheck(drainer.waitForEOF(timeout: 1), "startup grace missed delayed SSH diagnostics"); checks += 1
+        try await writer.value
+        try diagnosticsCheck(drainer.failure == .hostKeyVerificationFailed, "delayed host-key rejection lost its fixed guidance"); checks += 1
+    }
+    do {
+        let pipe = Pipe()
         let readFD = pipe.fileHandleForReading.fileDescriptor
         let drainer = try SFTPSSHStderrDrain(input: pipe.fileHandleForReading)
         defer { try? pipe.fileHandleForWriting.close() }

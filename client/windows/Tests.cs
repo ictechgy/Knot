@@ -58,20 +58,10 @@ namespace DeskBridge.Reverse
 
             string[] paired = EngineCommands.Pair("192.168.10.2");
             Check(paired.Length == 2 && paired[0] == "pair" && paired[1] == "192.168.10.2", "pair does not put PIN into arguments");
-            foreach (bool fullscreen in new[] { false, true })
-                foreach (string size in new[] { "1280x720", "1920x1080", "2560x1440" })
-                {
-                    string[] command = EngineCommands.Stream("100.80.20.2", size, 60, 20000, fullscreen);
-                    Check(command[0] == "stream" && command[1] == "100.80.20.2" && command[2] == "Desktop", "only explicitly selected Desktop");
-                    Check(Array.IndexOf(command, "--no-quit-after") >= 0 && Array.IndexOf(command, "quit") < 0 && Array.IndexOf(command, "--quit-after") < 0, "never generate remote quit command");
-                    Check(Array.IndexOf(command, "--absolute-mouse") >= 0 && Array.IndexOf(command, "--no-background-gamepad") >= 0 && Array.IndexOf(command, "never") >= 0, "desktop input profile");
-                }
-            Reject(() => EngineCommands.Stream("10.0.0.1", "1920x1080 --quit-after", 60, 20000, true), "resolution allowlist");
+            VerifyStreamQuality();
             Check(Array.IndexOf(EngineCommands.Stream("10.0.0.1", "1920x1080", 60, 20000, true, true), "never") < 0,
                 "explicit Mac Command mode enables fullscreen system-key capture");
             Reject(() => EngineCommands.Stream("10.0.0.1", "1920x1080", 60, 20000, false, true), "windowed cannot unexpectedly capture system keys");
-            Reject(() => EngineCommands.Stream("10.0.0.1", "1920x1080", 1000, 20000, true), "FPS allowlist");
-            Reject(() => EngineCommands.Stream("10.0.0.1", "1920x1080", 60, -1, true), "bitrate allowlist");
             foreach (string value in new[] { "", "simple", "with space", "a\"b", "trailing\\", "C:\\a b\\", "\\\\\"", "&%PATH%$(x);'", "한글 Mac" })
                 Check(Unquote(EngineCommands.Quote(value)) == value, "Windows CRT quote roundtrip");
             Reject(() => EngineCommands.Quote("a\0b"), "NUL rejected");
@@ -138,6 +128,56 @@ namespace DeskBridge.Reverse
             return checks;
         }
 
+        private static void VerifyStreamQuality()
+        {
+            Check(ChoiceValues(StreamQualityPolicy.Resolutions) == "1920x1080,2560x1440,3840x2160,1280x720", "all resolution presets including 4K remain available");
+            Check(ChoiceValues(StreamQualityPolicy.FrameRates) == "60,30", "frame rate presets remain 30 and 60 FPS");
+            Check(ChoiceValues(StreamQualityPolicy.BitratesKbps) == "20000,10000,30000,40000,60000,80000,100000", "existing and higher bitrate presets use Kbps values");
+            Check(StreamQualityPolicy.DefaultResolution == "1920x1080" && StreamQualityPolicy.DefaultFrameRate == 60 &&
+                StreamQualityPolicy.DefaultBitrateKbps == 20000, "default remains 1080p 60 FPS 20 Mbps");
+            foreach (StreamQualityChoice<int> bitrate in StreamQualityPolicy.BitratesKbps)
+                Check(bitrate.ToString() == (bitrate.Value / 1000).ToString(System.Globalization.CultureInfo.InvariantCulture) + " Mbps", "native bitrate label is readable Mbps with a separate exact Kbps value");
+
+            string[] defaults = EngineCommands.Stream("100.80.20.2", StreamQualityPolicy.DefaultResolution,
+                StreamQualityPolicy.DefaultFrameRate, StreamQualityPolicy.DefaultBitrateKbps, true);
+            Check(String.Join("\n", defaults) == String.Join("\n", new[] { "stream", "100.80.20.2", "Desktop", "--display-mode", "fullscreen",
+                "--resolution", "1920x1080", "--fps", "60", "--bitrate", "20000", "--absolute-mouse", "--no-quit-after",
+                "--capture-system-keys", "never", "--no-game-optimization", "--mute-on-focus-loss", "--no-background-gamepad",
+                "--audio-config", "stereo", "--no-hdr", "--no-yuv444", "--video-decoder", "auto" }), "complete default command keeps desktop and remote-quit hardening");
+
+            foreach (bool fullscreen in new[] { false, true })
+                foreach (StreamQualityChoice<string> size in StreamQualityPolicy.Resolutions)
+                    foreach (StreamQualityChoice<int> fps in StreamQualityPolicy.FrameRates)
+                        foreach (StreamQualityChoice<int> bitrate in StreamQualityPolicy.BitratesKbps)
+                        {
+                            string[] command = EngineCommands.Stream("100.80.20.2", size.Value, fps.Value, bitrate.Value, fullscreen);
+                            Check(command[0] == "stream" && command[1] == "100.80.20.2" && command[2] == "Desktop", "only explicitly selected Desktop");
+                            Check(ArgumentAfter(command, "--resolution") == size.Value, "every allowed resolution reaches the exact resolution argument");
+                            Check(ArgumentAfter(command, "--fps") == fps.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "every allowed FPS reaches the exact FPS argument");
+                            Check(ArgumentAfter(command, "--bitrate") == bitrate.Value.ToString(System.Globalization.CultureInfo.InvariantCulture), "every allowed Mbps choice reaches the exact Kbps argument");
+                            Check(ArgumentAfter(command, "--display-mode") == (fullscreen ? "fullscreen" : "windowed"), "quality selection preserves display mode");
+                            Check(Array.IndexOf(command, "--no-quit-after") >= 0 && Array.IndexOf(command, "quit") < 0 && Array.IndexOf(command, "--quit-after") < 0, "never generate remote quit command");
+                            Check(Array.IndexOf(command, "--absolute-mouse") >= 0 && Array.IndexOf(command, "--no-background-gamepad") >= 0 && Array.IndexOf(command, "never") >= 0, "desktop input profile");
+                        }
+            foreach (string size in new[] { null, "", "1920x1080 --quit-after", "3840x2160 --bitrate 100000", "3840x2160\r\n--quit-after", "3840x2160\0", "3840×2160", "3840X2160", "3840x2160 ", "4096x2160", "7680x4320" })
+                Reject(() => EngineCommands.Stream("10.0.0.1", size, 60, 20000, true), "reject injected or unsupported resolution");
+            foreach (int fps in new[] { Int32.MinValue, -1, 0, 29, 31, 59, 61, 120, 1000, Int32.MaxValue })
+                Reject(() => EngineCommands.Stream("10.0.0.1", "1920x1080", fps, 20000, true), "reject unsupported FPS");
+            foreach (int bitrate in new[] { Int32.MinValue, -1, 0, 9999, 20001, 50000, 100001, 150000, Int32.MaxValue })
+                Reject(() => EngineCommands.Stream("10.0.0.1", "1920x1080", 60, bitrate, true), "reject unsupported Kbps bitrate");
+        }
+        private static string ChoiceValues<T>(IEnumerable<StreamQualityChoice<T>> choices)
+        {
+            var values = new List<string>();
+            foreach (StreamQualityChoice<T> choice in choices) values.Add(Convert.ToString(choice.Value, System.Globalization.CultureInfo.InvariantCulture));
+            return String.Join(",", values);
+        }
+        private static string ArgumentAfter(string[] command, string flag)
+        {
+            int index = Array.IndexOf(command, flag);
+            Check(index >= 0 && index + 1 < command.Length && Array.LastIndexOf(command, flag) == index, "one complete " + flag + " argument");
+            return command[index + 1];
+        }
         private static void Check(bool condition, string label) { checks++; if (!condition) throw new Exception("FAIL: " + label); }
         private sealed class VerificationStream : MemoryStream
         {

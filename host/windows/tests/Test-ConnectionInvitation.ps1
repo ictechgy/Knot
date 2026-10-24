@@ -9,7 +9,7 @@ $count=0
 function Expect([bool] $Condition,[string] $Message) { if (-not $Condition) { throw $Message }; $script:count++ }
 function Reject([scriptblock] $Body) { $failed=$false; try { & $Body | Out-Null } catch { $failed=$true }; Expect $failed 'Invalid invitation accepted' }
 $link=New-DeskBridgeConnectionLink -PCName 'Synthetic PC' -Address '192.168.1.20','100.80.10.20'
-Expect ($link -ceq 'deskbridge://connect?v=1&name=Synthetic%20PC&address=192.168.1.20&address=100.80.10.20') 'Stable cross-platform invitation contract'
+Expect ($link -ceq 'deskbridge://connect?v=2&platform=windows&name=Synthetic%20PC&address=192.168.1.20&address=100.80.10.20') 'Windows invitations explicitly identify their role without changing legacy parsing'
 foreach ($name in @('개발 PC','PC & Mac + 1','PC?address=8.8.8.8')) {
     $value=New-DeskBridgeConnectionLink -PCName $name -Address '192.168.1.20'
     Expect ($value.Contains('name=' + [Uri]::EscapeDataString($name)) -and ($value -split '&address=').Count -eq 2) 'Display name cannot inject query fields'

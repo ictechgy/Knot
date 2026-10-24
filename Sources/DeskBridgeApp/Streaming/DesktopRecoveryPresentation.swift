@@ -71,13 +71,16 @@ struct DesktopRecoveryPresentation {
     private static func terminationMessage(code: Int32, hasReceivedVideo: Bool, error: StreamError?) -> String {
         if code == 0, error == nil { return "PC에서 화면 공유를 종료했습니다." }
         if let error {
+            if case .securityNegotiation(let failure) = error {
+                return DesktopSecurityGuidance.negotiation(failure)
+            }
             switch StreamFailure.connection(error) {
             case .unreachable, .hostTimedOut:
                 return "PC에 다시 연결하지 못했습니다. Sunshine의 실행 상태와 Wi-Fi·Tailscale 연결을 확인한 뒤 다시 연결하세요."
             case .pairing, .pairingRejected, .pairingRequired:
                 return "PC의 연결 권한이나 인증서를 확인하지 못했습니다. 저장된 PC를 직접 확인한 뒤 다시 연결하세요. 인증서는 자동으로 교체하지 않습니다."
             case .security:
-                return "화면 보안 연결을 확인하지 못해 중단했습니다. Sunshine의 암호화 설정을 확인하고 다시 연결하세요."
+                return DesktopSecurityGuidance.unclassified
             default: break
             }
         }

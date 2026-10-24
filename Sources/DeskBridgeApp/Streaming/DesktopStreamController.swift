@@ -41,6 +41,7 @@ struct StreamConfiguration: Sendable {
     private var opening = false { didSet { onEngagementChanged?() } }
     private var openRequest: UUID?
     private var visibility = DesktopPresentationVisibility()
+    private var pendingFullScreen = false
 
     func open(network: NetworkClient, server: ServerInfo, appID: String, configuration: StreamConfiguration) async throws {
         guard !opening, stopping == 0, Self.engagedController == nil || Self.engagedController === self || Self.engagedController?.isEngaged == false else { throw StreamConnection.Failure.alreadyStarted }
@@ -139,7 +140,8 @@ struct StreamConfiguration: Sendable {
             try await pair.session.start(appID: id, configuration: configuration)
             try Task.checkCancellation()
             guard generation == epoch else { await pair.session.stop(); throw CancellationError() }
-            if win.isKeyWindow { win.toggleFullScreen(nil) }
+            pendingFullScreen = true
+            enterPendingFullScreen()
             onConnectionChanged?(true)
         }
         catch {
@@ -167,6 +169,7 @@ struct StreamConfiguration: Sendable {
         audioNoticeTask?.cancel(); audioNoticeTask = nil; timedAudioNotice = nil
         // Revoke and detach before the await. An older teardown never owns replacement resources.
         session = nil; events = nil; window = nil; view = nil; decoder = nil; audioPlatform = nil
+        pendingFullScreen = false
         oldEvents?.cancel()
         oldView?.releaseInput()
         oldView?.showRecovery(nil)
@@ -218,8 +221,14 @@ struct StreamConfiguration: Sendable {
     }
     func windowDidBecomeKey(_ notification: Notification) {
         guard ownsWindow(notification) else { return }
+        enterPendingFullScreen()
         refreshPresentationVisibility()
         if visibility.suppressed == false { view?.input?.setFocused(true) }
+    }
+    private func enterPendingFullScreen() {
+        guard pendingFullScreen, session != nil, let window, window.isKeyWindow else { return }
+        pendingFullScreen = false
+        if !window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
     }
     func windowDidResignKey(_ notification: Notification) {
         guard ownsWindow(notification) else { return }

@@ -170,10 +170,9 @@ extension VideoDecoder {
         // coalesced by the control channel with the resume edge's resync), so
         // no reference-broken P-frame can reach VT. A first post-gate frame
         // that already IS the resync IDR feeds straight through.
-        let epoch: UInt
         switch decodeGateDisposition(isIDR: isIDR) {
-        case .feed(let fedEpoch):
-            epoch = fedEpoch
+        case .feed:
+            break
         case .dropQuietly:
             return StreamProtocol.DR_OK
         case .resyncToIdr:
@@ -228,21 +227,34 @@ extension VideoDecoder {
             // never reaches recordDecodeComplete, the only counter the overlay's
             // decoder% used to read).
             statsCollector.recordDecoderDiscard()
-            // INTENTIONAL NON-PRESENTATION ≠ LOSS. When presentation is suppressed
-            // (window backgrounded / occluded / minimized), the present path has
-            // stopped retiring frames, so the backlog overflows even though the
-            // wire is healthy. Treating that like a reference-break and flushing
-            // to IDR is exactly the "rfis/idrs and backflows when the window
-            // isn't focused" bug. Drain the pacer FIFO to the freshest frame so
-            // it can't grow unbounded, then return DR_OK (NOT DR_NEED_IDR): no
-            // wire IDR, no depacketizer wait-for-IDR. The drop is still counted
-            // above as a benign overflow, so telemetry stays measurable. The
-            // single clean-repaint IDR for the whole episode is owned by the
-            // refocus resync in `setPresentSuppressed(false)`.
-            if presentSuppressed {
-                framePacer?.dropToNewest(reason: "suppressed_backlog")
+            // The compressed drop broke references. While still hidden, latch
+            // the decode gate and resync obligation atomically, without a wire
+            // IDR. Discard retained presentation too; resume must not repaint
+            // an image decoded against the broken chain. A racing resume/stop
+            // instead takes the ordinary depacketizer wait-for-IDR path.
+            if gateAfterHiddenReferenceDrop() {
+                framePacer?.clearQueue(reason: "hidden_reference_drop")
                 return StreamProtocol.DR_OK
             }
+            return StreamProtocol.DR_NEED_IDR
+        }
+
+        let epoch: UInt
+        switch commitReservedDecode(isIDR: isIDR) {
+        case .feed(let committedEpoch):
+            epoch = committedEpoch
+        case .dropQuietly:
+            if forceSessionRecreate {
+                // Reservation abandoned the wedged session's backlog. A gate
+                // may refuse this IDR, but cannot cancel that replacement:
+                // retire the session before any later receive-thread submit
+                // can enqueue its resumed IDR on this same serial queue.
+                decodeQueue.async { [self] in self.tearDownDecompressionSession() }
+            }
+            releaseInFlightDecode()
+            return StreamProtocol.DR_OK
+        case .resyncToIdr:
+            releaseInFlightDecode()
             return StreamProtocol.DR_NEED_IDR
         }
 

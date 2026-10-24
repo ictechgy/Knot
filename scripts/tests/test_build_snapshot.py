@@ -84,6 +84,24 @@ class WindowsPayloadCheckRecordTests(unittest.TestCase):
                            'embeddedDecoderBindingTested': False, 'embeddedDecoderSha256': decoder['sha256'],
                            'fixtureSha256': source['scripts/tests/test_reverse_qr_windows.cs']}}
 
+    def test_updater_record_required_when_compiled_source_is_present(self):
+        paths = {'client/windows/KnotUpdates.cs', 'packaging/windows/KnotUpdateHandoff.cs', 'scripts/tests/WindowsUpdateChecks.cs'}
+        self.build['sourceManifest'].update({path:'9'*64 for path in paths})
+        self.checks['reverseClient']['sourceSha256']['client/windows/KnotUpdates.cs'] = '9'*64
+        self.build['updates'] = {'runtimeSHA256':'a'*64, 'handoffSHA256':'b'*64}
+        proof = {'status':'PASS', 'compilerExitCode':0, 'runExitCode':0, 'checks':65, 'freshSyntheticOnly':True,
+                 'nativeUpdaterExecuted':False, 'installerExecuted':False, 'registryRead':False, 'networkUsed':False,
+                 'nativeWindowsFileSharingTested':False, 'sourceSHA256':{path:'9'*64 for path in paths},
+                 'handoffBuild':{'runtimeSHA256':'a'*64}}
+        with self.assertRaises(ValueError): validate_windows_check_record(self.checks,self.build)
+        self.checks['updates']=proof
+        validate_windows_check_record(self.checks,self.build)
+        for field,value in [('status','failed'),('checks',64),('compilerExitCode',1),('runExitCode',1),('networkUsed',True),('sourceSHA256',{})]:
+            invalid=copy.deepcopy(self.checks); invalid['updates'][field]=value
+            with self.subTest(field=field), self.assertRaises(ValueError): validate_windows_check_record(invalid,self.build)
+        invalid=copy.deepcopy(self.checks); invalid['updates']['nativeWindowsFileSharingTested']=True
+        with self.assertRaises(ValueError): validate_windows_check_record(invalid,self.build)
+
     def test_matching_checked_executable_is_accepted(self):
         validate_windows_check_record(self.checks, self.build)
 

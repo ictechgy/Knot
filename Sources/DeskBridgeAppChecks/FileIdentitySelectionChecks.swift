@@ -36,6 +36,32 @@ func runFileIdentitySelectionChecks(temporary: URL) throws -> Int {
                        "failed identity save must not publish the new key or clear its public key")
             try expect(try Data(contentsOf: directory) == blocker, "failed identity save changed its filesystem blocker")
         } else {
+            files.identityPath = ""
+            let clearedDraft = files.keyReplacementSnapshot
+            try expect(files.requiresKeyReplacementConfirmation && clearedDraft.savedPath == original.sshIdentityPath && clearedDraft.draftPath.isEmpty,
+                       "clearing the draft must not bypass replacement confirmation for a saved identity")
+            files.generateKey()
+            try expect(!files.busy && files.errorMessage != nil && files.identityPath.isEmpty &&
+                       desktop.settings.sshIdentityPath == original.sshIdentityPath,
+                       "unconfirmed generation with a cleared draft must preserve the saved identity before key IO")
+            files.identityPath = candidate.path
+            files.errorMessage = nil
+            files.generateKey(replacingIdentity: clearedDraft)
+            try expect(!files.busy && files.errorMessage != nil && desktop.settings.sshIdentityPath == original.sshIdentityPath,
+                       "confirmation for a previous draft must not authorize generation in a changed context")
+            var staleDraftRefused = false
+            do { try files.requireKeyReplacementSelection(clearedDraft) } catch is AppFailure { staleDraftRefused = true }
+            try expect(staleDraftRefused, "post-generation selection guard must reject a changed draft")
+            let savedSelection = files.keyReplacementSnapshot
+            try desktop.rememberFileIdentity(path: directory.appendingPathComponent("changed-saved-not-opened-key").path)
+            var staleSavedRefused = false
+            do { try files.requireKeyReplacementSelection(savedSelection) } catch is AppFailure { staleSavedRefused = true }
+            files.errorMessage = nil
+            files.generateKey(replacingIdentity: savedSelection)
+            try expect(staleSavedRefused && !files.busy && files.errorMessage != nil,
+                       "saved identity changes must invalidate both confirmation and the persistence guard")
+            try desktop.rememberFileIdentity(path: original.sshIdentityPath)
+            files.identityPath = original.sshIdentityPath
             let settingsBefore = try Data(contentsOf: directory.appendingPathComponent("settings.json"))
             for state in 0..<2 {
                 files.busy = state == 0; files.connected = state == 1

@@ -16,8 +16,12 @@ try {
  $prefix=@'
 param([switch] $NoPause,[switch] $FailAck,[switch] $FailDisplay)
 $ErrorActionPreference='Stop'
-function Write-Host { param($Object,$ForegroundColor) if ($FailDisplay) {throw 'synthetic display failure'}; [Console]::Out.WriteLine('synthetic-displayed') }
-function Read-Host { param($Prompt) if ($FailAck) {throw 'synthetic acknowledgement failure'}; [Console]::Out.WriteLine('synthetic-acknowledged'); return 'ack' }
+$script:leaseReleased=$false
+$lifecycleLease=New-Object PSObject
+$lifecycleLease | Add-Member -MemberType ScriptMethod -Name Dispose -Value {$script:leaseReleased=$true}
+function Assert-LeaseReleased {if (-not $script:leaseReleased -or $null -ne $lifecycleLease) {throw 'synthetic lifecycle lease retained during failure UI'}}
+function Write-Host { param($Object,$ForegroundColor) Assert-LeaseReleased; if ($FailDisplay) {throw 'synthetic display failure'}; [Console]::Out.WriteLine('synthetic-displayed') }
+function Read-Host { param($Prompt) Assert-LeaseReleased; if ($FailAck) {throw 'synthetic acknowledgement failure'}; [Console]::Out.WriteLine('synthetic-acknowledged'); return 'ack' }
 try {throw 'synthetic setup failure'} catch
 '@
  [IO.File]::WriteAllText($fixture,$prefix+$handlers[0].Body.Extent.Text,(New-Object Text.UTF8Encoding($false)))

@@ -20,4 +20,4 @@ with tempfile.TemporaryDirectory(prefix="deskbridge-desktop-release-synthetic-")
                     "-module-cache-path", str(temporary / "module-cache"), "@" + str(response),
                     str(ROOT / "Sources/DeskBridgeChecks/DesktopInputBackpressureChecks.swift"),
                     "-o", str(executable)], check=True)
-    subprocess.run([str(executable)], check=True)
+    subprocess.run([str(executable)], check=True, timeout=30)

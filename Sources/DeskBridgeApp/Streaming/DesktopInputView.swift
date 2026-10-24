@@ -149,10 +149,12 @@ enum DesktopKeyboardMode: String, CaseIterable { case localIME = "Mac input meth
             sendEditingCommand(command, event: event)
             return true
         }
-        // Command-Tab/Q/W/Space and Control-arrow always remain macOS commands.
+        // Native Command shortcuts, including Control-Command-F, fall through to AppKit.
         guard window?.isKeyWindow == true, window?.firstResponder === self,
-              event.modifierFlags.contains(.command), !reservedForMac(event),
-              let key = Self.keys[event.keyCode], [0x41,0x43,0x56,0x58,0x5A,0x53,0x46,0x4C].contains(key) else {
+              !reservedForMac(event),
+              let key = DesktopKeyboardPolicy.commandControlKey(keyCode: event.keyCode,
+                  command: event.modifierFlags.contains(.command), control: event.modifierFlags.contains(.control),
+                  option: event.modifierFlags.contains(.option)) else {
             return super.performKeyEquivalent(with: event)
         }
         commitPendingPreedit()

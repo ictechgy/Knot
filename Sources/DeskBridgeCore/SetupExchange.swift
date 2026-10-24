@@ -39,12 +39,14 @@ public enum SetupExchange {
         case invalid
         case wrongClient
         case addressCount
+        case duplicateAddress
         case invalidClientKey
         public var errorDescription: String? {
             switch self {
             case .invalid: "Knot 설정 파일의 버전·주소·공개 키를 확인하세요."
             case .wrongClient: "현재 선택한 Mac 키로 만든 설정 파일이 아닙니다. 해당 Mac 키를 선택하세요."
             case .addressCount: "Windows에서 허용할 Mac 주소를 1개 이상, 8개 이하로 선택하세요."
+            case .duplicateAddress: "Windows에서 허용할 Mac 주소가 중복되었습니다. 같은 주소는 한 번만 입력하세요."
             case .invalidClientKey: "Mac 설정 파일에는 Ed25519 공개 키가 필요합니다. Mac 전용 키를 새로 만들거나 Ed25519 키를 선택하세요."
             }
         }
@@ -59,7 +61,7 @@ public enum SetupExchange {
     public static func request(clientPublicKey: String, addresses: [String]) throws -> MacRequest {
         guard (1...8).contains(addresses.count) else { throw Failure.addressCount }
         let normalized = try addresses.map { try EndpointPolicy.validatedAddress($0) }
-        guard Set(normalized).count == normalized.count else { throw Failure.invalid }
+        guard Set(normalized).count == normalized.count else { throw Failure.duplicateAddress }
         return MacRequest(kind: "deskbridge.mac-setup", version: 1, requestID: UUID().uuidString.lowercased(),
                           clientPublicKey: try canonicalKey(clientPublicKey), allowedClientAddresses: normalized)
     }

@@ -5,11 +5,19 @@ from pathlib import Path
 import argparse, datetime, hashlib, json, os, plistlib, shutil, subprocess, sys
 from build_snapshot import host_supervisor_snapshot, source_snapshot, tree_snapshot
 from system_dependencies import SystemDependencyError, parse_system_dependencies
+from update_runtime import publisher_config, sign_sparkle, sparkle_info, stage_sparkle
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument("--skip-checks", action="store_true")
 parser.add_argument("--configuration", choices=["release", "debug"], default="release")
 args = parser.parse_args()
+update_publisher = publisher_config(ROOT)
+signing_identity = os.environ.get("MACOS_SIGNING_IDENTITY", "-")
+if update_publisher and not signing_identity.startswith("Developer ID Application:"):
+    # PR/unsigned preview builds must remain runnable without release credentials.
+    # Never weaken Library Validation or activate the updater in an ad-hoc app.
+    update_publisher = None
+    print("Unsigned preview: automatic updating is disabled; Developer ID release build required.", flush=True)
 BUILD = ROOT / "build" / args.configuration
 LIB = BUILD / "lib"
 CACHE = BUILD / "module-cache"
@@ -60,6 +68,8 @@ def compile_module(name, folder, package):
     run("compile-" + name, argv); stamp.write_text(digest)
 run("verify-vendor", ["/usr/bin/python3", str(ROOT / "scripts/verify_vendor.py")])
 if not args.skip_checks:
+    run("enrollment-protocol-checks", [sys.executable, str(ROOT / "scripts/tests/test_enrollment.py")])
+    run("update-policy-checks", [sys.executable, str(ROOT / "scripts/tests/test_update_policy.py")])
     run("build-contract-checks", [sys.executable, str(ROOT / "scripts/tests/test_build_snapshot.py")])
     run("system-dependency-policy-checks", [sys.executable, str(ROOT / "scripts/tests/test_system_dependencies.py")])
     run("input-batching-checks", [sys.executable, str(ROOT / "scripts/tests/test_input_batching.py")])
@@ -68,6 +78,7 @@ if not args.skip_checks:
     run("video-frame-lifecycle-checks", [sys.executable, str(ROOT / "scripts/tests/test_video_frame_lifecycle.py")])
     run("media-receive-lifecycle-checks", [sys.executable, str(ROOT / "scripts/tests/test_media_lifecycle.py")])
     run("audio-notice-power-checks", [sys.executable, str(ROOT / "scripts/tests/test_audio_notice_power.py")])
+    run("stream-launch-lifecycle-checks", [sys.executable, str(ROOT / "scripts/tests/test_stream_launch_lifecycle.py")])
     run("rtsp-replay-checks", [sys.executable, str(ROOT / "scripts/tests/test_rtsp_replay.py")])
     run("private-storage-checks", [sys.executable, str(ROOT / "scripts/check_private_storage.py")])
 compile_module("GlimmerEngine", ROOT / "Vendor/Glimmer/GlimmerEngine", "Glimmer")
@@ -97,28 +108,33 @@ except SystemDependencyError as error:
 host_supervisor_snapshot(app)
 if not args.skip_checks:
     run("mac-host-lifetime-checks", [sys.executable, str(ROOT / "scripts/tests/test_mac_host_lifetime.py"), "--supervisor", str(supervisor)])
+sparkle = stage_sparkle(ROOT, frameworks)
+sign_sparkle(sparkle, run, signing_identity, release=signing_identity != "-")
+shutil.copy2(ROOT / "Vendor/UpdateRuntime/Sparkle-LICENSE", resources / "Sparkle-LICENSE.txt")
+update_flags = (["-D", "KNOT_SIGNED_UPDATES", "-F", str(frameworks), "-framework", "Sparkle",
+                 "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"] if update_publisher else [])
 app_sources = sorted((ROOT / "Sources/DeskBridgeApp").rglob("*.swift"))
 run("compile-DeskBridge", ["/usr/bin/swiftc", "-parse-as-library", "-module-name", "DeskBridgeApp",
-    "-package-name", "DeskBridge", *common, "-I", str(LIB), "-L", str(LIB),
+    "-package-name", "DeskBridge", *common, *update_flags, "-I", str(LIB), "-L", str(LIB),
     str(LIB / "libGlimmerEngine.a"), str(LIB / "libDeskBridgeCore.a"),
     *map(str, app_sources), "-o", str(macos / "DeskBridge")])
 if not args.skip_checks:
     checks = sorted((ROOT / "Sources/DeskBridgeChecks").glob("*.swift"))
     run("compile-checks", ["/usr/bin/swiftc", "-parse-as-library", "-module-name", "DeskBridgeChecks",
-        "-package-name", "DeskBridge", *common, "-I", str(LIB), "-L", str(LIB),
+        "-package-name", "DeskBridge", *common, *update_flags, "-I", str(LIB), "-L", str(LIB),
         str(LIB / "libGlimmerEngine.a"), str(LIB / "libDeskBridgeCore.a"),
         *map(str, checks), "-o", str(BUILD / "DeskBridgeChecks")])
     model_sources = [s for s in app_sources if s.name != "DeskBridgeApp.swift"]
     model_sources += sorted((ROOT / "Sources/DeskBridgeAppChecks").glob("*.swift"))
     run("compile-model-checks", ["/usr/bin/swiftc", "-parse-as-library", "-module-name", "DeskBridgeAppChecks",
-        "-package-name", "DeskBridge", *common, "-I", str(LIB), "-L", str(LIB),
+        "-package-name", "DeskBridge", *common, *update_flags, "-I", str(LIB), "-L", str(LIB),
         str(LIB / "libGlimmerEngine.a"), str(LIB / "libDeskBridgeCore.a"),
         *map(str, model_sources), "-o", str(BUILD / "DeskBridgeAppChecks")])
 info = {
     "CFBundleExecutable": "DeskBridge", "CFBundleIdentifier": "org.deskbridge.app",
     "CFBundleName": "Knot", "CFBundleDisplayName": "Knot",
     "CFBundleIconFile": "AppIcon",
-    "CFBundleVersion": "17", "CFBundleShortVersionString": (ROOT / "VERSION").read_text().strip().split("-")[0],
+    "CFBundleVersion": sparkle_info(ROOT, enabled=bool(update_publisher))["CFBundleVersion"], "CFBundleShortVersionString": (ROOT / "VERSION").read_text().strip().split("-")[0],
     "DeskBridgeVersion": (ROOT / "VERSION").read_text().strip(),
     "CFBundlePackageType": "APPL", "LSMinimumSystemVersion": "26.0",
     "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
@@ -131,6 +147,7 @@ info = {
     "CFBundleURLTypes": [{"CFBundleURLName": "Knot connection", "CFBundleURLSchemes": ["deskbridge"], "CFBundleTypeRole": "Viewer"}],
     "NSHumanReadableCopyright": "GPLv3. DeskBridge contributors; Glimmer/ugfugl.io; Moonlight contributors.",
 }
+info.update(sparkle_info(ROOT, enabled=bool(update_publisher)))
 with (app / "Contents/Info.plist").open("wb") as handle: plistlib.dump(info, handle)
 shutil.copy2(ROOT / "LICENSE", resources / "LICENSE")
 shutil.copy2(ROOT / "LICENSE", resources / "LICENSE.txt")
@@ -151,15 +168,16 @@ if not args.skip_checks:
     (runtime / "Helpers").mkdir(parents=True, exist_ok=True)
     shutil.copy2(supervisor, runtime / "Helpers/KnotHostSupervisor")
     if (runtime / "Frameworks").exists(): shutil.rmtree(runtime / "Frameworks")
+    shutil.copytree(frameworks, runtime / "Frameworks", symlinks=True)
     checker = runtime / "MacOS/DeskBridgeChecks"
     shutil.copy2(BUILD / "DeskBridgeChecks", checker)
-    run("sign-runtime-check", ["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime", str(checker)])
+    run("sign-runtime-check", ["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime", str(checker)])
     run("synthetic-checks", [str(checker)])
     model_checker = runtime / "MacOS/DeskBridgeAppChecks"
     shutil.copy2(BUILD / "DeskBridgeAppChecks", model_checker)
-    run("sign-model-check", ["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime", str(model_checker)])
+    run("sign-model-check", ["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime", str(model_checker)])
     run("synthetic-model-checks", [str(model_checker)])
-run("sign-app", ["/usr/bin/codesign", "--force", "--sign", "-", "--options", "runtime",
+run("sign-app", ["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime",
     "--entitlements", str(ROOT / "packaging/macos/DeskBridge.entitlements"), str(app)])
 run("verify-app", ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])
 entitlements = run("inspect-app-entitlements", ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(app)])
@@ -167,7 +185,8 @@ if plistlib.loads(entitlements) != {"com.apple.security.device.camera": True}:
     raise SystemExit("The signed app must contain exactly the camera permission entitlement.")
 try:
     dependencies = parse_system_dependencies(
-        run("inspect-dependencies", ["/usr/bin/otool", "-L", str(macos / "DeskBridge")]), macos / "DeskBridge")
+        run("inspect-dependencies", ["/usr/bin/otool", "-L", str(macos / "DeskBridge")]), macos / "DeskBridge",
+        allowed_frameworks=("@rpath/Sparkle.framework/Versions/B/Sparkle",) if update_publisher else ())
 except SystemDependencyError as error:
     raise SystemExit(str(error))
 if source_snapshot(ROOT) != snapshot:

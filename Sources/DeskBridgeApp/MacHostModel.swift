@@ -32,19 +32,32 @@ import Foundation
     private var task: Task<Void, Never>?
     private var forcedStop: Task<Void, Never>?
     private var downloadTask: Task<Void, Never>?
-    init(operations: MacHostOperations = .live) { self.operations = operations }
+    private let activation = DesktopNotificationListener()
+    init(operations: MacHostOperations = .live, activationCenter: NotificationCenter = .default) {
+        self.operations = operations
+        activation.install(center: activationCenter, name: NSApplication.didBecomeActiveNotification, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshInstallation() }
+        }
+    }
     var busy: Bool { phase == .starting || phase == .stopping }
+    var canDownload: Bool { !KnotUpdates.shared.installationPending && !shuttingDown && phase == .stopped && !downloading }
     var invitation: ConnectionInvitation? {
         guard phase == .running, addresses.contains(where: { $0.address == selectedAddress }) else { return nil }
         return try? ConnectionInvitation(name: name, addresses: [selectedAddress], platform: .macos)
     }
     func refresh() {
-        installed = operations.installed()
+        guard !shuttingDown else { return }
+        refreshInstallation()
         addresses = MacHostAddress.selected(operations.addresses())
         if !addresses.contains(where: { $0.address == selectedAddress }) { selectedAddress = addresses.first?.address ?? "" }
     }
+    /// Returning from Finder must refresh installation without replacing a running share's status or address.
+    private func refreshInstallation() {
+        guard !shuttingDown else { return }
+        installed = operations.installed()
+    }
     func start() {
-        guard !shuttingDown, phase == .stopped, acknowledged else { return }
+        guard !KnotUpdates.shared.installationPending, !shuttingDown, phase == .stopped, !downloading, acknowledged else { return }
         guard addresses.contains(where: { $0.address == selectedAddress }) else {
             errorMessage = "사용할 LAN 또는 Tailscale IPv4 주소를 선택하세요. 네트워크가 연결된 뒤 주소를 새로 고치세요."; return
         }
@@ -71,7 +84,7 @@ import Foundation
                 }
                 if Task.isCancelled || phase == .stopping { beginStopping(child); return }
                 phase = .running
-                status = "공유 프로세스 실행 중 · 권한 승인과 Windows 페어링은 별도로 확인하세요."
+                status = "공유 프로세스 실행 중 · 기존 웹 관리자 계정은 유지됩니다. 권한 승인과 Windows 페어링은 별도로 확인하세요."
                 refresh()
             } catch {
                 phase = .stopped; process = nil
@@ -96,15 +109,17 @@ import Foundation
         }
     }
     func download(to destination: URL) {
-        guard !shuttingDown, !downloading else { return }
+        guard canDownload else { return }
         downloading = true; downloadedURL = nil; errorMessage = nil; status = "공식 Sunshine DMG 다운로드·검증 중…"
         downloadTask = Task { [weak self] in
             guard let self else { return }
             defer { downloading = false; downloadTask = nil }
             do {
                 try await operations.download(destination)
+                guard !shuttingDown else { throw CancellationError() }
                 downloadedURL = destination; installed = operations.installed()
-                status = "DMG 크기·SHA256 확인 완료 · DMG를 열고 Sunshine을 Applications로 옮기세요."
+                status = Task.isCancelled ? "취소를 요청했지만 DMG 저장을 마쳤습니다."
+                    : "DMG 크기·SHA256 확인 완료 · DMG를 열고 Sunshine을 Applications로 옮기세요."
             } catch is CancellationError { status = "다운로드 취소됨" }
             catch { errorMessage = fixedMessage(error); status = phase == .running ? "공유 프로세스 실행 중" : "공유 꺼짐" }
         }
@@ -112,6 +127,7 @@ import Foundation
     func cancelDownload() { downloadTask?.cancel() }
     func beginShutdown() {
         shuttingDown = true
+        activation.remove()
         cancelDownload(); stop()
     }
     func shutdown() async {

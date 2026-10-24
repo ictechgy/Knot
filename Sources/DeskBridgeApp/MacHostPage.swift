@@ -21,7 +21,7 @@ struct MacHostPage: View {
                     Text("공식 고정 버전 \(MacHostPolicy.sunshineVersion)의 DMG를 받은 뒤, Sunshine을 Applications 폴더로 옮기세요. DMG의 앱을 직접 실행하지 말고 아래에서 공유를 시작하세요.")
                         .foregroundStyle(.secondary)
                     HStack {
-                        Button("Sunshine DMG 받기") { chooseDownload() }.disabled(host.shuttingDown || host.downloading || host.busy)
+                        Button("Sunshine DMG 받기") { chooseDownload() }.disabled(!host.canDownload)
                         if host.downloading {
                             ProgressView().controlSize(.small)
                             Button("다운로드 취소") { host.cancelDownload() }
@@ -47,8 +47,9 @@ struct MacHostPage: View {
                     Toggle("이 Mac의 화면·키보드·마우스 원격 제어를 허용합니다. 확인 후 ‘이 Mac 공유 시작’을 누르세요.", isOn: $host.acknowledged)
                         .disabled(host.phase != .stopped)
                     Text("최초 공유 전에 웹 관리자 계정을 준비합니다. 기존 계정은 유지하며 아래 입력으로 변경하지 않습니다. 비밀번호는 평문 저장하거나 QR에 넣지 않습니다.").foregroundStyle(.secondary)
-                    TextField("최초 웹 관리자 이름 (영문·숫자·_·-)", text: $host.adminName).disabled(host.phase != .stopped)
-                    SecureField("최초 웹 관리자 비밀번호 (16~128바이트)", text: $host.adminPassword).disabled(host.phase != .stopped)
+                    Text("최초 공유용 관리자 계정").font(.subheadline.weight(.medium))
+                    TextField("최초 공유용 관리자 이름 (영문·숫자·_·-)", text: $host.adminName).disabled(host.phase != .stopped)
+                    SecureField("최초 공유용 관리자 비밀번호 (16~128바이트)", text: $host.adminPassword).disabled(host.phase != .stopped)
                     HStack {
                         if host.phase == .stopped {
                             Button("이 Mac 공유 시작") { host.start() }

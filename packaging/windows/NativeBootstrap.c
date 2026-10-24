@@ -380,14 +380,27 @@ done:
     else { wchar_t *sorted=db_sort_environment(env,used); db_free(env); env=sorted; }
     return env;
 }
+static int db_append_number(wchar_t *out,size_t cap,size_t *used,uint64_t number) {
+    wchar_t digits[24]; unsigned count=0;
+    do { digits[count++]=(wchar_t)(L'0'+number%10); number/=10; } while (number && count<24);
+    while (count) if (!db_append(out,cap,used,digits[--count])) return 0;
+    return 1;
+}
 static int db_run(const wchar_t *helper,const wchar_t *stage,const wchar_t *original,int argc,wchar_t **argv,int silent,int elevated,HANDLE token) {
     wchar_t *command=(wchar_t *)db_alloc(DB_COMMAND_CAP*sizeof(wchar_t)),*env=NULL;
     size_t used=0; int i,exit_code=1; STARTUPINFOW startup; PROCESS_INFORMATION process; DWORD code=1;
     ZeroMemory(&startup,sizeof(startup)); ZeroMemory(&process,sizeof(process)); startup.cb=sizeof(startup);
     if (!command || !db_quote(command,DB_COMMAND_CAP,&used,helper)) goto done;
     if (!argc) {
+        FILETIME created,exited,kernel,user; uint64_t creation;
+        if (!GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user)) goto done;
+        creation=((uint64_t)created.dwHighDateTime<<32)|created.dwLowDateTime;
         if (!db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_quote(command,DB_COMMAND_CAP,&used,L"--bootstrap-path") ||
-            !db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_quote(command,DB_COMMAND_CAP,&used,original)) goto done;
+            !db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_quote(command,DB_COMMAND_CAP,&used,original) ||
+            !db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_quote(command,DB_COMMAND_CAP,&used,L"--bootstrap-pid") ||
+            !db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_append_number(command,DB_COMMAND_CAP,&used,GetCurrentProcessId()) ||
+            !db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_quote(command,DB_COMMAND_CAP,&used,L"--bootstrap-created") ||
+            !db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_append_number(command,DB_COMMAND_CAP,&used,creation)) goto done;
     } else for (i=0;i<argc;++i) if (!db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_quote(command,DB_COMMAND_CAP,&used,argv[i])) goto done;
     env=db_clean_environment(elevated,token); if (!env) goto done;
     // Fixed protected/owned application and cwd; no inherited handles or ambient loader environment.
@@ -399,7 +412,7 @@ done: db_free(command); db_free(env); return exit_code;
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,PWSTR command_line,int show) {
     wchar_t *image=NULL,*stage=NULL,*helper=NULL; wchar_t **argv=NULL; HANDLE token=NULL,extracted=INVALID_HANDLE_VALUE;
     int argc=0,exit_code=1,elevated=0,created_stage=0,locked_stage=0,silent=0,hardened=0,acknowledged=0; db_operation operation=DB_INVALID;
-    const wchar_t *failure=L"설정 도우미를 시작하지 못했습니다. Windows 11 x64용 새 Knot 배포 파일을 OneDrive·동기화 폴더 밖의 로컬 폴더(예: Downloads)로 옮겨 실행하세요."; const BYTE *bytes=NULL; DWORD size=0,used=0;
+    const wchar_t *failure=L"설정 도우미의 실행 환경을 확인하지 못했습니다. Windows 11 x64용 Knot 배포 파일인지, 실행 파일과 사용자 임시 폴더의 접근 권한이 올바른지 확인하세요. 실행 파일은 OneDrive·동기화·링크 폴더 밖의 로컬 폴더에 저장하세요. 임시 폴더 문제는 파일을 옮기는 것만으로 해결되지 않을 수 있습니다."; const BYTE *bytes=NULL; DWORD size=0,used=0;
     TOKEN_ELEVATION elevation; USHORT process_machine=0,native_machine=0; OSVERSIONINFOW version; db_locks locks={{0},0};
     (void)instance; (void)previous; (void)command_line; (void)show; db_heap=GetProcessHeap();
     // Static dependencies are system KnownDLLs/UCRT API sets; later loads search only System32.

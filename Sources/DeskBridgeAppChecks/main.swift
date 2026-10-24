@@ -142,14 +142,17 @@ struct AppModelChecks {
         let discovery = try await runConnectionDiscoveryChecks(temporary: temporary)
         let keySelection = try runFileIdentitySelectionChecks(temporary: temporary)
         let desktopGuidance = try await runDesktopFailureGuidanceChecks(temporary: temporary)
+        let updateReconnect = try runUpdateReconnectChecks(temporary: temporary)
         let setupExchangeGate = try runSetupExchangeGateChecks(temporary: temporary)
+        let enrollmentAdmission = try await runDesktopEnrollmentAdmissionChecks(temporary: temporary)
         let screenVerification = try await runScreenVerificationChecks(temporary: temporary)
         let desktopReopen = try await runDesktopReopenChecks(temporary: temporary)
+        let desktopQuality = try await runDesktopQualityChecks(temporary: temporary)
         let desktopRecovery = try runDesktopRecoveryChecks()
         let termination = try await runDesktopTerminationChecks()
         let linuxContext = try await runLinuxContextChecks(temporary: temporary)
         let macHost = try await runMacHostChecks(temporary: temporary)
-        print("{\"status\":\"passed\",\"appModelChecks\":\(count),\"discoveryAndQRChecks\":\(discovery),\"keySelectionChecks\":\(keySelection),\"desktopErrorGuidanceChecks\":\(desktopGuidance),\"setupExchangeGateChecks\":\(setupExchangeGate),\"screenVerificationChecks\":\(screenVerification),\"desktopReopenChecks\":\(desktopReopen),\"desktopRecoveryChecks\":\(desktopRecovery),\"terminationChecks\":\(termination),\"macHostChecks\":\(macHost),\"linuxContextChecks\":\(linuxContext),\"scope\":\"synthetic temp storage and isolated identity suite; no App.main, UI, camera or network\"}")
+        print("{\"status\":\"passed\",\"appModelChecks\":\(count),\"updateReconnectChecks\":\(updateReconnect),\"desktopEnrollmentAdmissionChecks\":\(enrollmentAdmission),\"desktopQualityChecks\":\(desktopQuality),\"discoveryAndQRChecks\":\(discovery),\"keySelectionChecks\":\(keySelection),\"desktopErrorGuidanceChecks\":\(desktopGuidance),\"setupExchangeGateChecks\":\(setupExchangeGate),\"screenVerificationChecks\":\(screenVerification),\"desktopReopenChecks\":\(desktopReopen),\"desktopRecoveryChecks\":\(desktopRecovery),\"terminationChecks\":\(termination),\"macHostChecks\":\(macHost),\"linuxContextChecks\":\(linuxContext),\"scope\":\"synthetic temp storage and isolated identity suite; no App.main, UI, camera or network\"}")
     }
     @MainActor private static func settle(_ files: FilesModel) async throws {
         for _ in 0..<1000 {

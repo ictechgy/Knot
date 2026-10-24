@@ -17,7 +17,7 @@ struct ConnectionChooser: View {
             HStack {
                 Label("근처 Sunshine PC · \(model.platformName) 선택", systemImage: "wifi").font(.headline)
                 Spacer()
-                if discovery.searching { ProgressView().controlSize(.small) }
+                if discovery.searching { ProgressView().controlSize(.small).accessibilityLabel("근처 PC 검색 중") }
                 Button(discovery.searching ? "검색 중지" : "다시 찾기") {
                     if discovery.searching { discovery.stop() } else { model.startNearbySearch() }
                 }.disabled(!canChoosePC)
@@ -34,7 +34,7 @@ struct ConnectionChooser: View {
                     Button("이 PC 확인") {
                         do { try model.selectCandidateAddress(host.address); model.connect() }
                         catch { model.invitationError = error.localizedDescription }
-                    }.disabled(!canChoosePC)
+                    }.disabled(!canChoosePC).accessibilityLabel("\(host.name), \(host.address) PC 확인")
                 }.padding(12).quietPanel()
             }
             Divider()

@@ -40,11 +40,26 @@ Control and lifecycle robustness, 2026-10-23:
 - Session/StreamSession.swift and +Wake.swift: each wake probe owns a generation token and captures its armed transport attempt. Actor consumption rejects cancelled or superseded probes before clearing the stored task, and rejects a changed attempt before reading current backend health; teardown invalidates the token before cancellation. A late old probe cannot erase a replacement's handle or act on a newer connection. The bounded current probe alone owns its wake verdict.
 - Session/StreamSession+Lifecycle.swift: terminal stop clears the internal waiting flag without publishing a nonterminal waiting update. This prevents an old frame from promoting the shell to live during teardown, including a stop while the initial PC-intent probe is suspended. Ordinary hold and recovery waiting events retain their normal behavior.
 
+Launch cancellation and parser limits, 2026-10-23:
+
+- Session/StreamSession+Start.swift: consume takeover consent immediately after a successful launch, before the next actor hop or attempt check; a failed launch retains consent for retry. Clear the shared initial-launch request deadline on success, failure and cancellation before checking the next startup attempt. The paired NetworkClient can subsequently refresh the PC with its normal per-request budget.
+- Session/StreamSession+Lifecycle.swift: disconnect-only stop cancels the inner pending launch task as well as its outer waiter; the owned-host cancellation disposition retains its bounded late-success cleanup. This does not authorize a disconnect-only session to send host `/cancel`.
+- Session/NativeBackend.swift and StreamSession+Connect.swift: classify mandatory stream-encryption policy failures as typed security errors and preserve typed backend errors through reconnect cleanup, so shell guidance can name encryption, blocked ports or timeouts.
+- Network/Network+Support.swift: bound XML input to 4 MiB, nesting to 64 elements, node count to 16,384 and retained character/CDATA text to 4 MiB. Budget exhaustion aborts parsing and rejects the response; it does not relax TLS pins or introduce a plaintext fallback.
+
+- Video/VideoDecoder+Suppression.swift, +Decode.swift and VideoDecoder.swift: a compressed hidden-backlog drop gates further decode until resume without requesting a hidden-window wire IDR. The resync obligation clears only after an IDR reserves a decode slot; a second gate check after reservation prevents a racing visibility or decoder error from feeding an ineligible frame.
+- Video/VideoDecoder+Decode.swift: if a visibility gate refuses an IDR already reserved for stall recovery, retire the wedged session on the serial decode queue before any resumed IDR can decode. The gate still drops the hidden IDR quietly and releases its reservation; gate lift cannot cancel the mandatory session replacement.
+- Session/StreamSession+FrameWatchdog.swift and +Start.swift: reread decoder identity, watchdog arm and progress before consuming a queued timeout. Bound a visible, ungated decoder-reconnect attempt that keeps receiving packets without decoded output; a paused encoder retains its normal hold. Reset prior live-session state for a new startup.
+
 Host compatibility source: Sunshine's pinned stream.cpp dispatch ignores ENet channel ID and input.cpp queues/drains input FIFO. Exact links are retained in DesktopInputWire.swift. Real host acceptance is still required.
 
 The native app window/media/input adapters are newly maintained under Sources/DeskBridgeApp/Streaming. A positional key mapping excerpt is GPL-attributed. PIN proof cryptography, codec implementation and media receiver cryptography remain upstream code; the pairing transaction and control receive replay admission are patched as described above. This document is a change summary, not a security proof.
 
 Verify every untouched upstream blob with scripts/verify_vendor.py. The exact maintained diff against the pinned originals is Vendor/Glimmer/DeskBridge.patch.
+
+First-run diagnostics, 2026-10-24:
+
+- Protocol/StreamSecurityPolicy.swift, Models/Types.swift, Models/StreamFailure.swift and Session/NativeBackend.swift: retain the exact typed encryption negotiation failure through the engine boundary, including the missing channel mask. The shell distinguishes unencrypted signalling, missing media encryption and unrelated cryptographic failures using fixed guidance and diagnostic codes. The required capability bits, encrypted signalling requirement, certificate pins and fail-closed policy are unchanged.
 
 The zero-context patch is checked without changing files by `git apply --reverse --unidiff-zero --check DeskBridge.patch` from `Vendor/Glimmer`; the vendor verifier runs this check on every build.
 

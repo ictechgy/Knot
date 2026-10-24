@@ -131,12 +131,23 @@ extension VideoDecoder {
     /// backend's receive thread (the same thread that owns the depacketizer,
     /// which is what makes the `.resyncToIdr` → `requestDecoderRefresh`
     /// handoff race-free: the depacketizer enters wait-for-IDR before it can
-    /// process another packet). The one-shot resync latch is cleared on
-    /// BOTH non-gated outcomes - on `.feed`-of-an-IDR because the reference
-    /// chain is reset by the keyframe itself, and on `.resyncToIdr` because
-    /// the wait now lives in the depacketizer, which stops emitting non-IDR
-    /// frames entirely until a real one arrives.
+    /// process another packet). An IDR decision is observational: only a
+    /// successfully reserved IDR may advance the epoch and clear its resync
+    /// obligation. A non-IDR transfers the one-shot wait to the depacketizer.
     nonisolated func decodeGateDisposition(isIDR: Bool) -> DecodeGateDisposition {
+        decodeGateDisposition(isIDR: isIDR, committingReservedSlot: false)
+    }
+
+    /// Reservation succeeded. Recheck the gate and resync latch because a
+    /// visibility timer or VT error may have changed them during reservation.
+    /// The caller releases its slot if the frame is no longer eligible to feed.
+    nonisolated func commitReservedDecode(isIDR: Bool) -> DecodeGateDisposition {
+        decodeGateDisposition(isIDR: isIDR, committingReservedSlot: true)
+    }
+
+    private nonisolated func decodeGateDisposition(
+        isIDR: Bool, committingReservedSlot: Bool
+    ) -> DecodeGateDisposition {
         presentSuppressedLock.lock()
         if _decodeGated {
             presentSuppressedLock.unlock()
@@ -150,13 +161,30 @@ extension VideoDecoder {
         }
         defer { presentSuppressedLock.unlock() }
         if isIDR {
-            _idrEpoch &+= 1
-            _awaitingResyncIdr = false
+            if committingReservedSlot {
+                _idrEpoch &+= 1
+                _awaitingResyncIdr = false
+            }
         } else if _awaitingResyncIdr {
             _awaitingResyncIdr = false
             return .resyncToIdr
         }
         return .feed(epoch: _idrEpoch)
+    }
+
+    /// A real compressed-frame drop breaks references even while hidden.
+    /// Stop further decode feed quietly until resume; never request a wire
+    /// IDR for a hidden window. A racing resume/stop must win this recheck.
+    nonisolated func gateAfterHiddenReferenceDrop() -> Bool {
+        presentSuppressedLock.lock()
+        let gated = isStreaming && _presentSuppressed
+        if gated {
+            _decodeGated = true
+            _awaitingResyncIdr = true
+        }
+        presentSuppressedLock.unlock()
+        if gated { TelemetryCounters.shared.setDecodeGated(true) }
+        return gated
     }
 
     /// Arm the one-shot resync after VideoToolbox failed a frame fed under

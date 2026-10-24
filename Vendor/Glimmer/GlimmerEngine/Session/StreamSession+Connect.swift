@@ -189,7 +189,7 @@ extension StreamSession {
                 try checkAttempt(deadline: deadline)
                 if let cancellation = hostDisposition.cancellation { try? await cancellation.cancel(network) }
                 try checkAttempt(deadline: deadline)
-                throw StreamError.sessionFailed(code)
+                throw error as? StreamError ?? .sessionFailed(code)
             }
             // P2 DISCONNECT REASON: the connection never reached established -
             // latch connect-failed before the teardown so the cause is attributed

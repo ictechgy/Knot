@@ -1,13 +1,18 @@
 ﻿; SPDX-License-Identifier: GPL-3.0-only
 #ifndef AppVersion
-  #define AppVersion "0.2.0-preview.14"
+  #define AppVersion "0.2.0-preview.17"
 #endif
 [Setup]
 AppId={{7BB82A17-E531-4D04-A1FA-E8912E9E8E99}
 AppName=Knot Windows Setup
 AppVersion={#AppVersion}
+AppVerName=Knot {#AppVersion}
 AppPublisher=Knot contributors
-DefaultDirName={autopf}\DeskBridge
+VersionInfoProductName=Knot
+VersionInfoDescription=Knot Windows x64 Setup
+VersionInfoProductTextVersion={#AppVersion}
+DefaultDirName={autopf}\Knot
+UsePreviousAppDir=yes
 DefaultGroupName=Knot
 UsePreviousGroup=no
 OutputDir=..\..\dist\release
@@ -22,6 +27,7 @@ SolidCompression=yes
 LicenseFile=..\..\LICENSE
 SetupIconFile=..\..\Assets\Brand\AppIcon.ico
 UninstallDisplayName=Knot Windows Setup
+UninstallDisplayIcon={app}\AppIcon.ico
 DisableProgramGroupPage=yes
 CloseApplications=no
 [Files]
@@ -38,8 +44,8 @@ Type: files; Name: "{commonprograms}\DeskBridge\DeskBridge 설정.lnk"
 Type: files; Name: "{commonprograms}\DeskBridge\DeskBridge 제거.lnk"
 Type: dirifempty; Name: "{commonprograms}\DeskBridge"
 [Icons]
-Name: "{group}\Knot 설정"; Filename: "{app}\DeskBridge-Windows.exe"
-Name: "{group}\Knot 제거"; Filename: "{uninstallexe}"
+Name: "{group}\Knot 설정"; Filename: "{app}\DeskBridge-Windows.exe"; IconFilename: "{app}\AppIcon.ico"
+Name: "{group}\Knot 제거"; Filename: "{uninstallexe}"; IconFilename: "{app}\AppIcon.ico"
 [Run]
 Filename: "{app}\DeskBridge-Windows.exe"; Description: "Knot 설정 열기"; Flags: postinstall nowait skipifsilent runasoriginaluser
 [Code]
@@ -71,7 +77,7 @@ begin
   Result := Launched and (ExitCode = 0);
   if not Result then begin
     Log('Knot access revocation/inactivity verification failed. Retaining helper and shared data for manual recovery.');
-    if (not UninstallSilent) and ((not Launched) or (ExitCode <> 2)) then
+    if (not UninstallSilent) then
       MsgBox('파일 접속 해제나 비활성 상태 확인을 완료하지 못했습니다. 도우미를 유지합니다. 관리자가 기존 SSH 설정과 남아 있는 Knot 파일 접속을 확인한 뒤 제거하세요.', mbError, MB_OK);
   end;
 end;

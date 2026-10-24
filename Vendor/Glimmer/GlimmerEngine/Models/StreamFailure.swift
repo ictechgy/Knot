@@ -61,7 +61,7 @@ public enum StreamFailure {
         case .sessionFailed, .binaryNotFound: return .sessionFailed
         case .decoderFailed: return .decoderFailed
         case .audioFailed: return .audioFailed
-        case .crypto: return .security
+        case .crypto, .securityNegotiation: return .security
         }
     }
 

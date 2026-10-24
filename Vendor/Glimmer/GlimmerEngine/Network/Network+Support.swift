@@ -20,12 +20,18 @@ extension StreamRequest {
 // Sunshine needs only this small XML tree, so no general parser dependency is warranted.
 
 final class XMLTreeBuilder: NSObject, XMLParserDelegate {
-
+    static let maximumSourceBytes = 4 * 1024 * 1024
+    static let maximumDepth = 64
+    static let maximumNodes = 16_384
+    static let maximumTextBytes = 4 * 1024 * 1024
     private var rootNode: XMLNode?
     private var stack: [XMLNode] = []
     private var parseError: Error?
+    private var nodeCount = 0
+    private var textBytes = 0
 
     static func parse(data: Data) throws -> XMLNode {
+        guard data.count <= maximumSourceBytes else { throw budgetError() }
         // Some GFE builds emit a Latin-1 fragment in front of the XML. Skip
         // anything before the first '<' before handing it to XMLParser so we
         // don't trip on stray BOMs.
@@ -43,7 +49,7 @@ final class XMLTreeBuilder: NSObject, XMLParserDelegate {
         parser.shouldReportNamespacePrefixes = false
         parser.shouldResolveExternalEntities = false
 
-        guard parser.parse() else {
+        guard parser.parse(), builder.parseError == nil else {
             throw builder.parseError
                 ?? parser.parserError
                 ?? NSError(domain: "Glimmer.XML", code: -1)
@@ -66,6 +72,11 @@ final class XMLTreeBuilder: NSObject, XMLParserDelegate {
                 namespaceURI: String?,
                 qualifiedName qName: String?,
                 attributes attributeDict: [String: String] = [:]) {
+        guard parseError == nil else { return }
+        guard stack.count < Self.maximumDepth, nodeCount < Self.maximumNodes else {
+            rejectBudget(parser); return
+        }
+        nodeCount += 1
         stack.append(XMLNode(name: elementName,
                              text: "",
                              attributes: attributeDict,
@@ -73,13 +84,15 @@ final class XMLTreeBuilder: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        guard !stack.isEmpty else { return }
+        guard parseError == nil, !stack.isEmpty else { return }
+        guard retainText(string.utf8.count, parser: parser) else { return }
         stack[stack.count - 1].text += string
     }
 
     func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
-        guard !stack.isEmpty,
+        guard parseError == nil, !stack.isEmpty,
               let decoded = String(data: CDATABlock, encoding: .utf8) else { return }
+        guard retainText(decoded.utf8.count, parser: parser) else { return }
         stack[stack.count - 1].text += decoded
     }
 
@@ -87,7 +100,7 @@ final class XMLTreeBuilder: NSObject, XMLParserDelegate {
                 didEndElement elementName: String,
                 namespaceURI: String?,
                 qualifiedName qName: String?) {
-        guard let finished = stack.popLast() else { return }
+        guard parseError == nil, let finished = stack.popLast() else { return }
         if var parent = stack.popLast() {
             parent.children.append(finished)
             stack.append(parent)
@@ -97,6 +110,19 @@ final class XMLTreeBuilder: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, parseErrorOccurred parseError: Error) {
-        self.parseError = parseError
+        if self.parseError == nil { self.parseError = parseError }
+    }
+    private static func budgetError() -> NSError {
+        NSError(domain: "Glimmer.XML", code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "XML response exceeds the supported parsing limits"])
+    }
+    private func rejectBudget(_ parser: XMLParser) {
+        parseError = Self.budgetError()
+        parser.abortParsing()
+    }
+    private func retainText(_ count: Int, parser: XMLParser) -> Bool {
+        guard count <= Self.maximumTextBytes - textBytes else { rejectBudget(parser); return false }
+        textBytes += count
+        return true
     }
 }

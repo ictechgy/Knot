@@ -10,9 +10,11 @@ namespace DeskBridge.Reverse
     {
         internal static WindowsRole Choose()
         {
+            using (var applicationIcon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location))
             using (var form = new Form())
             {
                 form.Text = "Knot"; form.StartPosition = FormStartPosition.CenterScreen;
+                form.Icon = applicationIcon;
                 form.AutoScaleDimensions = new SizeF(96, 96); form.AutoScaleMode = AutoScaleMode.Dpi;
                 form.ClientSize = new Size(660, 530); form.MinimumSize = new Size(400, 300);
                 var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(24), ColumnCount = 1, RowCount = 6 };
@@ -29,6 +31,7 @@ namespace DeskBridge.Reverse
                 client.Click += delegate { form.DialogResult = DialogResult.No; form.Close(); };
                 linux.Click += delegate { form.DialogResult = DialogResult.Retry; form.Close(); };
                 layout.Controls.Add(title); layout.Controls.Add(help); layout.Controls.Add(host); layout.Controls.Add(client); layout.Controls.Add(linux); layout.Controls.Add(note);
+                KnotUpdates.AttachControls(layout);
                 var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true }; scroll.Controls.Add(layout); form.Controls.Add(scroll);
                 Action wrap = delegate { int width = Math.Max(240, form.ClientSize.Width - layout.Padding.Horizontal - 24); title.MaximumSize = new Size(width, 0); help.MaximumSize = new Size(width, 0); note.MaximumSize = new Size(width, 0); };
                 form.Resize += delegate { wrap(); };

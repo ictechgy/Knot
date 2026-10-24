@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 DeskBridge contributors
 import AppKit
+import Combine
 import SwiftUI
 
 @main
@@ -31,6 +32,7 @@ struct DeskBridgeApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appInfo) {
+                Button("업데이트 확인…") { KnotUpdates.shared.checkForUpdates() }
                 Button("오픈소스 라이선스") {
                     openCredits("LICENSE", extension: "txt")
                 }
@@ -54,15 +56,57 @@ struct DeskBridgeApp: App {
 @MainActor
 final class AppLifecycle: NSObject, NSApplicationDelegate {
     private let termination = DesktopTermination()
+    private var terminating = false
+    private var updateObservers: Set<AnyCancellable> = []
     static weak var desktop: DesktopModel?
     static weak var files: FilesModel?
     static weak var linuxDesktop: DesktopModel?
     static weak var macHost: MacHostModel?
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if Self.desktop?.settings.host == nil { Self.desktop?.startNearbySearch() }
+        configureUpdates()
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        // Consume every receipt before starting work, including invalid receipts.
+        let windows = (try? Self.desktop?.consumeUpdateReconnect(build: build)) == true
+        let linux = (try? Self.linuxDesktop?.consumeUpdateReconnect(build: build)) == true
+        if windows { Self.desktop?.connect() }
+        else if linux { Self.linuxDesktop?.connect() }
+        else if Self.desktop?.settings.host == nil { Self.desktop?.startNearbySearch() }
+    }
+    private func configureUpdates() {
+        let updates = KnotUpdates.shared
+        updates.isIdle = { [weak self] in
+            guard self?.terminating == false,
+                  let desktop = Self.desktop, let linux = Self.linuxDesktop,
+                  let files = Self.files, let host = Self.macHost else { return false }
+            return !desktop.busy && !desktop.stream.isEngaged && !linux.busy && !linux.stream.isEngaged
+                && !files.busy && !files.connected && !files.enrollmentActive
+                && host.phase == .stopped && !host.downloading
+        }
+        updates.prepareForRelaunch = {
+            let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+            // Store no passwords, session keys or PIN. Failed receipt persistence
+            // only suppresses automatic PC verification after the update.
+            try? Self.desktop?.prepareUpdateReconnect(build: build)
+            try? Self.linuxDesktop?.prepareUpdateReconnect(build: build)
+        }
+        func observe(_ publisher: ObservableObjectPublisher?) {
+            publisher?.sink { _ in
+                Task { @MainActor in updates.stateDidChange() }
+            }.store(in: &updateObservers)
+        }
+        observe(Self.desktop?.objectWillChange); observe(Self.linuxDesktop?.objectWillChange)
+        observe(Self.files?.objectWillChange); observe(Self.macHost?.objectWillChange)
+        updates.objectWillChange.sink { _ in
+            Task { @MainActor in
+                Self.desktop?.objectWillChange.send(); Self.linuxDesktop?.objectWillChange.send()
+                Self.files?.objectWillChange.send(); Self.macHost?.objectWillChange.send()
+            }
+        }.store(in: &updateObservers)
+        updates.start()
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if termination.finished { return .terminateNow }
+        terminating = true
         termination.begin(revoke: {
             Self.desktop?.beginShutdown()
             Self.linuxDesktop?.beginShutdown()

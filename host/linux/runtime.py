@@ -188,14 +188,21 @@ class Store:
         if not config.exists():
             self.write_new(config, b'# DeskBridge private host configuration\n')
         apps = self.root / 'apps.json'
-        data = b'{"env":{},"apps":[{"name":"Desktop","cmd":""}]}\n'
-        fd, temporary = tempfile.mkstemp(prefix='.apps-', dir=self.root)
-        try:
-            with os.fdopen(fd, 'wb') as f:
-                f.write(data); f.flush(); os.fsync(f.fileno())
-            os.replace(temporary, apps)
-        finally:
-            if os.path.lexists(temporary): os.unlink(temporary)
+        # Sunshine's local web UI owns later app-list edits. Seed only a missing
+        # file; restarting this wrapper must not discard the user's entries.
+        if not os.path.lexists(apps):
+            data = b'{"env":{},"apps":[{"name":"Desktop","cmd":""}]}\n'
+            fd, temporary = tempfile.mkstemp(prefix='.apps-', dir=self.root)
+            try:
+                with os.fdopen(fd, 'wb') as f:
+                    f.write(data); f.flush(); os.fsync(f.fileno())
+                publish_new(temporary, apps)
+            finally:
+                if os.path.lexists(temporary): os.unlink(temporary)
+        # A private directory is valid elsewhere in the tree, but Sunshine's
+        # file_apps argument must name an owned ordinary file before launch.
+        with ordinary_read(apps, 16 * 1024 * 1024, os.getuid(), True):
+            pass
         self.validate()
 
     def close(self):

@@ -67,7 +67,7 @@ final class ConnectionCamera: NSObject, ObservableObject, @preconcurrency AVCapt
 
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard generation != nil, capture != nil, metadata === output else { return }
-        let texts = objects.prefix(8).compactMap { ($0 as? AVMetadataMachineReadableCodeObject)?.stringValue }
+        let texts = Set(objects.prefix(8).compactMap { ($0 as? AVMetadataMachineReadableCodeObject)?.stringValue })
         guard texts.count == 1, let text = texts.first else { return }
         guard let invitation = try? ConnectionInvitation(text: text) else {
             let message = "공유할 PC의 Knot에서 만든 연결 QR을 보여주세요."
@@ -83,6 +83,8 @@ private struct CameraPreview: NSViewRepresentable {
     let capture: QRCaptureSession
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
+        view.setAccessibilityElement(true)
+        view.setAccessibilityLabel("PC 연결 QR 카메라 미리보기")
         view.wantsLayer = true
         let layer = AVCaptureVideoPreviewLayer(session: capture.session)
         layer.videoGravity = .resizeAspect

@@ -1358,6 +1358,8 @@
   "modifiedFiles": [
     "GlimmerEngine/Input/InputText.swift",
     "GlimmerEngine/Input/StreamInput.swift",
+    "GlimmerEngine/Models/StreamFailure.swift",
+    "GlimmerEngine/Models/Types.swift",
     "GlimmerEngine/Network/ControlTransport.swift",
     "GlimmerEngine/Network/EnetControlChannel+ControlLoop.swift",
     "GlimmerEngine/Network/EnetControlChannel+Inbound.swift",
@@ -1366,6 +1368,7 @@
     "GlimmerEngine/Network/Identity+Loading.swift",
     "GlimmerEngine/Network/Identity.swift",
     "GlimmerEngine/Network/InputBatcher.swift",
+    "GlimmerEngine/Network/Network+Support.swift",
     "GlimmerEngine/Network/Network.swift",
     "GlimmerEngine/Network/NetworkClient+Endpoints.swift",
     "GlimmerEngine/Network/NetworkClient+Request.swift",
@@ -1385,13 +1388,16 @@
     "GlimmerEngine/Session/StreamBridgeContext.swift",
     "GlimmerEngine/Session/StreamConnection+Configuration.swift",
     "GlimmerEngine/Session/StreamSession+Connect.swift",
+    "GlimmerEngine/Session/StreamSession+FrameWatchdog.swift",
     "GlimmerEngine/Session/StreamSession+Lifecycle.swift",
     "GlimmerEngine/Session/StreamSession+Public.swift",
     "GlimmerEngine/Session/StreamSession+Reconnect.swift",
     "GlimmerEngine/Session/StreamSession+Start.swift",
     "GlimmerEngine/Session/StreamSession+Wake.swift",
     "GlimmerEngine/Session/StreamSession.swift",
-    "GlimmerEngine/Video/VideoDecoder+Decode.swift"
+    "GlimmerEngine/Video/VideoDecoder+Decode.swift",
+    "GlimmerEngine/Video/VideoDecoder+Suppression.swift",
+    "GlimmerEngine/Video/VideoDecoder.swift"
   ],
   "newFiles": [
     "GlimmerEngine/Protocol/StreamSecurityPolicy.swift",

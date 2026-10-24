@@ -32,6 +32,22 @@ public struct DesktopKeyboardPolicy {
     public static func reservesSpaceShortcut(keyCode: UInt16, control: Bool, shift: Bool, option: Bool) -> Bool {
         control && !shift && !option && [123, 124, 125, 126].contains(keyCode)
     }
+    /// Only ordinary Command editing shortcuts become remote Control shortcuts.
+    /// Additional Control/Option modifiers keep native commands such as Control-Command-F local.
+    public static func commandControlKey(keyCode: UInt16, command: Bool, control: Bool, option: Bool) -> UInt16? {
+        guard command, !control, !option else { return nil }
+        switch keyCode {
+        case 0: return 0x41 // A
+        case 8: return 0x43 // C
+        case 9: return 0x56 // V
+        case 7: return 0x58 // X
+        case 6: return 0x5A // Z
+        case 1: return 0x53 // S
+        case 3: return 0x46 // F
+        case 37: return 0x4C // L
+        default: return nil
+        }
+    }
     /// Physical keys repeat on Windows. Committed text has no held remote key, so macOS supplies its repeats.
     public static func shouldInterpretText(isRepeat: Bool, composing: Bool, physicalKeyHeld: Bool) -> Bool {
         !isRepeat || composing || !physicalKeyHeld

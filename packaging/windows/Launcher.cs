@@ -59,6 +59,7 @@ internal static class Launcher
     {
         string directory = null;
         bool silent = false;
+        WindowsFormsSynchronizationContext updateContext = null;
         var written = new List<string>();
         try
         {
@@ -97,8 +98,22 @@ internal static class Launcher
                 if (request != null)
                     return RunElevatedOperation(request, directory, written);
                 DeskBridge.Reverse.ReverseQrLibrary.Initialize();
+                if (BootstrapParentID > 0)
+                {
+                    updateContext = new WindowsFormsSynchronizationContext();
+                    DeskBridge.Reverse.KnotUpdates.Start(bootstrap, directory, BootstrapParentID, BootstrapCreationFileTime,
+                        delegate {
+                            updateContext.Post(delegate(object ignored) {
+                                var forms = new List<Form>();
+                                foreach (Form form in Application.OpenForms) forms.Add(form);
+                                foreach (Form form in forms) if (!form.IsDisposed) form.Close();
+                            }, null);
+                        });
+                }
+                DeskBridge.Reverse.KnotUpdates.SetIdle(true);
                 DeskBridge.Reverse.WindowsRole role = DeskBridge.Reverse.WindowsRoleChooser.Choose();
                 if (role == DeskBridge.Reverse.WindowsRole.Cancel) return 0;
+                if (!DeskBridge.Reverse.KnotUpdates.SetIdle(false)) return 0;
                 if (role == DeskBridge.Reverse.WindowsRole.OpenMac || role == DeskBridge.Reverse.WindowsRole.OpenLinux)
                 {
                     DeskBridge.Reverse.ClientMain.RunEmbedded(bootstrap, role == DeskBridge.Reverse.WindowsRole.OpenLinux ? DeskBridge.Reverse.HostPlatform.Linux : DeskBridge.Reverse.HostPlatform.Mac);
@@ -124,6 +139,11 @@ internal static class Launcher
         }
         finally
         {
+            // Managed GUI/image locks have unwound. The independent updater waits
+            // the exact native parent's termination before replacing its EXE.
+            if (!DeskBridge.Reverse.KnotUpdates.ShutdownAndMaybeInstall() && !silent)
+                MessageBox.Show("업데이트를 시작하지 못했습니다. 현재 버전과 연결 설정은 유지됩니다.", "Knot", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (updateContext != null) updateContext.Dispose();
             // Delete only our exact generated files. Never recursively follow a replacement link.
             if (directory != null)
             {
@@ -342,9 +362,16 @@ internal static class Launcher
                 throw new InvalidDataException("설정 파일 검증에 실패했습니다. 실행하지 않았습니다.");
     }
 
+    private static int BootstrapParentID;
+    private static long BootstrapCreationFileTime;
     internal static string ParseBootstrapArguments(string[] args)
     {
-        if (args == null || args.Length != 2 || args[0] != "--bootstrap-path") return null;
+        BootstrapParentID = 0; BootstrapCreationFileTime = 0;
+        if (args == null || (args.Length != 2 && args.Length != 6) || args[0] != "--bootstrap-path") return null;
+        if (args.Length == 6 && (args[2] != "--bootstrap-pid" || args[4] != "--bootstrap-created" ||
+            !Int32.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out BootstrapParentID) || BootstrapParentID <= 0 ||
+            !Int64.TryParse(args[5], NumberStyles.None, CultureInfo.InvariantCulture, out BootstrapCreationFileTime) || BootstrapCreationFileTime <= 0))
+            throw new InvalidDataException("올바르지 않은 업데이트 실행 경계입니다.");
         string path = args[1];
         if (String.IsNullOrEmpty(path) || path.Length > 1024 || !Regex.IsMatch(path, @"\A[A-Za-z]:\\") ||
             path.IndexOfAny(new char[] { '"', '\r', '\n', '\0', '/' }) >= 0 || path.IndexOf(':', 2) >= 0 ||

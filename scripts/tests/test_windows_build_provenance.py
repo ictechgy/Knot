@@ -4,12 +4,57 @@
 from pathlib import Path
 import hashlib
 import json
+import struct
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from build_windows_launcher import verify_runtime_notices, verify_virtual_display_inputs
+from windows_resources import resource_file, validate_version_resource, version_resource
+
+
+class NativeBrandMetadata(unittest.TestCase):
+    def test_release_version_and_brand_are_native_resources(self):
+        # Parse the actual .res records independently of the VERSIONINFO writer.
+        # A valid ICO containing one inert image is sufficient; no image codec runs.
+        icon = struct.pack('<HHHBBBBHHII', 0, 1, 1, 1, 1, 0, 0, 1, 32, 4, 22) + b'icon'
+        raw = resource_file(b'synthetic managed image', b'<assembly/>', icon, '9.8.7-preview.synthetic')
+        resources = {}
+        offset = 0
+        while offset < len(raw):
+            size, header_size, marker, kind, marker2, name = struct.unpack_from('<IIHHHH', raw, offset)
+            self.assertEqual((header_size, marker, marker2), (32, 0xffff, 0xffff))
+            resources[kind, name] = raw[offset + header_size:offset + header_size + size]
+            offset = (offset + header_size + size + 3) & ~3
+        self.assertEqual(offset, len(raw))
+        self.assertEqual(resources[10, 101], b'synthetic managed image')
+        self.assertEqual(resources[3, 1], b'icon')
+        version = resources[16, 1]
+        self.assertEqual(struct.unpack_from('<HHH', version), (len(version), 52, 0))
+        key_end = 6 + len('VS_VERSION_INFO\0'.encode('utf-16le'))
+        fixed_offset = (key_end + 3) & ~3
+        fixed = struct.unpack_from('<13I', version, fixed_offset)
+        self.assertEqual(fixed[:8], (0xfeef04bd, 0x10000, 9 << 16 | 8, 7 << 16,
+                                   9 << 16 | 8, 7 << 16, 0x3f, 2))
+        for text in ('Knot', 'Knot Windows', 'Knot contributors', '9.8.7-preview.synthetic'):
+            self.assertIn((text + '\0').encode('utf-16le'), version)
+        self.assertNotIn('DeskBridge'.encode('utf-16le'), version)
+        self.assertEqual(validate_version_resource(version, '9.8.7-preview.synthetic'), '9.8.7-preview.synthetic')
+
+    def test_mismatched_or_tampered_product_metadata_is_rejected(self):
+        version = version_resource('1.2.3')
+        with self.assertRaisesRegex(ValueError, 'release VERSION'):
+            validate_version_resource(version, '1.2.4')
+        for value in (version[:-1], version + b'\0', version.replace('Knot Windows'.encode('utf-16le'), 'Old  Windows'.encode('utf-16le'))):
+            with self.subTest(value=value[:12]), self.assertRaises(ValueError):
+                validate_version_resource(value)
+
+    def test_fixed_version_cannot_overflow_or_accept_unbounded_text(self):
+        for version in ('65536.0.0', '1.2', '1.2.3.4', '1.2.3-"bad', '1.2.3-' + 'x' * 129):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                version_resource(version)
+
 
 
 class RuntimeNotices(unittest.TestCase):

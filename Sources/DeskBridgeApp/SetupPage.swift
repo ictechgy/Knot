@@ -9,6 +9,7 @@ struct SetupPage: View {
     var onFiles: () -> Void = {}
     @State private var windowsDetailsExpanded = false
     @State private var fileDetailsExpanded = false
+    @ObservedObject private var updates = KnotUpdates.shared
 
     var body: some View {
         ScrollView {
@@ -25,7 +26,7 @@ struct SetupPage: View {
                                     Text("동봉된 Windows quick-setup EXE를 두 번 클릭하세요. 압축 해제나 PowerShell 명령 입력 없이 Sunshine 설치 → 초기 설정 → Mac 연결 순서로 안내합니다. 파일 설정은 나중에 추가할 수 있어요.")
                                     Link("Sunshine 공식 프로젝트", destination: URL(string: "https://github.com/LizardByte/Sunshine")!)
                                     QuietHelp(text: "Windows 도우미의 ‘모니터 없이 사용’에서 안내를 확인하세요. 가상 화면 자동 설치는 드라이버 보안 검토로 현재 보류 중입니다. 최초 설정에는 모니터나 다른 접속 수단이 필요합니다.", symbol: "display")
-                                    QuietHelp(text: "Sunshine 고급 설정의 LAN과 WAN 암호화 모드를 모두 Mandatory로 설정하세요. 암호화가 준비되지 않은 PC의 화면 연결은 거부됩니다.", symbol: "lock")
+                                    QuietHelp(text: "Windows 브라우저에서 Sunshine의 Configuration → Network를 열고 LAN/WAN 암호화 모드를 모두 ‘모든 사용자에게 필수’(Required for all clients)로 선택한 뒤 Save → Apply를 누르세요.", symbol: "lock")
                                     HStack(spacing: 12) {
                                         Button("설정 안내 열기") { openGuide() }
                                     }
@@ -37,7 +38,7 @@ struct SetupPage: View {
 
                     step(number: "2", title: "화면 페어링", subtitle: nil) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("원격 화면에서 근처 PC를 선택하세요. 검색되지 않거나 Tailscale을 쓴다면 Windows 도우미의 QR 이미지·카메라 스캔·연결 링크로 주소를 가져올 수 있어요. 이어서 Mac에 표시된 PIN을 Sunshine의 PIN 페이지에 입력하세요.")
+                            Text("원격 화면에서 근처 PC를 선택하세요. 검색되지 않거나 Tailscale을 쓴다면 Windows 도우미의 QR 이미지·카메라 스캔·연결 링크로 주소를 가져올 수 있어요. 이어서 Windows 브라우저에서 https://localhost:47990/pin 을 열고 Mac에 표시된 PIN을 입력하세요.")
                                 .foregroundStyle(.secondary)
                             HStack(spacing: 12) {
                                 Button("PC 찾기 / QR 연결", action: onDesktop)
@@ -49,7 +50,7 @@ struct SetupPage: View {
 
                     step(number: "3", title: "파일 연결", subtitle: "선택 사항 · 화면 연결과 별도") {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Windows에서 OpenSSH와 파일 전용 계정을 준비하세요. 설정 파일을 교환한 뒤, Windows의 SSH 호스트 키 지문을 직접 비교해 등록합니다.")
+                            Text("파일 탭의 자동 파일 설정으로 Windows 도우미와 연결하세요. Windows의 승인 후 파일 전용 계정을 준비하고 SSH 호스트 키 지문을 직접 비교해 등록합니다.")
                                 .foregroundStyle(.secondary)
                             HStack(spacing: 12) {
                                 Button("파일 연결 설정", action: onFiles)
@@ -57,9 +58,9 @@ struct SetupPage: View {
                             }
                             DisclosureGroup("파일 연결 준비 과정", isExpanded: $fileDetailsExpanded) {
                                 VStack(alignment: .leading, spacing: 10) {
-                                    Text("1. 동봉된 Windows 설정 도우미로 OpenSSH Server와 전용 일반 사용자 파일 계정을 설정하세요.")
-                                    Text("2. Mac의 파일 탭에서 전용 키를 만들고, 공개 키가 담긴 설정 파일을 Windows 도우미에 전달하세요.")
-                                    Text("3. Windows가 만든 연결 파일을 Mac으로 가져오세요. Windows 도우미의 SSH 지문과 직접 비교한 뒤 등록하세요.")
+                                    Text("1. Mac의 파일 탭에서 자동 파일 설정을 시작하세요. 처음에는 Mac 전용 키를 만들고 사용할 Mac 주소를 선택합니다.")
+                                    Text("2. 일회용 연결 링크를 Windows Knot 도우미에 붙여 넣고 Mac 키·허용 주소와 UAC 요청을 확인하세요.")
+                                    Text("3. Windows가 자동으로 보낸 연결 정보의 SSH 지문을 두 화면에서 비교한 뒤 등록하세요. JSON 설정 파일 교환도 대체 방법으로 사용할 수 있습니다.")
                                     Text("직접 설정한 OpenSSH를 사용한다면, Mac 공개 키를 Windows에 등록하고 Windows 호스트 공개 키를 Mac의 파일 탭에 직접 입력할 수 있습니다.")
                                         .foregroundStyle(.secondary)
                                     QuietHelp(text: "파일 계정은 지정한 공유 폴더 안에서만 사용하도록 설정합니다. 화면 전체 제어 권한은 이 폴더 제한과 별개입니다.", symbol: "folder.badge.person.crop")
@@ -79,6 +80,13 @@ struct SetupPage: View {
                 }
                 .padding(16)
                 .quietPanel()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("앱 업데이트").font(.headline)
+                    Text(updates.status).font(.callout).foregroundStyle(.secondary)
+                    Button("업데이트 확인…") { updates.checkForUpdates() }
+                        .disabled(updates.installationPending)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(16).quietPanel()
 
                 Text(versionNote)
                     .font(.system(size: 11))

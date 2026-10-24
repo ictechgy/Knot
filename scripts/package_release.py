@@ -10,13 +10,14 @@ from windows_check_record import validate_windows_check_record
 from linux_check_record import validate_linux_check_record, validate_payload_sources
 from test_linux_host import archive_inventory
 from system_dependencies import SystemDependencyError, parse_system_dependencies
+from update_runtime import sign_sparkle
 
 
 def render_installation_links(text, revision):
     """Render the distribution guide independently of its extracted directory."""
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("Installation guide links require an exact source commit.")
-    relative_targets = {"host/windows/README.md", "docs/BRAND_COMPATIBILITY.md",
+    relative_targets = {"host/windows/README.md", "docs/BRAND_COMPATIBILITY.md", "docs/FILE_ENROLLMENT.md",
                         "docs/RELEASING.md", "docs/HEADLESS_WINDOWS.md"}
 
     def render_target(target):
@@ -129,7 +130,7 @@ generated = []
 with tempfile.TemporaryDirectory(prefix="deskbridge-package-") as temporary:
     stage = Path(temporary) / "Knot"; stage.mkdir()
     app = stage / "Knot.app"
-    shutil.copytree(ROOT / "dist/Knot.app", app)
+    shutil.copytree(ROOT / "dist/Knot.app", app, symlinks=True)
     # Recheck the copied payload before signing to bind this package to the successful build.
     if tree_snapshot(app) != completed["appManifest"]:
         raise SystemExit("App changed while staging; rebuild before packaging")
@@ -137,6 +138,7 @@ with tempfile.TemporaryDirectory(prefix="deskbridge-package-") as temporary:
         raise SystemExit("Host supervisor changed while staging; rebuild before packaging")
     supervisor = app / "Contents/Helpers/KnotHostSupervisor"
     if args.mode == "release":
+        sign_sparkle(app / "Contents/Frameworks/Sparkle.framework", run, args.identity, release=True)
         run("sign-host-supervisor-release", ["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", args.identity, str(supervisor)])
         run("sign-app-release", ["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", args.identity,
             "--entitlements", str(ROOT / "packaging/macos/DeskBridge.entitlements"), str(app)])

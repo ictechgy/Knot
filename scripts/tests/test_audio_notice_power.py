@@ -59,6 +59,8 @@ constants = "\n".join(re.findall(
     (ENGINE / "Session/StreamSession+FrameWatchdog.swift").read_text(), re.M))
 assert len(constants.splitlines()) == 5
 contract = "\n".join([
+    (ENGINE / "Protocol/StreamSecurityPolicy.swift").read_text(),
+    (ROOT / "Sources/DeskBridgeApp/DesktopSecurityGuidance.swift").read_text().replace("import GlimmerEngine\n", ""),
     block(types, "public enum StreamEvent:"), block(types, "public enum ConnectionQuality:"),
     block(types, "public enum StreamError:"), (ENGINE / "Models/StreamFailure.swift").read_text(),
     (ENGINE / "Models/StreamFailureCopy.swift").read_text(),
