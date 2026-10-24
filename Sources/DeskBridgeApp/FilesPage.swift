@@ -88,11 +88,13 @@ struct FilesPage: View {
                 TextField("Wi-Fi 또는 Tailscale IPv4", text: $model.enrollmentBindAddress)
                     .textFieldStyle(.roundedBorder)
             }.disabled(!model.canExchangeSetup)
+            Text("Windows 대상을 Tailscale 주소로 골랐다면 Mac 주소도 Tailscale 주소를 사용하세요. 같은 Wi-Fi라면 두 기기의 Wi-Fi 주소를 선택하세요.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
             if model.enrollmentLink.isEmpty {
                 Button("자동 파일 설정 시작") { model.startAutomaticFileSetup() }
                     .buttonStyle(.borderedProminent).disabled(!model.canExchangeSetup)
             } else {
-                Text("Windows Knot 도우미 → 파일 전송 → 자동 파일 설정에 아래 연결을 붙여 넣으세요. 2분 뒤 만료됩니다.")
+                Text("Windows Knot 도우미 → 파일 전송 → 자동 파일 설정에 아래 연결을 2분 안에 붙여 넣으세요. 인증 후 설정에는 최대 10분이 주어집니다.")
                 Text(model.enrollmentLink).font(.system(size: 11, design: .monospaced))
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     .privacySensitive()

@@ -3,7 +3,7 @@
 from pathlib import Path
 import base64, hashlib, json, os, plistlib, subprocess, sys, tempfile, unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from update_runtime import publisher_config, sparkle_info, verify_runtime
+from update_runtime import publisher_config, sparkle_info, stage_sparkle, verify_runtime
 from update_version import build_number
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -108,6 +108,53 @@ class SignedFixtureChecks(unittest.TestCase):
 
 
 class SwiftPolicyChecks(unittest.TestCase):
+    @unittest.skipUnless(sys.platform=='darwin','Swift/AppKit and pinned Sparkle SDK required')
+    def test_actual_signed_adapter_implements_pinned_delegate_selectors(self):
+        # Optional Objective-C delegate methods can compile under the wrong
+        # Swift spelling without implementing Sparkle's selector. Check both
+        # the configured build branch and its actual runtime protocol surface.
+        with tempfile.TemporaryDirectory(prefix='knot-update-signed-adapter-') as temporary:
+            p=Path(temporary); frameworks=p/'Frameworks'
+            stage_sparkle(ROOT,frameworks)
+            def run(argv, timeout=30):
+                result=subprocess.run(list(map(str,argv)),capture_output=True,text=True,timeout=timeout)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                return result.stdout
+            core=sorted((ROOT/'Sources/DeskBridgeCore/Updates').glob('*.swift'))
+            common=['/usr/bin/swiftc','-swift-version','6','-module-cache-path',p/'ModuleCache','-parse-as-library']
+            run([*common,'-emit-library','-static','-emit-module','-module-name','DeskBridgeCore',*core,
+                 '-emit-module-path',p/'DeskBridgeCore.swiftmodule','-o',p/'libDeskBridgeCore.a'])
+            (p/'main.swift').write_text('''import Foundation
+import ObjectiveC
+import Sparkle
+@main struct Check {
+ @MainActor static func main() {
+  let updater = KnotUpdates()
+  let selectors: [(Selector, String)] = [
+   (#selector(SPUUpdaterDelegate.updater(_:mayPerform:)), "updater:mayPerformUpdateCheck:error:"),
+   (#selector(SPUUpdaterDelegate.updater(_:shouldProceedWithUpdate:updateCheck:)), "updater:shouldProceedWithUpdate:updateCheck:error:"),
+   (#selector(SPUUpdaterDelegate.updater(_:shouldPostponeRelaunchForUpdate:untilInvokingBlock:)), "updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:"),
+   (#selector(SPUUpdaterDelegate.updater(_:didAbortWithError:)), "updater:didAbortWithError:"),
+   (#selector(SPUUpdaterDelegate.updater(_:shouldDownloadReleaseNotesForUpdate:)), "updater:shouldDownloadReleaseNotesForUpdate:")
+  ]
+  for (selector, expected) in selectors {
+   precondition(NSStringFromSelector(selector) == expected)
+   precondition(protocol_getMethodDescription(SPUUpdaterDelegate.self, selector, false, true).name == selector)
+   precondition(updater.responds(to: selector))
+  }
+  precondition(!updater.isConfigured && !updater.installationPending)
+  // No start/check call: loading the pinned framework and an NSObject adapter
+  // must not construct a controller, open UI, contact a feed, or install.
+  print("{\\"status\\":\\"passed\\",\\"delegateSelectors\\":\\(selectors.count),\\"updaterStarted\\":false}")
+ }
+}
+''')
+            run([*common,'-D','KNOT_SIGNED_UPDATES','-F',frameworks,'-framework','Sparkle',
+                 '-Xlinker','-rpath','-Xlinker',frameworks,'-I',p,p/'libDeskBridgeCore.a',
+                 ROOT/'Sources/DeskBridgeApp/KnotUpdates.swift',p/'main.swift','-o',p/'check'])
+            self.assertEqual(json.loads(run([p/'check'],timeout=10)),
+                             {'status':'passed','delegateSelectors':5,'updaterStarted':False})
+
     @unittest.skipUnless(sys.platform=='darwin','Swift/AppKit SDK required')
     def test_actual_adapter_defers_once_until_idle(self):
         with tempfile.TemporaryDirectory(prefix='knot-update-adapter-') as temporary:
@@ -131,6 +178,27 @@ class SwiftPolicyChecks(unittest.TestCase):
   ready.prepareForRelaunch = { prepared += 1 }
   precondition(!ready.postponeRelaunch { installed += 1 })
   precondition(ready.installationPending && installed == 1 && prepared == 2)
+  let privateMarker = "SYNTHETIC_PRIVATE_ERROR_DO_NOT_DISPLAY"
+  let privatePath = "/synthetic/private/update-artifact"
+  for (domain, code, busy) in [("Knot.Update", 1, true), ("Knot.Update", 2, true),
+                              ("Other.Update", 1, false), ("Other.Update", 2, false),
+                              ("Knot.Update", 3, false)] {
+   let aborted = KnotUpdates()
+   var abortIdle = false, canceledInstall = 0, canceledPrepare = 0
+   aborted.isIdle = { abortIdle }
+   aborted.prepareForRelaunch = { canceledPrepare += 1 }
+   precondition(aborted.postponeRelaunch { canceledInstall += 1 })
+   precondition(aborted.installationPending)
+   aborted.abortUpdate(NSError(domain: domain, code: code,
+                              userInfo: [NSLocalizedDescriptionKey: privateMarker,
+                                         NSFilePathErrorKey: privatePath]))
+   let expected = busy ? "진행 중인 연결과 작업을 마친 뒤 업데이트를 다시 확인하세요." :
+                         "서명된 업데이트를 완료하지 못했습니다. 현재 버전과 연결 설정은 유지됩니다."
+   precondition(!aborted.installationPending && aborted.status == expected)
+   precondition(!aborted.status.contains(privateMarker) && !aborted.status.contains(privatePath))
+   abortIdle = true; aborted.stateDidChange(); aborted.stateDidChange()
+   precondition(canceledInstall == 0 && canceledPrepare == 0)
+  }
  }
 }
 ''')

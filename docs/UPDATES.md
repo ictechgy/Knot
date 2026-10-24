@@ -17,7 +17,7 @@ Unsigned Mac preview builds keep automatic updating disabled even if a future pu
 
 The bundle identifier (`org.deskbridge.app`), settings namespaces, Sunshine client identity, existing host-certificate pins, SSH keys, SFTP restrictions and Windows deployment records stay outside binary replacement. A normal update does not require PIN pairing again. A changed certificate or lost identity requires explicit recovery; Knot never silently deletes a pin or approves a different host.
 
-Update continuity is a short-lived, one-use intent bound to the exact endpoint, host unique ID and existing certificate SHA256. It is consumed before validation, expires within ten minutes, and only applies after a strictly newer build is observed. The current application integration verifies the saved PC identity after relaunch; it does not automatically start a screen session, grant takeover, or resume an interrupted file transfer.
+Update continuity is a short-lived, one-use intent bound to the exact endpoint, host unique ID and existing certificate SHA256. It is consumed before validation, has a ten-minute wall-clock expiry, and only applies after a strictly newer build is observed. Dates before issuance are rejected; moving the clock backward within that window can extend elapsed expiry. The current application integration verifies the saved PC identity after relaunch; it does not automatically start a screen session, grant takeover, or resume an interrupted file transfer.
 
 ## Authenticity and ordering
 

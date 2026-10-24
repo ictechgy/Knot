@@ -279,6 +279,7 @@ $script:section=$filePanel
 $null = Add-Text '파일 전송 · 필요할 때 한 번' 30
 $null = Add-Text '화면 연결에는 아래 설정이 필요 없습니다. 파일 기능은 Mac 전용 키와 별도의 Windows 파일 계정을 사용합니다.' 42
 $null = Add-Text 'Mac의 파일 탭에서 자동 파일 설정을 시작하고 표시된 일회용 연결을 아래에 붙여 넣으세요. 공개 설정을 자동으로 주고받으며 개인 키는 Mac에 남습니다.' 48
+$null = Add-Text 'Mac에서 Windows 대상을 Tailscale 주소로 선택했다면 Mac 설정 주소도 Tailscale 주소를 사용하세요. 같은 Wi-Fi에서는 두 PC의 Wi-Fi 주소를 선택하세요. 주소 종류를 섞으면 자동 연결이 거부될 수 있습니다.' 64
 $script:enrollmentClient=$null; $script:enrollmentRequest=$null
 $enrollmentBox=New-Object Windows.Forms.TextBox; $enrollmentBox.Width=710
 $enrollmentBox.AccessibleName='Mac의 일회용 자동 파일 설정 연결'; $filePanel.Controls.Add($enrollmentBox)
@@ -286,7 +287,7 @@ $automatic=Add-Button '자동 파일 설정 · Mac 연결 받기…' {
     Set-Busy $true; $client=$null
     try {
         if ([string]::IsNullOrWhiteSpace($LauncherPath)) { throw '자동 파일 설정에는 설치된 Knot EXE를 사용하세요. 개발자 소스 폴더에서는 아래 JSON 복구를 사용하세요.' }
-        $client=Start-KnotFileEnrollment ([string]$enrollmentBox.Text)
+        $client=Start-KnotFileEnrollment (([string]$enrollmentBox.Text).Trim([char[]]" `t`r`n"))
         $enrollmentBox.Clear()
         $enrollmentCancel.Visible=$true; $enrollmentCancel.Enabled=$true
         $script:enrollmentClient=$client

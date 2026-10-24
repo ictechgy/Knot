@@ -345,7 +345,7 @@ namespace Knot.Updates
                         UpdateSecurity.VerifyInstaller(file, installer, args[6], minimum.ToString(CultureInfo.InvariantCulture));
                     }
                     var start = new ProcessStartInfo(installer, "/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART")
-                    { UseShellExecute = true, Verb = "runas", WorkingDirectory = directory };
+                    { UseShellExecute = true, Verb = "runas", WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System) };
                     using (Process setup = Process.Start(start))
                     {
                         if (setup == null) throw new InvalidOperationException("The update installer did not start.");

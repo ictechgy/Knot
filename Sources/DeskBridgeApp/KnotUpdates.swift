@@ -74,6 +74,16 @@ final class KnotUpdates: NSObject, ObservableObject {
         return true
     }
 
+    func abortUpdate(_ error: any Error) {
+        deferredInstall = nil; installationPending = false
+        let failure = error as NSError
+        if failure.domain == "Knot.Update", failure.code == 1 || failure.code == 2 {
+            status = "진행 중인 연결과 작업을 마친 뒤 업데이트를 다시 확인하세요."
+        } else {
+            status = "서명된 업데이트를 완료하지 못했습니다. 현재 버전과 연결 설정은 유지됩니다."
+        }
+    }
+
     private func showStatus() {
         let alert = NSAlert(); alert.messageText = "Knot 업데이트"
         alert.informativeText = status; alert.runModal()
@@ -102,8 +112,7 @@ extension KnotUpdates: SPUUpdaterDelegate {
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
-        deferredInstall = nil; installationPending = false
-        status = "서명된 업데이트를 완료하지 못했습니다. 현재 버전과 연결 설정은 유지됩니다."
+        abortUpdate(error)
     }
 
     // Signed appcast metadata is mandatory; no unsigned external release-note page.
