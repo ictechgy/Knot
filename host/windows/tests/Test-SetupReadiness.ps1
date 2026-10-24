@@ -60,5 +60,10 @@ foreach ($mode in @('ready-settings','ready-pin','ready-encryption','closed-sett
     elseif ($mode -eq 'ready-encryption') { Expect-Readiness ($status.Text -match 'Required for all clients' -and $status.Text -match '모든 사용자에게 필수' -and $status.Text -notmatch 'Mandatory') 'Encryption guidance uses the actual pinned English and Korean option labels' }
 }
 Expect-Readiness ((Get-SunshineInstallResult 0).Text -match '아직 확인하지 않았습니다') 'Installer success is separate from runtime readiness'
+Expect-Readiness ((Get-QRAddressHintText '' 0) -match '아직 없습니다') 'An empty address list must not imply a QR target'
+Expect-Readiness ((Get-QRAddressHintText '192.168.1.25' 1) -match '192\.168\.1\.25' -and (Get-QRAddressHintText '192.168.1.25' 1) -notmatch '외') 'One QR target must be visible without phantom alternatives'
+Expect-Readiness ((Get-QRAddressHintText '100.100.1.25' 3) -match '100\.100\.1\.25 외 2개') 'The selected QR target and other included addresses must be visible'
+Expect-Readiness ((Get-QRAddressHintText '192.168.1.25' 20) -match '외 7개.*최대 8개') 'The hint must match the QR address cap'
+Expect-Readiness ((Get-QRAddressHintText '192.168.1.25' 1) -match '고급 설정의 연결 주소 목록') 'Address choice must be discoverable from the main screen'
 Expect-Readiness ((Get-SunshineLocalPortText $true) -match '화면 연결 성공.*아닙니다') 'A TCP response is not authenticated Sunshine or streaming readiness'
 @{status='passed';checks=$checks;freshSyntheticOnly=$true;networkUsed=$false;guiUsed=$false;servicesChanged=$false;actualWaitLogic=$true;actualUIFlow=$true} | ConvertTo-Json -Compress

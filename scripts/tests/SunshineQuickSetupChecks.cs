@@ -11,6 +11,66 @@ public static class SunshineQuickSetupChecks
     private const string BasicConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\"}";
     private const string SecureConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\",\"lan_encryption_mode\":\"2\",\"wan_encryption_mode\":\"2\",\"upnp\":\"disabled\",\"origin_web_ui_allowed\":\"pc\"}";
     private const string Pairs = "{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"name\":\"Synthetic Mac\",\"address\":\"192.168.1.4\"}]}";
+    private sealed class Resource : System.IDisposable
+    {
+        internal int Disposals;
+        public void Dispose() { System.Threading.Interlocked.Increment(ref Disposals); }
+    }
+    private static void CheckOwnedFactory()
+    {
+        using (var cancel = new System.Threading.CancellationTokenSource())
+        {
+            cancel.Cancel(); int created = 0; bool canceled = false;
+            try { SunshineSetupResourceFactory.CreateAsync(delegate { created++; return new Resource(); }, cancel.Token).GetAwaiter().GetResult(); }
+            catch (System.OperationCanceledException) { canceled = true; }
+            Check(canceled && created == 0);
+        }
+        using (var cancel = new System.Threading.CancellationTokenSource())
+        {
+            var resource = new Resource(); bool canceled = false;
+            try { SunshineSetupResourceFactory.CreateAsync(delegate { cancel.Cancel(); return resource; }, cancel.Token).GetAwaiter().GetResult(); }
+            catch (System.OperationCanceledException) { canceled = true; }
+            Check(canceled && resource.Disposals == 1);
+        }
+        using (var cancel = new System.Threading.CancellationTokenSource())
+        {
+            var resource = new Resource();
+            using (var owned = SunshineSetupResourceFactory.CreateAsync(delegate { return resource; }, cancel.Token).GetAwaiter().GetResult())
+            {
+                // The UI continuation has not accepted the completed result yet.
+                cancel.Cancel(); Check(resource.Disposals == 1); bool canceled = false;
+                try { owned.Take(cancel.Token, true); } catch (System.OperationCanceledException) { canceled = true; }
+                Check(canceled && resource.Disposals == 1);
+            }
+            Check(resource.Disposals == 1);
+        }
+        {
+            var resource = new Resource();
+            using (var owned = SunshineSetupResourceFactory.CreateAsync(delegate { return resource; }, System.Threading.CancellationToken.None).GetAwaiter().GetResult())
+            {
+                bool closed = false; try { owned.Take(System.Threading.CancellationToken.None, false); } catch (System.OperationCanceledException) { closed = true; }
+                Check(closed && resource.Disposals == 1);
+            }
+            Check(resource.Disposals == 1);
+        }
+        using (var cancel = new System.Threading.CancellationTokenSource())
+        {
+            var resource = new Resource(); int caller = System.Threading.Thread.CurrentThread.ManagedThreadId, worker = caller;
+            using (var owned = SunshineSetupResourceFactory.CreateAsync(delegate { worker = System.Threading.Thread.CurrentThread.ManagedThreadId; return resource; }, cancel.Token).GetAwaiter().GetResult())
+            {
+                Check(worker != caller);
+                Resource accepted = owned.Take(cancel.Token, true); Check(System.Object.ReferenceEquals(accepted, resource) && resource.Disposals == 0);
+                cancel.Cancel(); Check(resource.Disposals == 0); accepted.Dispose();
+            }
+            Check(resource.Disposals == 1);
+        }
+        foreach (bool busy in new bool[] { false, true })
+            foreach (bool ready in new bool[] { false, true })
+                foreach (bool selected in new bool[] { false, true })
+                    Check(SunshineSetupPolicy.CanPair(busy, ready, selected) == (!busy && ready && selected));
+        string guidance = null; try { SunshineSetupPolicy.PairBody(null, "1234"); } catch (SunshineSetupFailure error) { guidance = error.Message; }
+        Check(guidance == "연결할 Mac 요청을 먼저 선택하세요.");
+    }
     private sealed class DispatchStream : System.IO.MemoryStream
     {
         internal System.Action OnWrite; internal bool Closed;
@@ -109,7 +169,7 @@ public static class SunshineQuickSetupChecks
     public static void Main() { System.Console.WriteLine(Run()); }
     public static string Run()
     {
-        count = 0; CheckDispatch();
+        count = 0; CheckDispatch(); CheckOwnedFactory();
         Check(SunshineSetupPolicy.TrustedProcessSid("S-1-5-18"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-32-544"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-21-1-2-3-1001"));

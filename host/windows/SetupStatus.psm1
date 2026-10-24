@@ -84,4 +84,14 @@ function Test-KnotHeadlessDeviceProbeRequired([string] $Status,[bool] $InstallEn
     # Every managed/recovery state still needs the existing fresh device identity check.
     return ($Status -cne 'Absent' -or $InstallEnabled)
 }
-Export-ModuleMember -Function Get-SetupFailureText,Get-SunshineInstallResult,Set-SetupStatusText,Get-SunshineLocalPortText,Get-KnotHeadlessAvailabilityText,Test-KnotHeadlessDeviceProbeRequired
+function Get-QRAddressHintText([string] $SelectedAddress,[int] $DetectedCount) {
+    if ([string]::IsNullOrWhiteSpace($SelectedAddress) -or $DetectedCount -lt 1) {
+        return '연결 QR 주소: 아직 없습니다. Wi-Fi 또는 Tailscale 연결 후 고급 설정에서 주소를 새로고침하세요.'
+    }
+    $additional=[Math]::Min(7,[Math]::Max(0,$DetectedCount-1))
+    $hint='연결 QR 주소: ' + $SelectedAddress
+    if ($additional -gt 0) { $hint+=' 외 ' + $additional + '개 주소 포함' }
+    if ($DetectedCount -gt 8) { $hint+=' (최대 8개)' }
+    return $hint+' · 주소 변경: 고급 설정의 연결 주소 목록'
+}
+Export-ModuleMember -Function Get-QRAddressHintText,Get-SetupFailureText,Get-SunshineInstallResult,Set-SetupStatusText,Get-SunshineLocalPortText,Get-KnotHeadlessAvailabilityText,Test-KnotHeadlessDeviceProbeRequired

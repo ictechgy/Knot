@@ -314,7 +314,10 @@ $qrButton = Add-Button '연결 QR / 링크 보기…' {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'DeskBridge-QR.dll') -PathType Leaf)) { $qrButton.Text='연결 링크 보기…' }
 $null = Add-Text '연결 QR과 링크에는 주소만 들어 있습니다. PIN 승인은 별도로 필요합니다. Wi-Fi 또는 Tailscale 양쪽에서 도달 가능한 주소를 선택하세요.' 48
+$qrAddressHint=Add-Text (Get-QRAddressHintText '' 0) 48
+$qrAddressHint.AccessibleName='QR에 포함되는 연결 주소'
 $addresses=New-Object Windows.Forms.ComboBox; $addresses.AccessibleName='이 PC의 연결 주소'; $addresses.AccessibleDescription='Mac에서 도달할 수 있는 Wi-Fi 또는 Tailscale 주소를 선택하세요.'; $addresses.DropDownStyle='DropDownList'; $addresses.Width=710
+$addresses.Add_SelectedIndexChanged({ $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count })
 function Update-WindowsAddresses {
     $previous=[string]$addresses.SelectedItem
     $addresses.Items.Clear()
@@ -327,6 +330,7 @@ function Update-WindowsAddresses {
     }
     if ($addresses.Items.Contains($previous)) { $addresses.SelectedItem=$previous }
     elseif ($addresses.Items.Count -gt 0) { $addresses.SelectedIndex=0 }
+    $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count
 }
 $advancedPanel.Controls.Add($addresses)
 $script:section=$advancedPanel

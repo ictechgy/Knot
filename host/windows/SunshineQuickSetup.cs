@@ -48,6 +48,38 @@ internal sealed class SunshinePendingPair
     public override string ToString() { return Name + " — " + Address; }
 }
 
+// Ownership stays with this lease until the UI accepts the result. Cancellation
+// disposes a completed-but-not-yet-delivered factory result even if the UI closes.
+internal sealed class SunshineSetupOwnedResource<T> : IDisposable where T : class, IDisposable
+{
+    private readonly object gate = new object(); private T resource;
+    private readonly CancellationTokenRegistration registration;
+    internal SunshineSetupOwnedResource(T resource, CancellationToken cancellation)
+    { this.resource = resource; registration = cancellation.Register(DisposeResource); }
+    private void DisposeResource()
+    { T value; lock (gate) { value = resource; resource = null; } if (value != null) value.Dispose(); }
+    internal T Take(CancellationToken cancellation, bool accepting)
+    {
+        T value; lock (gate) { value = resource; resource = null; }
+        registration.Dispose();
+        if (value == null || !accepting || cancellation.IsCancellationRequested)
+        { if (value != null) value.Dispose(); cancellation.ThrowIfCancellationRequested(); throw new OperationCanceledException(); }
+        return value;
+    }
+    public void Dispose() { DisposeResource(); registration.Dispose(); }
+}
+internal static class SunshineSetupResourceFactory
+{
+    internal static Task<SunshineSetupOwnedResource<T>> CreateAsync<T>(Func<T> factory, CancellationToken cancellation) where T : class, IDisposable
+    {
+        return Task.Run(delegate {
+            cancellation.ThrowIfCancellationRequested(); T resource = factory();
+            try { cancellation.ThrowIfCancellationRequested(); return new SunshineSetupOwnedResource<T>(resource, cancellation); }
+            catch { if (resource != null) resource.Dispose(); throw; }
+        });
+    }
+}
+
 internal static class SunshineSetupPolicy
 {
     internal const string Version = "2026.914.233613";
@@ -101,6 +133,7 @@ internal static class SunshineSetupPolicy
         return configured ? "보안 설정 저장과 재시작을 확인했습니다. 이제 Mac에서 새 연결 요청을 시작하고 아래에서 PIN을 확인하세요."
             : "계정 인증과 저장된 보안 설정을 확인했습니다. Sunshine을 재시작하지 않았으며 현재 적용 상태는 다시 확인하지 않았습니다. 요청한 Mac과 PIN을 확인하세요.";
     }
+    internal static bool CanPair(bool busy, bool pairingReady, bool selected) { return !busy && pairingReady && selected; }
     internal static bool IsWelcome(SunshineApiReply reply) { return reply.Status == 307 && reply.Location == "/welcome"; }
     internal static void ValidateCredentials(string username, string password, bool create)
     {
@@ -176,7 +209,8 @@ internal static class SunshineSetupPolicy
     }
     internal static string PairBody(SunshinePendingPair selected, string pin)
     {
-        Require(selected != null && selected.ID != null && Regex.IsMatch(selected.ID, @"\A[0-9a-fA-F]{32}\z") &&
+        if (selected == null) throw new SunshineSetupFailure("연결할 Mac 요청을 먼저 선택하세요.");
+        Require(selected.ID != null && Regex.IsMatch(selected.ID, @"\A[0-9a-fA-F]{32}\z") &&
             selected.Name != null && Encoding.UTF8.GetByteCount(selected.Name) >= 1 && Encoding.UTF8.GetByteCount(selected.Name) <= 128 && SafeText(selected.Name));
         if (pin == null || !Regex.IsMatch(pin, @"\A[0-9]{4}\z")) throw new SunshineSetupFailure("Mac의 Knot에 표시된 4자리 PIN을 입력하세요.");
         return SunshineSetupJson.Write(new Dictionary<string, object> { { "pairing_id", selected.ID }, { "pin", pin }, { "name", selected.Name } });
@@ -664,13 +698,15 @@ internal sealed class SunshineQuickSetupForm : Form
 {
     private readonly TextBox username = new TextBox(), password = new TextBox(), pin = new TextBox();
     private readonly Button prepare = new Button(), refresh = new Button(), pair = new Button(), reapply = new Button();
-    private readonly ComboBox pending = new ComboBox(); private readonly Label status = new Label();
+    private readonly ComboBox pending = new ComboBox(); private readonly TextBox status = new TextBox();
     private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
+    private readonly CancellationToken cancellation;
     private SunshinePinnedApi api; private SunshineSetupSession session; private bool closing, busy;
     internal bool Completed { get; private set; }
     internal bool HadFailure { get; private set; }
     internal SunshineQuickSetupForm()
     {
+        cancellation = lifetime.Token;
         Text = "Knot · 이 PC 연결 준비"; StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(620, 650); Size = MinimumSize;
         Font = new Font("Segoe UI", 10); AutoScaleDimensions = new SizeF(96F, 96F); AutoScaleMode = AutoScaleMode.Dpi;
         username.AccessibleName = "Sunshine 사용자 이름"; password.AccessibleName = "Sunshine 비밀번호";
@@ -683,34 +719,50 @@ internal sealed class SunshineQuickSetupForm : Form
         layout.Controls.Add(new Label { Text = "Sunshine 비밀번호 · 처음 만드는 계정은 16바이트 이상", AutoSize = true }); password.Width = 510; password.MaxLength = 1024; password.UseSystemPasswordChar = true; layout.Controls.Add(password);
         layout.Controls.Add(new Label { Text = "다른 Sunshine 설정 창을 닫고 진행하세요. 저장된 보안 설정이 맞으면 재시작 없이 PIN 승인을 준비합니다. 처음이거나 설정 변경이 필요하면 화면 암호화를 필수로 하고, 공유기 자동 포트 열기를 끄고, 관리 화면을 이 PC로 제한한 뒤 재시작합니다. 진행 중인 화면 연결이 잠시 끊길 수 있습니다.", AutoSize = true, MaximumSize = new Size(530, 0), Margin = new Padding(0, 10, 0, 10) });
         prepare.Text = "로그인하고 연결 준비"; prepare.AutoSize = true; prepare.Enabled = false; layout.Controls.Add(prepare);
-        status.AutoSize = true; status.MaximumSize = new Size(530, 0); status.Text = "이 PC의 Sunshine 인증서를 확인하는 중…"; status.Margin = new Padding(0, 12, 0, 12); layout.Controls.Add(status);
+        status.ReadOnly = true; status.Multiline = true; status.ScrollBars = ScrollBars.Vertical; status.Width = 530; status.Height = 96;
+        status.AccessibleName = "연결 준비 상태와 오류 안내"; status.BackColor = SystemColors.Window; status.Text = "이 PC의 Sunshine 인증서를 확인하는 중…"; status.Margin = new Padding(0, 12, 0, 12); layout.Controls.Add(status);
         layout.Controls.Add(new Label { Text = "연결할 Mac에서 Knot의 이 PC를 선택하세요. 요청한 Mac의 이름과 주소를 직접 확인한 뒤 PIN을 입력하세요.", AutoSize = true, MaximumSize = new Size(530, 0) });
         var requests = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pending.DropDownStyle = ComboBoxStyle.DropDownList; pending.Width = 380; refresh.Text = "요청 새로고침"; refresh.AutoSize = true; refresh.Enabled = false; requests.Controls.Add(pending); requests.Controls.Add(refresh); layout.Controls.Add(requests);
         var pairing = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "선택한 Mac 연결"; pair.AutoSize = true; pair.Enabled = false; pairing.Controls.Add(new Label { Text = "Mac의 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); layout.Controls.Add(pairing);
         reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; layout.Controls.Add(reapply);
         var close = new Button { Text = "닫기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
+        pending.SelectedIndexChanged += delegate { UpdatePairAvailability(); };
         Shown += async delegate { ClampToWorkingArea(); await WorkAsync(InitializeAsync); };
         prepare.Click += async delegate { await WorkAsync(async delegate {
             string user = username.Text, secret = password.Text; Completed = false; pending.Items.Clear(); pending.SelectedIndex = -1; pin.Clear(); prepare.Enabled = false; status.Text = "보안 설정을 저장하고 확인하는 중…";
-            try { await session.PrepareAsync(user, secret, api.VerifiedInstalledVersion, lifetime.Token); } finally { password.Clear(); secret = null; }
+            SunshineSetupSession active = session; bool allowFirst = api.VerifiedInstalledVersion;
+            try { await Task.Run(delegate { return active.PrepareAsync(user, secret, allowFirst, cancellation); }); } finally { if (!closing) password.Clear(); secret = null; }
+            if (closing) return;
             Completed = session.PairingReady; status.Text = SunshineSetupPolicy.ReadyMessage(session.Configured);
-            pending.Items.Clear(); foreach (var item in await session.PendingAsync(lifetime.Token)) pending.Items.Add(item); pending.SelectedIndex = -1;
+            await RefreshPendingAsync();
         }); };
-        refresh.Click += async delegate { await WorkAsync(async delegate { pending.Items.Clear(); pending.SelectedIndex = -1; foreach (var item in await session.PendingAsync(lifetime.Token)) pending.Items.Add(item); pending.SelectedIndex = -1; status.Text = pending.Items.Count == 0 ? "아직 연결 요청이 없습니다. Mac에서 먼저 이 PC에 연결하세요." : "요청한 Mac을 직접 선택하고 Mac에 표시된 PIN을 입력하세요."; }); };
+        refresh.Click += async delegate { await WorkAsync(async delegate { pending.Items.Clear(); pending.SelectedIndex = -1; await RefreshPendingAsync(); if (closing) return; status.Text = pending.Items.Count == 0 ? "아직 연결 요청이 없습니다. Mac에서 먼저 이 PC에 연결하세요." : "요청한 Mac을 직접 선택하고 Mac에 표시된 PIN을 입력하세요."; }); };
         pair.Click += async delegate { await WorkAsync(async delegate { var selected = pending.SelectedItem as SunshinePendingPair;
             string selectedPin = pin.Text;
-            try { await session.PairAsync(selected, selectedPin, lifetime.Token); pending.Items.Clear(); status.Text = "선택한 Mac의 PIN 연결이 완료되었습니다. Mac에서 화면을 열 수 있습니다."; }
-            finally { pin.Clear(); selectedPin = null; } }); };
+            try { SunshineSetupSession active = session; await Task.Run(delegate { return active.PairAsync(selected, selectedPin, cancellation); }); if (closing) return; pending.Items.Clear(); status.Text = "선택한 Mac의 PIN 연결이 완료되었습니다. Mac에서 화면을 열 수 있습니다."; }
+            finally { if (!closing) pin.Clear(); selectedPin = null; } }); };
         reapply.Click += async delegate {
             if (busy || session == null || !session.PairingReady || session.Configured) return;
             if (MessageBox.Show(this, "Mac에서 진행 중인 PIN 요청을 먼저 취소하세요. 계속하면 Sunshine을 재시작하여 현재 화면 연결과 대기 중인 PIN 요청이 끊깁니다. 완료 후 Mac에서 새 연결 요청을 시작하세요. 지금 보안 설정을 다시 적용할까요?", "Knot · 재시작 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             await WorkAsync(async delegate {
                 Completed = false; pending.Items.Clear(); pending.SelectedIndex = -1; pin.Clear(); status.Text = "보안 설정을 다시 적용하고 재시작을 확인하는 중…";
-                await session.ReapplySecurityAsync(lifetime.Token); Completed = session.PairingReady;
+                SunshineSetupSession active = session; await Task.Run(delegate { return active.ReapplySecurityAsync(cancellation); }); if (closing) return; Completed = session.PairingReady;
                 status.Text = SunshineSetupPolicy.ReadyMessage(session.Configured);
             });
         };
         FormClosing += delegate { closing = true; lifetime.Cancel(); password.Clear(); pin.Clear(); if (session != null) session.Clear(); };
+    }
+    private async Task RefreshPendingAsync()
+    {
+        SunshineSetupSession active = session;
+        List<SunshinePendingPair> items = await Task.Run(delegate { return active.PendingAsync(cancellation); });
+        if (closing) return;
+        pending.Items.Clear(); foreach (var item in items) pending.Items.Add(item); pending.SelectedIndex = -1;
+    }
+    private void UpdatePairAvailability()
+    {
+        if (closing || pair.IsDisposed) return;
+        pair.Enabled = SunshineSetupPolicy.CanPair(busy, session != null && session.PairingReady, pending.SelectedItem is SunshinePendingPair);
     }
     private void ClampToWorkingArea()
     {
@@ -724,7 +776,7 @@ internal sealed class SunshineQuickSetupForm : Form
         bool initialized = false;
         try
         {
-        using (var startup = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token))
+        using (var startup = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
         {
             startup.CancelAfter(20000);
             try
@@ -734,8 +786,11 @@ internal sealed class SunshineQuickSetupForm : Form
                     startup.Token.ThrowIfCancellationRequested();
                     try
                     {
-                        api = new SunshinePinnedApi(); session = new SunshineSetupSession(api);
-                        SunshineApiReply probe = await session.ProbeAsync(startup.Token);
+                        using (var owned = await SunshineSetupResourceFactory.CreateAsync(delegate { return new SunshinePinnedApi(); }, startup.Token))
+                            api = owned.Take(startup.Token, !closing);
+                        session = new SunshineSetupSession(api); SunshineSetupSession active = session;
+                        SunshineApiReply probe = await Task.Run(delegate { return active.ProbeAsync(startup.Token); });
+                        startup.Token.ThrowIfCancellationRequested(); if (closing) throw new OperationCanceledException();
                         SunshineSetupPolicy.Require(probe.Status == 401 || SunshineSetupPolicy.IsWelcome(probe));
                         status.Text = SunshineSetupPolicy.IsWelcome(probe) ? "Sunshine 계정을 처음 만듭니다. 기억할 사용자 이름과 긴 비밀번호를 입력하세요." : "기존 Sunshine 계정으로 로그인하세요. 기존 비밀번호를 바꾸지 않습니다.";
                         initialized = true; prepare.Enabled = true; return;
@@ -747,7 +802,7 @@ internal sealed class SunshineQuickSetupForm : Form
                     await Task.Delay(500, startup.Token);
                 }
             }
-            catch (OperationCanceledException) { lifetime.Token.ThrowIfCancellationRequested(); }
+            catch (OperationCanceledException) { cancellation.ThrowIfCancellationRequested(); }
         }
         throw new SunshineSetupFailure("Sunshine이 아직 시작되지 않았습니다. 잠시 뒤 빠른 설정을 다시 여세요. 다른 경로나 포트를 쓰는 설치는 고급 설정으로 확인하세요.");
         }
@@ -771,7 +826,7 @@ internal sealed class SunshineQuickSetupForm : Form
                 bool ready = session != null && session.PairingReady;
                 username.Enabled = session != null && !ready; password.Enabled = username.Enabled;
                 pending.Enabled = ready; pin.Enabled = ready;
-                prepare.Enabled = session != null && !ready; refresh.Enabled = ready; pair.Enabled = ready;
+                prepare.Enabled = session != null && !ready; refresh.Enabled = ready; UpdatePairAvailability();
                 reapply.Visible = ready && !session.Configured; reapply.Enabled = reapply.Visible;
             }
         }
