@@ -26,10 +26,10 @@ if ($compiler -and (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     $result = [SunshineQuickSetupChecks]::Run() | ConvertFrom-Json
     $framework = $false
 } else { throw 'The protected Framework C# compiler or PowerShell Core is required.' }
-if ($result.status -cne 'passed' -or $result.checks -lt 193 -or -not $result.freshSyntheticOnly -or $result.nativeApisInvoked) { throw 'Incomplete quick setup fixture result.' }
+if ($result.status -cne 'passed' -or $result.checks -lt 199 -or -not $result.freshSyntheticOnly -or $result.nativeApisInvoked) { throw 'Incomplete quick setup fixture result.' }
 $expectedWindowsAcl = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 if ($expectedWindowsAcl) {
-    if (-not $framework -or $result.syntheticWindowsAclProjection -ne $true -or $result.syntheticWindowsAclChecks -lt 46 -or $result.checks -lt 239) { throw 'Actual Framework synthetic ACL projection checks are required on Windows.' }
+    if (-not $framework -or $result.syntheticWindowsAclProjection -ne $true -or $result.syntheticWindowsAclChecks -lt 46 -or $result.checks -lt 245) { throw 'Actual Framework synthetic ACL projection checks are required on Windows.' }
 } elseif ($result.syntheticWindowsAclProjection -ne $false -or $result.syntheticWindowsAclChecks -ne 0) { throw 'Windows ACL execution must be explicitly skipped on this platform.' }
 $result | Add-Member -NotePropertyName frameworkCompiler -NotePropertyValue $framework
 $result | ConvertTo-Json -Compress

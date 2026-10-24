@@ -378,10 +378,18 @@ public static class SunshineQuickSetupChecks
             Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
         var recoverySession = Session(explicitRecovery); Reject(delegate { Prepare(recoverySession); });
         Check(recoverySession.CanReapply && !recoverySession.PairingReady);
+        Check(SunshineSetupPolicy.RecoveryGuidance(recoverySession.NeedsSecurityReapply, recoverySession.CanReapply).Contains("보안 설정 다시 적용 · 재시작"));
         recoverySession.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();
         Check(recoverySession.Configured && recoverySession.PairingReady && !recoverySession.NeedsSecurityReapply && explicitRecovery.Paths.Count == 8);
         Check(explicitRecovery.Auth[5] == explicitRecovery.Auth[1]);
         Check(SunshineSetupPolicy.ReapplyRecovery.Contains("보안 설정 다시 적용 · 재시작") && SunshineSetupPolicy.ReadyMessage(false).Contains("이전 준비가 실패했거나 중단"));
+        var firstAuthFailure = new Fake(new SunshineApiReply(307, "", "/welcome"), Reply(Success), new SunshineApiReply(500, "{}"));
+        var firstAuthSession = Session(firstAuthFailure); Reject(delegate { Prepare(firstAuthSession, true); });
+        Check(firstAuthSession.NeedsSecurityReapply && !firstAuthSession.CanReapply && !firstAuthSession.PairingReady && !firstAuthSession.Configured);
+        string loginRecovery = SunshineSetupPolicy.RecoveryGuidance(firstAuthSession.NeedsSecurityReapply, firstAuthSession.CanReapply);
+        Check(loginRecovery.Contains("로그인하고 연결 준비") && loginRecovery.Contains("다시 로그인") && !loginRecovery.Contains("보안 설정 다시 적용 · 재시작"));
+        Reject(delegate { firstAuthSession.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
+        Check(firstAuthFailure.Paths.Count == 3);
         // List loading is a separate result. Its failure preserves completed
         // preparation, reports trust errors explicitly and never selects a peer.
         partialRestart.Replies.Enqueue(null);
