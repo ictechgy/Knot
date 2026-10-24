@@ -102,6 +102,11 @@ internal static class SunshineSetupPolicy
     { return needsReapply ? (canReapply ? ReapplyRecovery : LoginRecovery) : ""; }
     internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 고급 설정에서 Sunshine을 확인하세요.";
     internal static void Require(bool condition) { if (!condition) throw new SunshineSetupFailure(Manual); }
+    internal static void ValidateProtectedAncestors(Action validate)
+    {
+        try { validate(); }
+        catch (IOException) { throw new SunshineSetupFailure(Manual); }
+    }
     internal static bool Matches(byte[] expected, byte[] actual)
     {
         if (expected == null || actual == null || expected.Length != actual.Length || expected.Length == 0) return false;
@@ -482,7 +487,7 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
                 SafeFileHandle handle = CreateFile(current.FullName, 1, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
                 SunshineSetupPolicy.Require(!handle.IsInvalid); locks.Add(handle);
             }
-            Launcher.AssertProtectedAncestors(Path.GetDirectoryName(certificate));
+            SunshineSetupPolicy.ValidateProtectedAncestors(delegate { Launcher.AssertProtectedAncestors(Path.GetDirectoryName(certificate)); });
             for (var current = new DirectoryInfo(Path.GetDirectoryName(certificate)); current != null && current.FullName.Length >= install.Length; current = current.Parent)
                 AssertProtectedAcl(current.GetAccessControl());
             string executable = Path.Combine(install, "sunshine.exe"); protectedExecutable = executable;

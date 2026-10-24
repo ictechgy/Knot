@@ -11,6 +11,19 @@ public static class SunshineQuickSetupChecks
     private const string BasicConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\"}";
     private const string SecureConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\",\"lan_encryption_mode\":\"2\",\"wan_encryption_mode\":\"2\",\"upnp\":\"disabled\",\"origin_web_ui_allowed\":\"pc\"}";
     private const string Pairs = "{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"name\":\"Synthetic Mac\",\"address\":\"192.168.1.4\"}]}";
+    private static void CheckAncestorTrustBoundary()
+    {
+        int calls = 0;
+        SunshineSetupPolicy.ValidateProtectedAncestors(delegate { calls++; }); Check(calls == 1);
+        calls = 0; bool trustFailure = false;
+        try { SunshineSetupPolicy.ValidateProtectedAncestors(delegate { calls++; throw new System.IO.IOException("Synthetic ancestor policy rejection."); }); }
+        catch (SunshineSetupFailure error) { trustFailure = error.Message == SunshineSetupPolicy.Manual; }
+        Check(trustFailure && calls == 1);
+        calls = 0; var original = new SunshineSetupFailure("Synthetic authored trust failure."); SunshineSetupFailure caught = null;
+        try { SunshineSetupPolicy.ValidateProtectedAncestors(delegate { calls++; throw original; }); }
+        catch (SunshineSetupFailure error) { caught = error; }
+        Check(calls == 1 && System.Object.ReferenceEquals(original, caught));
+    }
     private static void CheckWindowsAclProjection()
     {
         // Managed security-descriptor values only. No path, file/key handle,
@@ -230,7 +243,7 @@ public static class SunshineQuickSetupChecks
     public static void Main() { System.Console.WriteLine(Run()); }
     public static string Run()
     {
-        count = 0; windowsAclChecks = 0; CheckWindowsAclProjection(); CheckDispatch(); CheckOwnedFactory(); CheckIdempotentCleanup();
+        count = 0; windowsAclChecks = 0; CheckAncestorTrustBoundary(); CheckWindowsAclProjection(); CheckDispatch(); CheckOwnedFactory(); CheckIdempotentCleanup();
         Check(SunshineSetupPolicy.TrustedProcessSid("S-1-5-18"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-32-544"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-21-1-2-3-1001"));
