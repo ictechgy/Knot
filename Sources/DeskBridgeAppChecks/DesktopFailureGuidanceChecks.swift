@@ -77,6 +77,22 @@ func runDesktopFailureGuidanceChecks(temporary: URL) async throws -> Int {
             try expect(target.pairingTitle.contains("Linux 브라우저") && !target.pairingGuidance.contains("Windows Knot"),
                        "Linux PIN guidance must retain its own browser workflow")
         }
+        for failure in [PairingFailure.timedOut, .rejected] {
+            target.perform { throw failure }
+            for _ in 0..<1000 {
+                if !target.busy { break }
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            let guidance = target.errorMessage ?? ""
+            try expect(!target.busy, "pairing recovery did not complete")
+            if platform == .windows {
+                try expect(guidance.contains("Windows Knot") && guidance.contains("요청 새로고침"),
+                           "Windows pairing failure must lead to the native request refresh and approval")
+            } else {
+                try expect(guidance.contains("Linux 브라우저") && guidance.contains("PIN 페이지") && !guidance.contains("Windows Knot"),
+                           "Linux pairing failure must retain its own browser PIN workflow")
+            }
+        }
         for (failure, code) in [(StreamSecurityPolicy.Failure.plaintextSignalling, "[S01]"), (.missingEncryption(2), "[S02]")] {
             var recovery = DesktopRecoveryPresentation()
             recovery.receive(.firstFrame)

@@ -390,6 +390,14 @@ public static class SunshineQuickSetupChecks
         Check(loginRecovery.Contains("로그인하고 연결 준비") && loginRecovery.Contains("다시 로그인") && !loginRecovery.Contains("보안 설정 다시 적용 · 재시작"));
         Reject(delegate { firstAuthSession.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         Check(firstAuthFailure.Paths.Count == 3);
+        var passwordFailure = new Fake(new SunshineApiReply(307, "", "/welcome"), new SunshineApiReply(500, "{}"),
+            new SunshineApiReply(307, "", "/welcome"), Reply(Success), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        var passwordSession = Session(passwordFailure); Reject(delegate { Prepare(passwordSession, true); });
+        Check(passwordSession.NeedsSecurityReapply && !passwordSession.CanReapply && !passwordSession.PairingReady && passwordFailure.Paths.Count == 2);
+        Check(SunshineSetupPolicy.RecoveryGuidance(passwordSession.NeedsSecurityReapply, passwordSession.CanReapply).Contains("계정 생성 또는 로그인 확인"));
+        Prepare(passwordSession, true);
+        Check(passwordSession.Configured && passwordSession.PairingReady && !passwordSession.NeedsSecurityReapply && passwordFailure.Paths.Count == 7);
+        Check(passwordFailure.Paths[1] == "/api/password" && passwordFailure.Paths[3] == "/api/password" && passwordFailure.Paths[5] == "/api/restart");
         // List loading is a separate result. Its failure preserves completed
         // preparation, reports trust errors explicitly and never selects a peer.
         partialRestart.Replies.Enqueue(null);

@@ -97,7 +97,7 @@ internal static class SunshineSetupPolicy
     internal const string Version = "2026.914.233613";
     internal const int MaximumBody = 262144;
     internal const string ReapplyRecovery = "설정 저장 또는 재시작 확인을 마치지 못했습니다. 이 창의 '보안 설정 다시 적용 · 재시작'을 눌러 다시 확인하세요. 확인 전에는 PIN 승인을 준비하지 않습니다. 인증서는 교체하지 않습니다.";
-    internal const string LoginRecovery = "Sunshine 계정 인증을 확인하지 못했습니다. 이 창의 '로그인하고 연결 준비'에서 Sunshine 사용자 이름과 비밀번호로 다시 로그인하세요. 인증 전에는 재시작이나 PIN 승인을 진행하지 않습니다.";
+    internal const string LoginRecovery = "Sunshine 계정 생성 또는 로그인 확인을 마치지 못했습니다. 이 창의 '로그인하고 연결 준비'에서 사용자 이름과 비밀번호를 다시 입력하세요. 첫 계정은 생성을 다시 시도하고, 기존 계정은 다시 로그인합니다. 인증 전에는 재시작이나 PIN 승인을 진행하지 않습니다.";
     internal static string RecoveryGuidance(bool needsReapply, bool canReapply)
     { return needsReapply ? (canReapply ? ReapplyRecovery : LoginRecovery) : ""; }
     internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 고급 설정에서 Sunshine을 확인하세요.";
@@ -858,12 +858,10 @@ internal sealed class SunshineQuickSetupForm : Form
         try { await action(); }
         catch (OperationCanceledException) { }
         catch (SunshineSetupFailure error) {
-            HadFailure = true;
-            if (!closing) { string recovery = SunshineSetupPolicy.RecoveryGuidance(session != null && session.NeedsSecurityReapply, session != null && session.CanReapply); status.Text = error.Message + (recovery.Length == 0 ? "" : Environment.NewLine + recovery); }
+            if (!closing) { HadFailure = true; string recovery = SunshineSetupPolicy.RecoveryGuidance(session != null && session.NeedsSecurityReapply, session != null && session.CanReapply); status.Text = error.Message + (recovery.Length == 0 ? "" : Environment.NewLine + recovery); }
         }
         catch (Exception) {
-            HadFailure = true;
-            if (!closing) { string recovery = SunshineSetupPolicy.RecoveryGuidance(session != null && session.NeedsSecurityReapply, session != null && session.CanReapply); status.Text = recovery.Length == 0 ? SunshineSetupPolicy.Manual : recovery; }
+            if (!closing) { HadFailure = true; string recovery = SunshineSetupPolicy.RecoveryGuidance(session != null && session.NeedsSecurityReapply, session != null && session.CanReapply); status.Text = recovery.Length == 0 ? SunshineSetupPolicy.Manual : recovery; }
         }
         finally {
             busy = false;
