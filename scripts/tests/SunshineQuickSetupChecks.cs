@@ -11,6 +11,52 @@ public static class SunshineQuickSetupChecks
     private const string BasicConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\"}";
     private const string SecureConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\",\"lan_encryption_mode\":\"2\",\"wan_encryption_mode\":\"2\",\"upnp\":\"disabled\",\"origin_web_ui_allowed\":\"pc\"}";
     private const string Pairs = "{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"name\":\"Synthetic Mac\",\"address\":\"192.168.1.4\"}]}";
+    private sealed class DispatchStream : System.IO.MemoryStream
+    {
+        internal System.Action OnWrite; internal bool Closed;
+        public override System.Threading.Tasks.Task WriteAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancellation)
+        { cancellation.ThrowIfCancellationRequested(); Write(buffer, offset, count); if (OnWrite != null) OnWrite(); return System.Threading.Tasks.Task.FromResult(0); }
+        protected override void Dispose(bool disposing) { Closed = true; base.Dispose(disposing); }
+    }
+    private static void CheckDispatch()
+    {
+        bool oldAlive = true; int verifications = 0, opens = 0, responses = 0;
+        var stream = new DispatchStream { OnWrite = delegate { oldAlive = false; } };
+        string result = SunshineSetupDispatch.SendAsync(new byte[] { 1, 2 },
+            delegate { verifications++; SunshineSetupPolicy.Require(oldAlive); },
+            delegate { opens++; Check(verifications == 1 && oldAlive); return System.Threading.Tasks.Task.FromResult<System.IO.Stream>(stream); },
+            delegate { responses++; Check(!oldAlive && verifications == 1 && stream.Closed); return System.Threading.Tasks.Task.FromResult("restart response collected"); },
+            System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(result == "restart response collected" && verifications == 1 && opens == 1 && responses == 1);
+        // GET still verifies immediately before sending headers, without opening a body stream.
+        oldAlive = true; verifications = opens = responses = 0;
+        result = SunshineSetupDispatch.SendAsync<string>(null,
+            delegate { verifications++; SunshineSetupPolicy.Require(oldAlive); },
+            delegate { opens++; throw new System.Exception("GET must not write a request body."); },
+            delegate { responses++; Check(verifications == 1 && opens == 0); return System.Threading.Tasks.Task.FromResult("GET"); },
+            System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(result == "GET" && responses == 1);
+        // Losing trust before dispatch still fails immediately; no body or headers are sent.
+        oldAlive = false; opens = responses = 0;
+        Reject(delegate { SunshineSetupDispatch.SendAsync<string>(new byte[] { 1 },
+            delegate { SunshineSetupPolicy.Require(oldAlive); },
+            delegate { opens++; return System.Threading.Tasks.Task.FromResult<System.IO.Stream>(new DispatchStream()); },
+            delegate { responses++; return System.Threading.Tasks.Task.FromResult("unexpected"); },
+            System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
+        Check(opens == 0 && responses == 0);
+        // A certificate/trust failure while collecting a response is never converted into socket-close success.
+        Reject(delegate { SunshineSetupDispatch.SendAsync<string>(new byte[] { 1 }, delegate { },
+            delegate { return System.Threading.Tasks.Task.FromResult<System.IO.Stream>(new DispatchStream()); },
+            delegate { throw new SunshineSetupFailure("Synthetic trust failure."); },
+            System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
+        using (var cancel = new System.Threading.CancellationTokenSource())
+        {
+            cancel.Cancel(); int checkedTrust = 0; bool canceled = false;
+            try { SunshineSetupDispatch.SendAsync<string>(null, delegate { checkedTrust++; }, null, null, cancel.Token).GetAwaiter().GetResult(); }
+            catch (System.OperationCanceledException) { canceled = true; }
+            Check(canceled && checkedTrust == 0);
+        }
+    }
     private sealed class Witness : ISunshineRestartWitness
     {
         internal bool Exited = true, Replacement = true, Waited, Verified, Disposed, Block;
@@ -61,7 +107,7 @@ public static class SunshineQuickSetupChecks
     public static void Main() { System.Console.WriteLine(Run()); }
     public static string Run()
     {
-        count = 0;
+        count = 0; CheckDispatch();
         Check(SunshineSetupPolicy.TrustedProcessSid("S-1-5-18"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-32-544"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-21-1-2-3-1001"));

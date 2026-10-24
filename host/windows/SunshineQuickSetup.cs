@@ -260,6 +260,22 @@ internal sealed class SunshineSetupJson
     }
 }
 
+// The verified listener must be alive before dispatch. A POST can legitimately
+// terminate that process while its body is being consumed (notably restart), so
+// response collection must not re-check old-process liveness after dispatch.
+internal static class SunshineSetupDispatch
+{
+    internal static async Task<T> SendAsync<T>(byte[] body, Action verifyBeforeSend,
+        Func<Task<Stream>> openOutput, Func<Task<T>> receiveResponse, CancellationToken cancellation)
+    {
+        cancellation.ThrowIfCancellationRequested(); verifyBeforeSend();
+        if (body != null)
+            using (Stream output = await openOutput().ConfigureAwait(false))
+                await output.WriteAsync(body, 0, body.Length, cancellation).ConfigureAwait(false);
+        return await receiveResponse().ConfigureAwait(false);
+    }
+}
+
 internal sealed class SunshineSetupSession
 {
     private readonly ISunshineSetupApi api; private readonly Func<int, CancellationToken, Task> delay; private readonly int restartTimeoutMilliseconds; private string authorization; internal bool Configured { get; private set; }
@@ -447,19 +463,27 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
             {
                 try
                 {
-                    if (body != null)
-                    {
-                        byte[] bytes = new UTF8Encoding(false, true).GetBytes(body); SunshineSetupPolicy.Require(bytes.Length <= SunshineSetupPolicy.MaximumBody);
-                        request.ContentType = "application/json"; request.ContentLength = bytes.Length;
-                        try { listener.VerifyCurrent(); using (Stream output = await request.GetRequestStreamAsync().ConfigureAwait(false)) await output.WriteAsync(bytes, 0, bytes.Length, timeout.Token).ConfigureAwait(false); }
-                        finally { Array.Clear(bytes, 0, bytes.Length); }
-                    }
+                    byte[] bytes = body == null ? null : new UTF8Encoding(false, true).GetBytes(body);
                     HttpWebResponse response;
-                    try { listener.VerifyCurrent(); response = (HttpWebResponse)await request.GetResponseAsync().ConfigureAwait(false); }
-                    catch (WebException error) {
-                        if (error.Status == WebExceptionStatus.TrustFailure || error.Status == WebExceptionStatus.SecureChannelFailure) throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
-                        response = error.Response as HttpWebResponse; if (response == null) throw new IOException();
+                    try
+                    {
+                        if (bytes != null)
+                        {
+                            SunshineSetupPolicy.Require(bytes.Length <= SunshineSetupPolicy.MaximumBody);
+                            request.ContentType = "application/json"; request.ContentLength = bytes.Length;
+                        }
+                        try
+                        {
+                            response = (HttpWebResponse)await SunshineSetupDispatch.SendAsync(bytes, listener.VerifyCurrent,
+                                request.GetRequestStreamAsync, request.GetResponseAsync, timeout.Token).ConfigureAwait(false);
+                        }
+                        catch (WebException error)
+                        {
+                            if (error.Status == WebExceptionStatus.TrustFailure || error.Status == WebExceptionStatus.SecureChannelFailure) throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+                            response = error.Response as HttpWebResponse; if (response == null) throw new IOException();
+                        }
                     }
+                    finally { if (bytes != null) Array.Clear(bytes, 0, bytes.Length); }
                     using (response)
                     {
                         SunshineSetupPolicy.Require(response.ResponseUri == request.RequestUri && response.ContentLength <= SunshineSetupPolicy.MaximumBody);
