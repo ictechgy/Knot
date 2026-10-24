@@ -62,8 +62,27 @@ func runDesktopFailureGuidanceChecks(temporary: URL) async throws -> Int {
     }
     let localMessage = "합성 설정 오류를 확인하세요."
     let missingVideo = DesktopModel.failureMessage(StreamError.securityNegotiation(.missingEncryption(2)))
-    try expect(missingVideo.contains("Windows 브라우저") && missingVideo.contains("Required for all clients") && missingVideo.contains("Save → Apply") && !missingVideo.contains("Mandatory"),
+    try expect(missingVideo.contains("연결 대상 PC의 브라우저") && missingVideo.contains("Required for all clients") && missingVideo.contains("Save → Apply") && !missingVideo.contains("Mandatory"),
                "video encryption failure lost the actual pinned Sunshine settings labels and device context")
+    // Asynchronous recovery publishes through the controller callback, bypassing
+    // the operation catch's platform substitution. Cover both real model routes.
+    for platform in [HostPlatform.windows, .linux] {
+        let controller = DesktopStreamController()
+        let target = DesktopModel(storageDirectory: temporary.appendingPathComponent("recovery-guidance-\(platform.rawValue)"),
+                                  identitySuite: suite, platform: platform, streamController: controller)
+        for (failure, code) in [(StreamSecurityPolicy.Failure.plaintextSignalling, "[S01]"), (.missingEncryption(2), "[S02]")] {
+            var recovery = DesktopRecoveryPresentation()
+            recovery.receive(.firstFrame)
+            recovery.receive(.reconnecting)
+            recovery.receive(.connectionTerminated(errorCode: -1, error: .securityNegotiation(failure)))
+            controller.onStatus?(recovery.status)
+            try expect(target.status.contains("연결 대상 PC") && !target.status.contains("Windows") && target.status.contains(code),
+                       "asynchronous security recovery assumed Windows for a shared host platform")
+            try expect(target.status.contains("PIN 페어링") && (code != "[S02]" ||
+                       (target.status.contains("https://localhost:47990/config#lan_encryption_mode") && target.status.contains("Save → Apply"))),
+                       "platform-neutral recovery lost preserved pairing or actionable target-PC settings")
+        }
+    }
     try expect(!DesktopModel.failureMessage(StreamError.crypto(raw)).contains("암호화 설정"),
                "unrelated crypto failures must not claim a missing Sunshine encryption setting")
     try expect(DesktopModel.failureMessage(AppFailure(localMessage)) == localMessage,

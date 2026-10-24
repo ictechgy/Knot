@@ -6,6 +6,7 @@ import Foundation
 public enum EnrollmentProtocol {
     public static let maximumFrame = 16_384
     public static let lifetime: TimeInterval = 120
+    public static let authenticatedLifetime: TimeInterval = 600
     public enum Failure: Error, LocalizedError, Sendable {
         case invalid, expired, peer, frame, replay
         public var errorDescription: String? { "자동 파일 설정을 완료하지 못했습니다. 두 PC의 주소를 확인하고 Mac에서 새 설정 연결을 시작하세요. 기존 파일 설정은 유지됩니다." }
@@ -61,21 +62,26 @@ public enum EnrollmentProtocol {
     public struct SessionGate: Sendable {
         private enum Phase: Sendable { case waiting, authorized, received, closed }
         private var phase: Phase = .waiting
-        private let deadline: TimeInterval
+        private var deadline: TimeInterval
+        private var observedAt: TimeInterval
         private let link: Link
         private let request: SetupExchange.MacRequest
         private let windowsAddress: String
         public init(link: Link, request: SetupExchange.MacRequest, windowsAddress: String, now: TimeInterval) throws {
-            guard now.isFinite, now >= 0, link.sessionID == request.requestID,
+            guard now.isFinite, now >= 0, (now + lifetime).isFinite, link.sessionID == request.requestID,
                   request.allowedClientAddresses.contains(link.address),
                   try EndpointPolicy.validatedAddress(windowsAddress) == windowsAddress else { throw Failure.invalid }
-            self.link = link; self.request = request; self.windowsAddress = windowsAddress; deadline = now + lifetime
+            self.link = link; self.request = request; self.windowsAddress = windowsAddress
+            deadline = now + lifetime; observedAt = now
         }
         public mutating func authorize(_ data: Data, peer: String, now: TimeInterval) throws {
             try check(now)
             guard phase == .waiting else { throw Failure.replay }
             guard peer == windowsAddress else { throw Failure.peer }
             try EnrollmentProtocol.authenticate(data, link: link)
+            // Only the first valid authentication exchanges the short admission
+            // budget for a fixed provisioning/reply budget. Replay cannot renew it.
+            deadline = now + authenticatedLifetime
             phase = .authorized
         }
         public mutating func receive(_ data: Data, now: TimeInterval) throws -> SetupExchange.Preview {
@@ -86,9 +92,13 @@ public enum EnrollmentProtocol {
             return preview
         }
         public mutating func cancel() { phase = .closed }
-        private func check(_ now: TimeInterval) throws {
-            guard now.isFinite, now >= 0, now < deadline else { throw Failure.expired }
+        private mutating func check(_ now: TimeInterval) throws {
             guard phase != .closed else { throw Failure.expired }
+            guard now.isFinite, now >= observedAt, now < deadline else {
+                phase = .closed
+                throw Failure.expired
+            }
+            observedAt = now
         }
     }
     public static func frame(_ data: Data) throws -> Data {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Security;
@@ -79,18 +80,45 @@ namespace Knot.Enrollment {
             await stream.FlushAsync(cancel).ConfigureAwait(false);
         }
     }
+    /// Monotonic admission/reply state also checks expiry synchronously, so a
+    /// delayed CancellationTokenSource timer cannot renew an expired session.
+    internal sealed class ReplyWindow {
+        private double expires, observed;
+        private bool authorized, closed;
+        internal ReplyWindow(double now) {
+            if (Double.IsNaN(now) || Double.IsInfinity(now) || now<0) throw Link.Invalid();
+            observed=now; expires=now+120;
+        }
+        private bool ActiveLocked(double now) {
+            if (closed) return false;
+            if (Double.IsNaN(now) || Double.IsInfinity(now) || now<observed || now>=expires) { closed=true; return false; }
+            observed=now; return true;
+        }
+        internal bool Active(double now) { return ActiveLocked(now); }
+        internal bool CanReply(double now) { return ActiveLocked(now) && authorized; }
+        internal void Authorize(double now) {
+            if (!ActiveLocked(now) || authorized) throw Link.Invalid();
+            authorized=true; expires=now+600;
+        }
+        internal void Cancel() { closed=true; }
+    }
     /// One outbound TLS connection, private address only, exact temporary-cert pin.
     /// No global certificate callback, proxy, listener, shell URL, or trust store.
     public sealed class Client : IDisposable {
         private readonly TcpClient tcp=new TcpClient(AddressFamily.InterNetwork);
         private readonly CancellationTokenSource deadline=new CancellationTokenSource();
+        private readonly ReplyWindow window=new ReplyWindow(MonotonicNow);
         private readonly CancellationTokenRegistration abort;
         private SslStream tls;
         private int replied, disposed;
         public Link Connection { get; private set; }
         public Task<byte[]> Request { get; private set; }
         public string LocalAddress { get; private set; }
-        public bool Active { get { return !deadline.IsCancellationRequested && Volatile.Read(ref disposed)==0; } }
+        private static double MonotonicNow { get { return Stopwatch.GetTimestamp()/(double)Stopwatch.Frequency; } }
+        // Sample the clock inside the same lock as the state transition: racing
+        // UI/task calls must not present out-of-order timestamp observations.
+        public bool Active { get { lock(window) { return !deadline.IsCancellationRequested && Volatile.Read(ref disposed)==0 && window.Active(MonotonicNow); } } }
+        private bool CanReply { get { lock(window) { return window.CanReply(MonotonicNow); } } }
         public Client(string text) {
             Connection=Link.Parse(text);
             deadline.CancelAfter(120000);
@@ -118,8 +146,22 @@ namespace Knot.Enrollment {
             foreach (string candidate in available) if (String.Equals(localAddress,candidate,StringComparison.Ordinal)) return localAddress;
             throw Link.Invalid();
         }
+        // Called only after the UI has validated the complete canonical request
+        // and selected the actual local peer address. Fetching bytes alone must
+        // not extend the initial connection/authentication budget.
+        public void AuthorizeReply(string requestID,string[] allowedClientAddresses) {
+            if (!Request.IsCompleted || Request.IsFaulted || Request.IsCanceled || !Active ||
+                !String.Equals(requestID,Connection.SessionID,StringComparison.Ordinal) || allowedClientAddresses==null) throw Link.Invalid();
+            bool allowed=false;
+            foreach (string address in allowedClientAddresses) if (String.Equals(address,Connection.Address,StringComparison.Ordinal)) allowed=true;
+            if (!allowed) throw Link.Invalid();
+            lock(window) { window.Authorize(MonotonicNow); }
+            deadline.Token.ThrowIfCancellationRequested();
+            deadline.CancelAfter(600000);
+            deadline.Token.ThrowIfCancellationRequested();
+        }
         public Task SendReplyAsync(string reply) {
-            if (reply==null || !Request.IsCompleted || Request.IsFaulted || Request.IsCanceled || !Active || Interlocked.Exchange(ref replied,1)!=0) throw Link.Invalid();
+            if (reply==null || !Request.IsCompleted || Request.IsFaulted || Request.IsCanceled || !Active || !CanReply || Interlocked.Exchange(ref replied,1)!=0) throw Link.Invalid();
             return Task.Run(async delegate {
                 try {
                     await Frames.WriteAsync(tls,new UTF8Encoding(false,true).GetBytes(reply),deadline.Token).ConfigureAwait(false);
@@ -129,10 +171,10 @@ namespace Knot.Enrollment {
                 finally { Cancel(); }
             });
         }
-        public void Cancel() { if (Volatile.Read(ref disposed)==0) { deadline.Cancel(); tcp.Close(); } }
+        public void Cancel() { if (Volatile.Read(ref disposed)==0) { lock(window) { window.Cancel(); } deadline.Cancel(); tcp.Close(); } }
         public void Dispose() {
             if (Interlocked.Exchange(ref disposed,1)!=0) return;
-            deadline.Cancel(); tcp.Close(); abort.Dispose();
+            lock(window) { window.Cancel(); } deadline.Cancel(); tcp.Close(); abort.Dispose();
             // Cancellation can race an awaiting TLS read. The stream is owned by
             // the closed TcpClient; do not dispose the CTS while tasks use it.
         }

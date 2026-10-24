@@ -38,6 +38,21 @@ namespace Knot.Enrollment {
    Reject(delegate { Link.LocalAddressFromEndpoint(null); });
    Reject(delegate { Link.LocalAddressFromEndpoint(new System.Net.DnsEndPoint("synthetic.invalid",50000)); });
    Reject(delegate { Client.SelectLocalAddress("192.168.001.20",new string[]{"192.168.001.20"}); });
+   var waiting=new ReplyWindow(100);
+   Expect(waiting.Active(219.5)); Expect(!waiting.CanReply(219.5));
+   waiting.Authorize(219.5); Expect(waiting.CanReply(819.4));
+   Reject(delegate { waiting.Authorize(819.4); });
+   Expect(!waiting.Active(819.5)); Expect(!waiting.Active(819.4));
+   Reject(delegate { waiting.Authorize(819.4); });
+   var expired=new ReplyWindow(100);
+   Expect(!expired.Active(220)); Reject(delegate { expired.Authorize(219); });
+   var replay=new ReplyWindow(100); replay.Authorize(101);
+   Reject(delegate { replay.Authorize(650); }); Expect(!replay.CanReply(701));
+   var cancelled=new ReplyWindow(100); cancelled.Cancel();
+   Expect(!cancelled.Active(101)); Reject(delegate { cancelled.Authorize(101); });
+   foreach (double invalid in new double[]{Double.NaN,Double.PositiveInfinity,-1,99}) {
+    var clock=new ReplyWindow(100); Expect(!clock.Active(invalid)); Reject(delegate { clock.Authorize(101); });
+   }
    byte[] certificate=System.Text.Encoding.UTF8.GetBytes("fresh inert bytes; not a real certificate");
    string expected; using (var hash=System.Security.Cryptography.SHA256.Create()) expected=System.BitConverter.ToString(hash.ComputeHash(certificate)).Replace("-","").ToLowerInvariant();
    Expect(Link.MatchesPin(certificate,expected)); Expect(!Link.MatchesPin(certificate,pin)); Expect(!Link.MatchesPin(null,expected)); Expect(!Link.MatchesPin(certificate,""));
@@ -193,7 +208,7 @@ foreach ($operation in @('EnableFiles','Export','DisableFiles')) {
             param($OperationSource,$FailureSource,$Operation,$Mode,$ClientKey,$ServerKey)
             . ([scriptblock]::Create($OperationSource))
             . ([scriptblock]::Create($FailureSource))
-            $script:deliveryTestMode=$Mode; $script:deliveryNativeCompleted=$false; $script:deliveryReadCount=0; $script:deliverySendCount=0; $script:deliveryBusyDepth=0
+            $script:deliveryTestMode=$Mode; $script:deliveryNativeCompleted=$false; $script:deliveryReadCount=0; $script:deliverySendCount=0; $script:deliveryBusyDepth=0; $script:deliveryLaunches=@()
             $status=[pscustomobject]@{Text=''}; $enrollmentCancel=[pscustomobject]@{Enabled=$false}
             $LauncherPath='synthetic-not-executed.exe'; $addresses=[pscustomobject]@{SelectedItem='192.168.1.30'}
             $requestBox=[pscustomobject]@{Text='synthetic-not-opened.json'}
@@ -213,6 +228,9 @@ foreach ($operation in @('EnableFiles','Export','DisableFiles')) {
             }
             function Save-DeskBridgeConnectionReply($Reply,$Dialog) { return 'Cancelled' }
             function Start-Process($FilePath,$Verb,$ArgumentList,[switch]$PassThru) {
+                # Capture the actual broker boundary before any inert failure.
+                # Assertions run outside the handler's catch so it cannot hide them.
+                $script:deliveryLaunches+=@([pscustomobject]@{FilePath=$FilePath;Verb=$Verb;ArgumentList=$ArgumentList;PassThru=[bool]$PassThru})
                 if ($script:deliveryTestMode -ceq 'before-provision') { throw 'SYNTHETIC_PRIVATE_TOKEN_DO_NOT_DISPLAY C:\synthetic-untrusted-path' }
                 $exitCode=if ($script:deliveryTestMode -ceq 'native-failed') {1} else {0}
                 $process=[pscustomobject]@{Handle=1;HasExited=$true;ExitCode=$exitCode}
@@ -232,6 +250,24 @@ foreach ($operation in @('EnableFiles','Export','DisableFiles')) {
             if ($Mode -in @('manual-save-cancel','disable')) { Invoke-FileSetup $Operation }
             else { Invoke-FileSetup $Operation -AutomaticRequest $expectedRequest -AutomaticClient $client }
             $checks=0; $fingerprint=Get-KeyFingerprint $ServerKey
+            if ($script:deliveryLaunches.Count -ne 1) { throw 'Actual handler did not make exactly one broker request.' }; $checks++
+            $launch=$script:deliveryLaunches[0]
+            if ($launch.FilePath -cne $LauncherPath -or $launch.Verb -cne 'RunAs' -or -not $launch.PassThru) { throw 'Actual broker boundary lost its installed executable/elevation/wait contract.' }; $checks++
+            $argv=@(([string]$launch.ArgumentList) -split ' ')
+            $expectedArgc=if ($Operation -ceq 'EnableFiles') {8} elseif ($Operation -ceq 'Export') {6} else {2}
+            if ($argv.Count -ne $expectedArgc -or $argv[0] -cne '--elevated-operation' -or $argv[1] -cne $Operation) { throw 'Actual broker operation/argument allowlist changed.' }; $checks++
+            if ($Operation -cne 'DisableFiles') {
+                if ($argv[2] -cne '--request-base64' -or $argv[4] -cne '--windows-address' -or $argv[5] -cne '192.168.1.30') { throw 'Actual broker lost its public-request/address contract.' }; $checks++
+                $decoded=(New-Object Text.UTF8Encoding($false,$true)).GetString([Convert]::FromBase64String($argv[3]))
+                $canonical=ConvertFrom-MacSetup $decoded
+                $expectedCanonical=ConvertFrom-MacSetup ($expectedRequest | ConvertTo-Json -Depth 4 -Compress)
+                $expectedJson=$expectedCanonical | ConvertTo-Json -Depth 4 -Compress
+                if ($decoded -cne $expectedJson -or ($canonical | ConvertTo-Json -Depth 4 -Compress) -cne $expectedJson) { throw 'Actual broker received a stale, empty or noncanonical Mac request.' }; $checks++
+                if ($decoded.Contains('synthetic-not-opened.json') -or $decoded.Contains('synthetic-result-not-opened')) { throw 'An input/output file path crossed the installed broker boundary.' }; $checks++
+            }
+            if ($Operation -ceq 'EnableFiles') {
+                if ($argv[6] -cne '--desktop-user-sid' -or $argv[7] -cne 'S-1-5-21-100-200-300-1001') { throw 'Actual broker lost the original non-elevated desktop SID.' }; $checks++
+            }
             if ($status.Text.Contains($rawMarker) -or $status.Text.Contains('C:\synthetic-untrusted-path')) { throw 'Enrollment delivery leaked a raw exception/path.' }; $checks++
             if ($script:deliveryBusyDepth -ne 0) { throw 'Enrollment handler failed to restore UI admission.' }; $checks++
             if ($Mode -in @('expired','send-failed')) {

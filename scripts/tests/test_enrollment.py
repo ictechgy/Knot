@@ -7,6 +7,7 @@ ROOT=Path(__file__).resolve().parents[2]
 SWIFT=r'''
 import DeskBridgeCore
 import Foundation
+import Network
 import Security
 @main struct Checks {
  static func main() throws {
@@ -46,12 +47,34 @@ import Security
   reject { _=try gate.receive(validReply,now:103) }
   var late=try EnrollmentProtocol.SessionGate(link:link,request:request,windowsAddress:"192.168.1.30",now:100)
   try late.authorize(validAuth,peer:"192.168.1.30",now:101)
-  reject { _=try late.receive(validReply,now:220) }
+  // Authentication near the original expiry still gets a full, fixed reply
+  // budget; ordinary provisioning can safely outlast first-use admission.
+  var nearExpiry=try EnrollmentProtocol.SessionGate(link:link,request:request,windowsAddress:"192.168.1.30",now:100)
+  try nearExpiry.authorize(validAuth,peer:"192.168.1.30",now:219.5); count += 1
+  _=try nearExpiry.receive(validReply,now:819.4); count += 1
+  reject { try late.authorize(validAuth,peer:"192.168.1.30",now:650) }
+  reject { _=try late.receive(validReply,now:701) }
+  // Once observed expired, an earlier supplied timestamp cannot reopen it.
+  reject { _=try late.receive(validReply,now:700) }
+  var replyBoundary=try EnrollmentProtocol.SessionGate(link:link,request:request,windowsAddress:"192.168.1.30",now:100)
+  try replyBoundary.authorize(validAuth,peer:"192.168.1.30",now:219)
+  reject { _=try replyBoundary.receive(validReply,now:819) }
   var cancelled=try EnrollmentProtocol.SessionGate(link:link,request:request,windowsAddress:"192.168.1.30",now:100)
   cancelled.cancel(); reject { try cancelled.authorize(validAuth,peer:"192.168.1.30",now:101) }
   reject { _=try cancelled.receive(validReply,now:101) }
   var expired=try EnrollmentProtocol.SessionGate(link:link,request:request,windowsAddress:"192.168.1.30",now:100)
   reject { try expired.authorize(validAuth,peer:"192.168.1.30",now:220) }
+  reject { try expired.authorize(validAuth,peer:"192.168.1.30",now:219) }
+  for invalidTime in [Double.nan,Double.infinity,-1,99] {
+   var invalidClock=try EnrollmentProtocol.SessionGate(link:link,request:request,windowsAddress:"192.168.1.30",now:100)
+   reject { try invalidClock.authorize(validAuth,peer:"192.168.1.30",now:invalidTime) }
+   reject { try invalidClock.authorize(validAuth,peer:"192.168.1.30",now:101) }
+  }
+  let expectedPeer=IPv4Address("192.168.1.30")!
+  expect(EnrollmentServer.matchesPeer(.ipv4(expectedPeer),expected:expectedPeer))
+  expect(!EnrollmentServer.matchesPeer(.ipv4(IPv4Address("192.168.1.31")!),expected:expectedPeer))
+  expect(!EnrollmentServer.matchesPeer(.name("192.168.1.30",nil),expected:expectedPeer))
+  expect(!EnrollmentServer.matchesPeer(.ipv6(IPv6Address("::ffff:192.168.1.30")!),expected:expectedPeer))
   let first=try EnrollmentIdentity.create(), second=try EnrollmentIdentity.create()
   expect(first.fingerprint.count==64 && first.capability.count==64)
   expect(first.fingerprint != second.fingerprint && first.capability != second.capability)

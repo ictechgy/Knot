@@ -11,6 +11,7 @@ final class EnrollmentServer: @unchecked Sendable {
     private let listener: NWListener
     private let address: String
     private let windowsAddress: String
+    private let windowsIPv4: IPv4Address
     private let request: SetupExchange.MacRequest
     private let fingerprint: String
     private let capability: String
@@ -30,6 +31,7 @@ final class EnrollmentServer: @unchecked Sendable {
          completion: @escaping @Sendable (Result<Data, Error>) -> Void) throws {
         guard try EndpointPolicy.validatedAddress(address) == address,
               try EndpointPolicy.validatedAddress(windowsAddress) == windowsAddress,
+              let windowsIPv4 = IPv4Address(windowsAddress),
               request.allowedClientAddresses.contains(address) else { throw EnrollmentProtocol.Failure.invalid }
         let material = try EnrollmentIdentity.create()
         let tls = NWProtocolTLS.Options()
@@ -41,6 +43,7 @@ final class EnrollmentServer: @unchecked Sendable {
         parameters.includePeerToPeer = false
         listener = try NWListener(using: parameters)
         self.address = address; self.windowsAddress = windowsAddress; self.request = request
+        self.windowsIPv4 = windowsIPv4
         fingerprint = material.fingerprint; capability = material.capability
         self.onReady = onReady; self.completion = completion
     }
@@ -48,8 +51,7 @@ final class EnrollmentServer: @unchecked Sendable {
         queue.async { [self] in
             guard !stopped else { return }
             startedAt = ProcessInfo.processInfo.systemUptime
-            let expiry = DispatchWorkItem { [weak self] in self?.finish(.failure(EnrollmentProtocol.Failure.expired)) }
-            deadline = expiry; queue.asyncAfter(deadline: .now() + EnrollmentProtocol.lifetime, execute: expiry)
+            armDeadline(after: EnrollmentProtocol.lifetime, authenticated: false)
             listener.stateUpdateHandler = { [weak self] state in
                 guard let self, !self.stopped else { return }
                 switch state {
@@ -61,7 +63,7 @@ final class EnrollmentServer: @unchecked Sendable {
                         self.gate = try EnrollmentProtocol.SessionGate(link: value, request: self.request, windowsAddress: self.windowsAddress, now: self.startedAt)
                         self.link = value; self.onReady(value)
                     } catch { self.finish(.failure(error)) }
-                case .failed: self.finish(.failure(EnrollmentProtocol.Failure.invalid))
+                case .waiting, .failed: self.finish(.failure(EnrollmentProtocol.Failure.invalid))
                 default: break
                 }
             }
@@ -73,7 +75,7 @@ final class EnrollmentServer: @unchecked Sendable {
     private func accept(_ value: NWConnection) {
         guard !stopped, !consumed, connection == nil, link != nil,
               case .hostPort(let host, _) = value.endpoint,
-              String(describing: host) == windowsAddress else { value.cancel(); return }
+              Self.matchesPeer(host, expected: windowsIPv4) else { value.cancel(); return }
         connection = value
         let limit = DispatchWorkItem { [weak self, weak value] in
             guard let self, let value, self.connection === value, !self.consumed else { return }
@@ -97,6 +99,7 @@ final class EnrollmentServer: @unchecked Sendable {
             guard link != nil, gate != nil, !consumed else { throw EnrollmentProtocol.Failure.replay }
             try gate?.authorize(data, peer: windowsAddress, now: ProcessInfo.processInfo.systemUptime)
             consumed = true; connectionDeadline?.cancel(); connectionDeadline = nil
+            armDeadline(after: EnrollmentProtocol.authenticatedLifetime, authenticated: true)
             // This capability can fetch exactly one public request and return one reply.
             listener.cancel()
             let outgoing = try EnrollmentProtocol.frame(SetupExchange.encode(request))
@@ -133,6 +136,20 @@ final class EnrollmentServer: @unchecked Sendable {
     }
     private func failedRead(_ value: NWConnection) {
         if consumed { finish(.failure(EnrollmentProtocol.Failure.frame)) } else { drop(value) }
+    }
+    /// Network may attach an interface to a literal address. Compare its typed
+    /// IPv4 bytes, never a diagnostic description or a hostname spelling.
+    static func matchesPeer(_ host: NWEndpoint.Host, expected: IPv4Address) -> Bool {
+        guard case .ipv4(let actual) = host else { return false }
+        return actual.rawValue == expected.rawValue
+    }
+    private func armDeadline(after interval: TimeInterval, authenticated: Bool) {
+        deadline?.cancel()
+        let expiry = DispatchWorkItem { [weak self] in
+            guard let self, !self.stopped, self.consumed == authenticated else { return }
+            self.finish(.failure(EnrollmentProtocol.Failure.expired))
+        }
+        deadline = expiry; queue.asyncAfter(deadline: .now() + interval, execute: expiry)
     }
     private func drop(_ value: NWConnection) {
         guard connection === value else { value.cancel(); return }

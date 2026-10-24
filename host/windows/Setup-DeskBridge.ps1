@@ -299,6 +299,7 @@ $automatic=Add-Button '자동 파일 설정 · Mac 연결 받기…' {
         # The Mac admitted this exact TCP peer. Reuse its local interface address
         # for the reply rather than the first Wi-Fi/virtual-adapter selection.
         $automaticAddress=[Knot.Enrollment.Client]::SelectLocalAddress($client.LocalAddress,[string[]]@($addresses.Items))
+        $client.AuthorizeReply([string]$expected.requestID,[string[]]@($expected.allowedClientAddresses))
         $addresses.SelectedItem=$automaticAddress
         $script:enrollmentRequest=$expected
         Invoke-FileSetup 'EnableFiles' -AutomaticRequest $expected -AutomaticClient $client
