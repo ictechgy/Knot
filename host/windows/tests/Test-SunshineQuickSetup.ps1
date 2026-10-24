@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # SPDX-License-Identifier: GPL-3.0-only
 # Actual policy/session source + inert protocol replies; no HTTP, UI, host APIs or private data.
 $ErrorActionPreference = 'Stop'
@@ -26,6 +26,6 @@ if ($compiler -and (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     $result = [SunshineQuickSetupChecks]::Run() | ConvertFrom-Json
     $framework = $false
 } else { throw 'The protected Framework C# compiler or PowerShell Core is required.' }
-if ($result.status -cne 'passed' -or $result.checks -lt 62 -or -not $result.freshSyntheticOnly -or $result.nativeApisInvoked) { throw 'Incomplete quick setup fixture result.' }
+if ($result.status -cne 'passed' -or $result.checks -lt 125 -or -not $result.freshSyntheticOnly -or $result.nativeApisInvoked) { throw 'Incomplete quick setup fixture result.' }
 $result | Add-Member -NotePropertyName frameworkCompiler -NotePropertyValue $framework
 $result | ConvertTo-Json -Compress

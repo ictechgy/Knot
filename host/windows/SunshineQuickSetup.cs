@@ -32,8 +32,14 @@ internal sealed class SunshineApiReply
     internal string Location, Body;
     internal SunshineApiReply(int status, string body, string location = null) { Status = status; Body = body; Location = location; }
 }
+internal interface ISunshineRestartWitness : IDisposable
+{
+    Task WaitForExitAsync(CancellationToken cancellation);
+    void VerifyReplacement(CancellationToken cancellation);
+}
 internal interface ISunshineSetupApi
 {
+    ISunshineRestartWitness CaptureRestart(CancellationToken cancellation);
     Task<SunshineApiReply> SendAsync(string path, string body, string authorization, CancellationToken cancellation);
 }
 internal sealed class SunshinePendingPair
@@ -52,6 +58,43 @@ internal static class SunshineSetupPolicy
     {
         if (expected == null || actual == null || expected.Length != actual.Length || expected.Length == 0) return false;
         int difference = 0; for (int i = 0; i < expected.Length; i++) difference |= expected[i] ^ actual[i]; return difference == 0;
+    }
+    // Decode only a fresh native table/synthetic bytes. One listener that can
+    // receive the literal IPv4 loopback destination must exist, without ambiguity.
+    internal static int ListenerPid(byte[] table, bool allowMissing = false)
+    {
+        Require(table != null && table.Length >= 4 && table.Length <= 4194304);
+        uint count = BitConverter.ToUInt32(table, 0);
+        Require(count <= 65536 && 4L + count * 24L <= table.Length);
+        int result = 0, matched = 0;
+        for (int i = 0; i < count; i++)
+        {
+            int row = 4 + i * 24;
+            uint state = BitConverter.ToUInt32(table, row), address = BitConverter.ToUInt32(table, row + 4);
+            int port = table[row + 8] * 256 + table[row + 9];
+            if (state == 2 && (address == 0 || address == 0x0100007f) && port == 47990)
+            {
+                uint pid = BitConverter.ToUInt32(table, row + 20);
+                Require(pid > 0 && pid <= Int32.MaxValue); result = (int)pid; matched++;
+            }
+        }
+        if (allowMissing && matched == 0) return 0;
+        Require(matched == 1); return result;
+    }
+    internal static bool TrustedSid(string sid)
+    { return sid == "S-1-5-18" || sid == "S-1-5-32-544" || sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"; }
+    internal static bool SafeAclRule(string sid, int rights, bool allow, bool inheritOnly)
+    {
+        // WRITE, DELETE_CHILD, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE/ALL.
+        // An inherit-only template does not grant rights on the current object.
+        return !allow || inheritOnly || TrustedSid(sid) || (rights & 0x500d0156) == 0;
+    }
+    internal static bool TrustedProcessSid(string sid) { return sid == "S-1-5-18"; }
+    internal static bool SafeKeyAclRule(string sid, int rights, bool allow, bool inheritOnly)
+    {
+        // Private key bytes must not be readable or mutable by another identity.
+        // READ_CONTROL/READ_ATTRIBUTES alone reveal metadata, not key contents.
+        return !allow || inheritOnly || TrustedSid(sid) || (rights & unchecked((int)0xd00d0157)) == 0;
     }
     internal static bool IsWelcome(SunshineApiReply reply) { return reply.Status == 307 && reply.Location == "/welcome"; }
     internal static void ValidateCredentials(string username, string password, bool create)
@@ -219,8 +262,12 @@ internal sealed class SunshineSetupJson
 
 internal sealed class SunshineSetupSession
 {
-    private readonly ISunshineSetupApi api; private readonly Func<int, CancellationToken, Task> delay; private string authorization; internal bool Configured { get; private set; }
-    internal SunshineSetupSession(ISunshineSetupApi api, Func<int, CancellationToken, Task> delay = null) { this.api = api; this.delay = delay ?? new Func<int, CancellationToken, Task>(Task.Delay); }
+    private readonly ISunshineSetupApi api; private readonly Func<int, CancellationToken, Task> delay; private readonly int restartTimeoutMilliseconds; private string authorization; internal bool Configured { get; private set; }
+    internal SunshineSetupSession(ISunshineSetupApi api, Func<int, CancellationToken, Task> delay = null, int restartTimeoutMilliseconds = 45000)
+    {
+        SunshineSetupPolicy.Require(restartTimeoutMilliseconds > 0 && restartTimeoutMilliseconds <= 45000);
+        this.api = api; this.delay = delay ?? new Func<int, CancellationToken, Task>(Task.Delay); this.restartTimeoutMilliseconds = restartTimeoutMilliseconds;
+    }
     internal Task<SunshineApiReply> ProbeAsync(CancellationToken cancel) { return api.SendAsync("/api/config", null, null, cancel); }
     internal async Task PrepareAsync(string username, string password, bool allowFirstAccount, CancellationToken cancel)
     {
@@ -251,21 +298,41 @@ internal sealed class SunshineSetupSession
             saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
             SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved));
         }
-        // The explicit prepare action always applies/restarts, including a previous
-        // save whose running configuration was never applied in another editor.
-        // Restart closes the upstream socket without a response by design.
-        try { await api.SendAsync("/api/restart", "{}", authorization, cancel).ConfigureAwait(false); }
-            catch (IOException) { }
-            for (int i = 0; i < 20; i++)
+        // GET config reads the saved file, not live settings. Success therefore
+        // requires the exact pre-request process to exit, plus an authenticated
+        // readback and a distinct, verified replacement listener after restart.
+        try
+        {
+        using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel))
+        {
+            deadline.CancelAfter(restartTimeoutMilliseconds);
+            using (ISunshineRestartWitness witness = api.CaptureRestart(deadline.Token))
             {
-                cancel.ThrowIfCancellationRequested(); await delay(1000, cancel).ConfigureAwait(false);
+                SunshineSetupPolicy.Require(witness != null);
                 try
                 {
-                    saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
-                    SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved)); Configured = true; return;
+                    SunshineApiReply restarted = await api.SendAsync("/api/restart", "{}", authorization, deadline.Token).ConfigureAwait(false);
+                    SunshineSetupPolicy.Require(restarted.Status == 200);
                 }
-                catch (IOException) { }
+                catch (IOException) { /* Expected upstream socket close still needs the held-process witness. */ }
+                await witness.WaitForExitAsync(deadline.Token).ConfigureAwait(false);
+                for (int i = 0; i < 20; i++)
+                {
+                    deadline.Token.ThrowIfCancellationRequested(); await delay(1000, deadline.Token).ConfigureAwait(false);
+                    try
+                    {
+                        saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, deadline.Token).ConfigureAwait(false));
+                        SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved));
+                        witness.VerifyReplacement(deadline.Token);
+                        deadline.Token.ThrowIfCancellationRequested(); Configured = true; return;
+                    }
+                    catch (IOException) { }
+                }
             }
+        }
+        }
+        catch (OperationCanceledException)
+        { cancel.ThrowIfCancellationRequested(); throw new SunshineSetupFailure("Sunshine 재시작 확인 시간이 지났습니다. 빠른 설정을 다시 여세요. 인증서는 교체하지 않습니다."); }
         throw new SunshineSetupFailure("Sunshine 재시작을 아직 확인하지 못했습니다. 잠시 뒤 빠른 설정을 다시 여세요. 인증서는 교체하지 않습니다.");
     }
     internal async Task<List<SunshinePendingPair>> PendingAsync(CancellationToken cancel)
@@ -288,7 +355,7 @@ internal sealed class SunshineSetupSession
 #if !KNOT_QUICKSETUP_POLICY_ONLY
 internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
 {
-    private readonly List<IDisposable> locks = new List<IDisposable>(); private byte[] expected;
+    private readonly List<IDisposable> locks = new List<IDisposable>(); private byte[] expected; private string protectedExecutable;
     internal bool VerifiedInstalledVersion { get; private set; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
@@ -309,7 +376,7 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
             Launcher.AssertProtectedAncestors(Path.GetDirectoryName(certificate));
             for (var current = new DirectoryInfo(Path.GetDirectoryName(certificate)); current != null && current.FullName.Length >= install.Length; current = current.Parent)
                 AssertProtectedAcl(current.GetAccessControl());
-            string executable = Path.Combine(install, "sunshine.exe");
+            string executable = Path.Combine(install, "sunshine.exe"); protectedExecutable = executable;
             SunshineSetupPolicy.Require((File.GetAttributes(executable) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0);
             var image = new FileStream(executable, FileMode.Open, FileAccess.Read, FileShare.Read); locks.Add(image);
             AssertProtectedFile(executable);
@@ -326,9 +393,24 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
             Match match = Regex.Match(pem, @"\A\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\r\n]+)\s*-----END CERTIFICATE-----\s*\z");
             SunshineSetupPolicy.Require(match.Success);
             using (var parsed = new X509Certificate2(Convert.FromBase64String(match.Groups[1].Value))) expected = parsed.RawData;
+            // Metadata only: never open a stream or read private key contents.
+            AssertConfidentialKeyMetadata(Path.Combine(install, @"config\credentials\cakey.pem"));
         }
         catch (IOException) { Dispose(); throw new IOException(); }
         catch { Dispose(); throw new SunshineSetupFailure(SunshineSetupPolicy.Manual); }
+    }
+    private void AssertConfidentialKeyMetadata(string path)
+    {
+        SunshineSetupPolicy.Require((File.GetAttributes(path) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0);
+        // READ_CONTROL only. OPEN_REPARSE_POINT plus no write/delete sharing
+        // retains this exact ordinary object and never asks for FILE_READ_DATA.
+        SafeFileHandle metadata = CreateFile(path, 0x00020000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+        SunshineSetupPolicy.Require(!metadata.IsInvalid); locks.Add(metadata);
+        var acl = File.GetAccessControl(path, AccessControlSections.Access | AccessControlSections.Owner);
+        SunshineSetupPolicy.Require(SunshineSetupPolicy.TrustedSid(acl.GetOwner(typeof(SecurityIdentifier)).Value));
+        foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            SunshineSetupPolicy.Require(SunshineSetupPolicy.SafeKeyAclRule(rule.IdentityReference.Value, (int)rule.FileSystemRights,
+                rule.AccessControlType == AccessControlType.Allow, (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0));
     }
     private static void AssertProtectedFile(string path)
     {
@@ -336,22 +418,25 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
     }
     private static void AssertProtectedAcl(FileSystemSecurity acl)
     {
-        Func<string, bool> trusted = delegate(string sid) { return sid == "S-1-5-18" || sid == "S-1-5-32-544" || sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"; };
-        SunshineSetupPolicy.Require(trusted(acl.GetOwner(typeof(SecurityIdentifier)).Value));
-        var mutable = FileSystemRights.Write | FileSystemRights.Delete | FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership | (FileSystemRights)0x50000000;
+        SunshineSetupPolicy.Require(SunshineSetupPolicy.TrustedSid(acl.GetOwner(typeof(SecurityIdentifier)).Value));
         foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true, typeof(SecurityIdentifier)))
-            SunshineSetupPolicy.Require(rule.AccessControlType != AccessControlType.Allow || trusted(rule.IdentityReference.Value) || (rule.FileSystemRights & mutable) == 0);
+            SunshineSetupPolicy.Require(SunshineSetupPolicy.SafeAclRule(rule.IdentityReference.Value, (int)rule.FileSystemRights,
+                rule.AccessControlType == AccessControlType.Allow, (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0));
     }
+    public ISunshineRestartWitness CaptureRestart(CancellationToken cancellation)
+    { cancellation.ThrowIfCancellationRequested(); return SunshineProcessWitness.Capture(protectedExecutable); }
     public async Task<SunshineApiReply> SendAsync(string path, string body, string authorization, CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
+        using (var listener = SunshineProcessWitness.Capture(protectedExecutable))
+        {
         SunshineSetupPolicy.Require(path == "/api/config" || path == "/api/password" || path == "/api/pin" || path == "/api/restart");
         SunshineSetupPolicy.Require((path != "/api/password" && path != "/api/restart") || body != null);
         var request = (HttpWebRequest)WebRequest.Create("https://127.0.0.1:47990" + path);
         request.Method = body == null ? "GET" : "POST"; request.Proxy = null; request.AllowAutoRedirect = false;
         request.UseDefaultCredentials = false; request.Credentials = null; request.CookieContainer = null;
         request.KeepAlive = false; request.PreAuthenticate = false; request.MaximumResponseHeadersLength = 16;
-        request.Timeout = 10000; request.ReadWriteTimeout = 10000; request.SslProtocols = SslProtocols.Tls12;
+        request.Timeout = 10000; request.ReadWriteTimeout = 10000;
         request.ServerCertificateValidationCallback = delegate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors)
         { return certificate != null && SunshineSetupPolicy.Matches(expected, certificate.GetRawCertData()); };
         if (authorization != null) request.Headers[HttpRequestHeader.Authorization] = authorization;
@@ -366,11 +451,11 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
                     {
                         byte[] bytes = new UTF8Encoding(false, true).GetBytes(body); SunshineSetupPolicy.Require(bytes.Length <= SunshineSetupPolicy.MaximumBody);
                         request.ContentType = "application/json"; request.ContentLength = bytes.Length;
-                        try { using (Stream output = await request.GetRequestStreamAsync().ConfigureAwait(false)) await output.WriteAsync(bytes, 0, bytes.Length, timeout.Token).ConfigureAwait(false); }
+                        try { listener.VerifyCurrent(); using (Stream output = await request.GetRequestStreamAsync().ConfigureAwait(false)) await output.WriteAsync(bytes, 0, bytes.Length, timeout.Token).ConfigureAwait(false); }
                         finally { Array.Clear(bytes, 0, bytes.Length); }
                     }
                     HttpWebResponse response;
-                    try { response = (HttpWebResponse)await request.GetResponseAsync().ConfigureAwait(false); }
+                    try { listener.VerifyCurrent(); response = (HttpWebResponse)await request.GetResponseAsync().ConfigureAwait(false); }
                     catch (WebException error) {
                         if (error.Status == WebExceptionStatus.TrustFailure || error.Status == WebExceptionStatus.SecureChannelFailure) throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
                         response = error.Response as HttpWebResponse; if (response == null) throw new IOException();
@@ -395,7 +480,117 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
             }
         }
     }
+    }
     public void Dispose() { expected = null; for (int i = locks.Count - 1; i >= 0; i--) locks[i].Dispose(); locks.Clear(); }
+}
+
+// Native observations only: no process termination, SCM changes, PID reopening
+// during wait, or trust inferred from an HTTP response or certificate alone.
+internal sealed class SunshineProcessWitness : ISunshineRestartWitness
+{
+    private readonly SafeProcessHandle process; private readonly string executable;
+    private readonly int pid; private readonly long creationTime;
+    [DllImport("iphlpapi.dll")]
+    private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, [MarshalAs(UnmanagedType.Bool)] bool ordered, uint family, int kind, uint reserved);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageName(SafeProcessHandle process, uint flags, StringBuilder path, ref int size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(SafeProcessHandle process, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(SafeProcessHandle process, uint desired, out SafeFileHandle token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(SafeFileHandle token, int kind, IntPtr information, int capacity, out int returned);
+    private SunshineProcessWitness(SafeProcessHandle process, string executable, int pid, long creationTime)
+    { this.process = process; this.executable = executable; this.pid = pid; this.creationTime = creationTime; }
+    internal static SunshineProcessWitness Capture(string executable)
+    {
+        int pid = CurrentListener(); if (pid == 0) throw new IOException();
+        SafeProcessHandle handle = OpenProcess(0x00101000, false, (uint)pid); // SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        try
+        {
+            SunshineSetupPolicy.Require(handle != null && !handle.IsInvalid && WaitForSingleObject(handle, 0) == 258);
+            var image = new StringBuilder(32768); int length = image.Capacity;
+            SunshineSetupPolicy.Require(QueryFullProcessImageName(handle, 0, image, ref length) && length > 0 && length < image.Capacity);
+            SunshineSetupPolicy.Require(String.Equals(image.ToString(), executable, StringComparison.OrdinalIgnoreCase));
+            RequireSystemToken(handle);
+            long created, exited, kernel, user;
+            SunshineSetupPolicy.Require(GetProcessTimes(handle, out created, out exited, out kernel, out user) && created > 0);
+            // A PID can be recycled. Retain the exact kernel handle and ensure the
+            // listener still names its live process after image/creation checks.
+            SunshineSetupPolicy.Require(CurrentListener() == pid && WaitForSingleObject(handle, 0) == 258);
+            return new SunshineProcessWitness(handle, executable, pid, created);
+        }
+        catch { if (handle != null) handle.Dispose(); throw new SunshineSetupFailure(SunshineSetupPolicy.Manual); }
+    }
+    private static void RequireSystemToken(SafeProcessHandle process)
+    {
+        SafeFileHandle token;
+        bool opened = OpenProcessToken(process, 0x0008, out token); // TOKEN_QUERY, no impersonation or duplication.
+        using (token)
+        {
+            SunshineSetupPolicy.Require(opened && token != null && !token.IsInvalid);
+            int size;
+            bool probe = GetTokenInformation(token, 1, IntPtr.Zero, 0, out size); // TOKEN_USER
+            SunshineSetupPolicy.Require(!probe && Marshal.GetLastWin32Error() == 122 && size >= IntPtr.Size + 8 && size <= 4096);
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                int returned; SunshineSetupPolicy.Require(GetTokenInformation(token, 1, buffer, size, out returned) && returned >= IntPtr.Size + 8 && returned <= size);
+                IntPtr sid = Marshal.ReadIntPtr(buffer);
+                SunshineSetupPolicy.Require(sid.ToInt64() >= buffer.ToInt64() + IntPtr.Size && sid.ToInt64() <= buffer.ToInt64() + returned - 8);
+                SunshineSetupPolicy.Require(SunshineSetupPolicy.TrustedProcessSid(new SecurityIdentifier(sid).Value));
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+    }
+    private static int CurrentListener()
+    {
+        int size = 0;
+        SunshineSetupPolicy.Require(GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, 3, 0) == 122);
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            SunshineSetupPolicy.Require(size >= 4 && size <= 4194304); int allocated = size;
+            IntPtr buffer = Marshal.AllocHGlobal(allocated);
+            try
+            {
+                uint result = GetExtendedTcpTable(buffer, ref size, false, 2, 3, 0); // AF_INET, OWNER_PID_LISTENER
+                if (result == 122) continue;
+                SunshineSetupPolicy.Require(result == 0 && size >= 4 && size <= allocated);
+                var table = new byte[size]; Marshal.Copy(buffer, table, 0, table.Length);
+                return SunshineSetupPolicy.ListenerPid(table, true);
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+        throw new SunshineSetupFailure(SunshineSetupPolicy.Manual);
+    }
+    internal void VerifyCurrent()
+    { SunshineSetupPolicy.Require(WaitForSingleObject(process, 0) == 258 && CurrentListener() == pid && WaitForSingleObject(process, 0) == 258); }
+    public async Task WaitForExitAsync(CancellationToken cancellation)
+    {
+        for (;;)
+        {
+            cancellation.ThrowIfCancellationRequested(); uint result = WaitForSingleObject(process, 0);
+            if (result == 0) return;
+            SunshineSetupPolicy.Require(result == 258);
+            await Task.Delay(100, cancellation).ConfigureAwait(false);
+        }
+    }
+    public void VerifyReplacement(CancellationToken cancellation)
+    {
+        cancellation.ThrowIfCancellationRequested(); SunshineSetupPolicy.Require(WaitForSingleObject(process, 0) == 0);
+        using (var replacement = Capture(executable))
+            SunshineSetupPolicy.Require(replacement.pid != pid || replacement.creationTime != creationTime);
+        cancellation.ThrowIfCancellationRequested();
+    }
+    public void Dispose() { process.Dispose(); }
 }
 
 internal sealed class SunshineQuickSetupForm : Form
@@ -410,7 +605,9 @@ internal sealed class SunshineQuickSetupForm : Form
     internal SunshineQuickSetupForm()
     {
         Text = "Knot · 이 PC 연결 준비"; StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(620, 650); Size = MinimumSize;
-        Font = new Font("Segoe UI", 10); AutoScaleMode = AutoScaleMode.Dpi;
+        Font = new Font("Segoe UI", 10); AutoScaleDimensions = new SizeF(96F, 96F); AutoScaleMode = AutoScaleMode.Dpi;
+        username.AccessibleName = "Sunshine 사용자 이름"; password.AccessibleName = "Sunshine 비밀번호";
+        pin.AccessibleName = "Mac에 표시된 4자리 PIN"; pending.AccessibleName = "연결을 요청한 Mac 이름과 주소";
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 13, AutoScroll = true };
         Controls.Add(layout);
         layout.Controls.Add(new Label { Text = "이 PC를 Mac에서 열기", AutoSize = true, Font = new Font(Font.FontFamily, 18, FontStyle.Bold) });
@@ -424,7 +621,7 @@ internal sealed class SunshineQuickSetupForm : Form
         var requests = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pending.DropDownStyle = ComboBoxStyle.DropDownList; pending.Width = 380; refresh.Text = "요청 새로고침"; refresh.AutoSize = true; refresh.Enabled = false; requests.Controls.Add(pending); requests.Controls.Add(refresh); layout.Controls.Add(requests);
         var pairing = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "선택한 Mac 연결"; pair.AutoSize = true; pair.Enabled = false; pairing.Controls.Add(new Label { Text = "Mac의 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); layout.Controls.Add(pairing);
         var close = new Button { Text = "닫기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
-        Shown += async delegate { await WorkAsync(InitializeAsync); };
+        Shown += async delegate { ClampToWorkingArea(); await WorkAsync(InitializeAsync); };
         prepare.Click += async delegate { await WorkAsync(async delegate {
             string user = username.Text, secret = password.Text; pending.Items.Clear(); pending.SelectedIndex = -1; pin.Clear(); prepare.Enabled = false; status.Text = "보안 설정을 저장하고 확인하는 중…";
             try { await session.PrepareAsync(user, secret, api.VerifiedInstalledVersion, lifetime.Token); } finally { password.Clear(); secret = null; }
@@ -438,6 +635,13 @@ internal sealed class SunshineQuickSetupForm : Form
             try { await session.PairAsync(selected, selectedPin, lifetime.Token); pending.Items.Clear(); status.Text = "선택한 Mac의 PIN 연결이 완료되었습니다. Mac에서 화면을 열 수 있습니다."; }
             finally { pin.Clear(); selectedPin = null; } }); };
         FormClosing += delegate { closing = true; lifetime.Cancel(); password.Clear(); pin.Clear(); if (session != null) session.Clear(); };
+    }
+    private void ClampToWorkingArea()
+    {
+        Rectangle area = Screen.FromControl(this).WorkingArea;
+        MinimumSize = new Size(Math.Min(MinimumSize.Width, area.Width), Math.Min(MinimumSize.Height, area.Height));
+        Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+        Location = new Point(Math.Max(area.Left, Math.Min(Left, area.Right - Width)), Math.Max(area.Top, Math.Min(Top, area.Bottom - Height)));
     }
     private async Task InitializeAsync()
     {
@@ -460,8 +664,8 @@ internal sealed class SunshineQuickSetupForm : Form
                     catch (IOException)
                     {
                         if (api != null) api.Dispose(); api = null; session = null;
-                        await Task.Delay(500, startup.Token);
                     }
+                    await Task.Delay(500, startup.Token);
                 }
             }
             catch (OperationCanceledException) { lifetime.Token.ThrowIfCancellationRequested(); }
@@ -492,6 +696,12 @@ internal sealed class SunshineQuickSetupForm : Form
 internal static class SunshineQuickSetup
 {
     internal static int Run()
-    { using (var form = new SunshineQuickSetupForm()) { Application.Run(form); return form.Completed ? 0 : (form.HadFailure ? 2 : 1602); } }
+    {
+        // This helper runs in its own elevated broker process. Framework 4.8
+        // offers no per-request protocol selector; certificate pinning remains
+        // strictly per request and no global trust callback is installed.
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+        using (var form = new SunshineQuickSetupForm()) { Application.Run(form); return form.Completed ? 0 : (form.HadFailure ? 2 : 1602); }
+    }
 }
 #endif

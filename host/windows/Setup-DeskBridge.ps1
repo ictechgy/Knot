@@ -178,6 +178,7 @@ function Invoke-QuickSetup {
         $null=$process.Handle
         while (-not $process.HasExited) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
         $process.WaitForExit()
+        if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
         if ($process.ExitCode -eq 0) {
             $status.Text='간편 설정을 마쳤습니다. Mac에서 PC 확인 → PIN으로 연결을 시작하고 이 버튼을 다시 눌러 PIN을 승인할 수 있습니다. 화면 연결 성공 여부는 Mac에서 확인하세요.'
         } elseif ($process.ExitCode -eq 1602) {

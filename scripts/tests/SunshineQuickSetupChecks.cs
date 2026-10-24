@@ -11,15 +11,48 @@ public static class SunshineQuickSetupChecks
     private const string BasicConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\"}";
     private const string SecureConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\",\"lan_encryption_mode\":\"2\",\"wan_encryption_mode\":\"2\",\"upnp\":\"disabled\",\"origin_web_ui_allowed\":\"pc\"}";
     private const string Pairs = "{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"name\":\"Synthetic Mac\",\"address\":\"192.168.1.4\"}]}";
+    private sealed class Witness : ISunshineRestartWitness
+    {
+        internal bool Exited = true, Replacement = true, Waited, Verified, Disposed, Block;
+        internal System.Threading.CancellationTokenSource CancelOnWait;
+        public async System.Threading.Tasks.Task WaitForExitAsync(System.Threading.CancellationToken cancel)
+        {
+            Waited = true;
+            if (CancelOnWait != null) CancelOnWait.Cancel();
+            cancel.ThrowIfCancellationRequested();
+            if (Block) await System.Threading.Tasks.Task.Delay(System.Threading.Timeout.Infinite, cancel);
+            SunshineSetupPolicy.Require(Exited);
+        }
+        public void VerifyReplacement(System.Threading.CancellationToken cancel)
+        { cancel.ThrowIfCancellationRequested(); Verified = true; SunshineSetupPolicy.Require(Waited && Exited && Replacement); }
+        public void Dispose() { Disposed = true; }
+    }
+    private static byte[] Row(uint address, int port, uint pid, uint state = 2)
+    {
+        var row = new byte[24]; System.Buffer.BlockCopy(System.BitConverter.GetBytes(state), 0, row, 0, 4);
+        System.Buffer.BlockCopy(System.BitConverter.GetBytes(address), 0, row, 4, 4);
+        row[8] = (byte)(port >> 8); row[9] = (byte)port;
+        System.Buffer.BlockCopy(System.BitConverter.GetBytes(pid), 0, row, 20, 4); return row;
+    }
+    private static byte[] Table(params byte[][] rows)
+    {
+        var result = new byte[4 + rows.Length * 24]; System.Buffer.BlockCopy(System.BitConverter.GetBytes((uint)rows.Length), 0, result, 0, 4);
+        for (int i = 0; i < rows.Length; i++) System.Buffer.BlockCopy(rows[i], 0, result, 4 + i * 24, 24); return result;
+    }
     private sealed class Fake : ISunshineSetupApi
     {
         internal readonly System.Collections.Generic.Queue<SunshineApiReply> Replies = new System.Collections.Generic.Queue<SunshineApiReply>();
         internal readonly System.Collections.Generic.List<string> Paths = new System.Collections.Generic.List<string>();
         internal readonly System.Collections.Generic.List<string> Bodies = new System.Collections.Generic.List<string>();
         internal readonly System.Collections.Generic.List<string> Auth = new System.Collections.Generic.List<string>();
+        internal Witness Witness = new Witness(); internal bool Captured, BlockReadback;
+        private async System.Threading.Tasks.Task<SunshineApiReply> BlockAsync(System.Threading.CancellationToken cancel)
+        { await System.Threading.Tasks.Task.Delay(System.Threading.Timeout.Infinite, cancel); throw new System.Exception("Unreachable fixture path."); }
         internal Fake(params SunshineApiReply[] replies) { foreach (var reply in replies) Replies.Enqueue(reply); }
+        public ISunshineRestartWitness CaptureRestart(System.Threading.CancellationToken cancel)
+        { cancel.ThrowIfCancellationRequested(); Captured = true; return Witness; }
         public System.Threading.Tasks.Task<SunshineApiReply> SendAsync(string path, string body, string auth, System.Threading.CancellationToken cancel)
-        { cancel.ThrowIfCancellationRequested(); Paths.Add(path); Bodies.Add(body); Auth.Add(auth); return System.Threading.Tasks.Task.FromResult(Replies.Dequeue()); }
+        { cancel.ThrowIfCancellationRequested(); Paths.Add(path); Bodies.Add(body); Auth.Add(auth); if (Captured && Witness.Waited && path == "/api/config" && BlockReadback) return BlockAsync(cancel); if (path == "/api/restart") Check(Captured && !Witness.Waited); var reply = Replies.Dequeue(); if (reply == null) throw new System.IO.IOException(); return System.Threading.Tasks.Task.FromResult(reply); }
     }
     private static SunshineSetupSession Session(Fake fake)
     { return new SunshineSetupSession(fake, delegate(int ignored, System.Threading.CancellationToken cancel) { cancel.ThrowIfCancellationRequested(); return System.Threading.Tasks.Task.FromResult(0); }); }
@@ -29,6 +62,35 @@ public static class SunshineQuickSetupChecks
     public static string Run()
     {
         count = 0;
+        Check(SunshineSetupPolicy.TrustedProcessSid("S-1-5-18"));
+        Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-32-544"));
+        Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-21-1-2-3-1001"));
+        Check(!SunshineSetupPolicy.SafeKeyAclRule("S-1-5-32-545", 0x1, true, false));
+        Check(!SunshineSetupPolicy.SafeKeyAclRule("S-1-5-32-545", unchecked((int)0x80000000), true, false));
+        Check(SunshineSetupPolicy.SafeKeyAclRule("S-1-5-32-545", 0x20080, true, false));
+        Check(SunshineSetupPolicy.SafeKeyAclRule("S-1-3-0", 0x1f01ff, true, true));
+        Check(!SunshineSetupPolicy.SafeKeyAclRule("S-1-3-0", 0x1f01ff, true, false));
+        Check(SunshineSetupPolicy.SafeKeyAclRule("S-1-5-18", 0x1f01ff, true, false));
+        Check(SunshineSetupPolicy.TrustedSid("S-1-5-18"));
+        Check(!SunshineSetupPolicy.TrustedSid("S-1-3-0"));
+        Check(SunshineSetupPolicy.SafeAclRule("S-1-3-0", 0x1f01ff, true, true));
+        Check(!SunshineSetupPolicy.SafeAclRule("S-1-3-0", 0x1f01ff, true, false));
+        Check(!SunshineSetupPolicy.SafeAclRule("S-1-5-32-545", 0x116, true, false));
+        Check(!SunshineSetupPolicy.SafeAclRule("S-1-5-32-545", 0x40, true, false));
+        Check(SunshineSetupPolicy.SafeAclRule("S-1-5-32-545", 0x116, false, false));
+        Check(SunshineSetupPolicy.SafeAclRule("S-1-5-18", 0x1f01ff, true, false));
+        Check(SunshineSetupPolicy.SafeAclRule("S-1-5-32-545", 0x120089, true, false));
+        Check(SunshineSetupPolicy.ListenerPid(Table(), true) == 0);
+        Check(SunshineSetupPolicy.ListenerPid(Table(Row(0, 47990, 42))) == 42);
+        Check(SunshineSetupPolicy.ListenerPid(Table(Row(0x0100007f, 47990, 43), Row(0x0401a8c0, 47990, 99))) == 43);
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(Table(Row(0, 47990, 42), Row(0x0100007f, 47990, 43))); });
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(Table(Row(0x0401a8c0, 47990, 42))); });
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(Table(Row(0, 47989, 42))); });
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(Table(Row(0, 47990, 42, 5))); });
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(Table(Row(0, 47990, 0))); });
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(Table(Row(0, 47990, System.UInt32.MaxValue))); });
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(new byte[] { 1, 0, 0, 0 }); });
+        Reject(delegate { SunshineSetupPolicy.ListenerPid(new byte[] { 255, 255, 255, 255 }); });
         Check(SunshineSetupPolicy.Matches(new byte[] { 1, 2 }, new byte[] { 1, 2 }));
         Check(!SunshineSetupPolicy.Matches(new byte[] { 1, 2 }, new byte[] { 1, 3 }));
         Check(!SunshineSetupPolicy.Matches(new byte[] { 1 }, new byte[] { 1, 2 }));
@@ -78,6 +140,7 @@ public static class SunshineQuickSetupChecks
         var existing = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig), Reply(Success), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
         var session = Session(existing); Prepare(session);
         Check(session.Configured && existing.Paths.Count == 7);
+        Check(existing.Witness.Waited && existing.Witness.Verified && existing.Witness.Disposed);
         Check(existing.Paths[3] == "/api/config" && existing.Paths[5] == "/api/restart" && existing.Paths[6] == "/api/config");
         Check(existing.Bodies[3] == SunshineSetupJson.Write(desired));
         Check(existing.Auth[0] == null && existing.Auth[1] == SunshineSetupPolicy.Authorization("fixture", "synthetic-password-1234"));
@@ -104,6 +167,39 @@ public static class SunshineQuickSetupChecks
         var invalidPin = new Fake();
         Reject(delegate { Session(invalidPin).PairAsync(pairs[0], "1234", System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         Check(invalidPin.Paths.Count == 0);
+        foreach (int code in new int[] { 400, 401, 403, 500 })
+        {
+            var rejectedRestart = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), new SunshineApiReply(code, "{}"), Reply(SecureConfig));
+            var rejectedSession = Session(rejectedRestart); Reject(delegate { Prepare(rejectedSession); });
+            Check(!rejectedSession.Configured && rejectedRestart.Paths.Count == 3 && !rejectedRestart.Witness.Waited && rejectedRestart.Witness.Disposed);
+        }
+        var liveOld = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); liveOld.Witness.Exited = false;
+        var liveSession = Session(liveOld); Reject(delegate { Prepare(liveSession); });
+        Check(!liveSession.Configured && liveOld.Paths.Count == 3 && !liveOld.Witness.Verified && liveOld.Witness.Disposed);
+        var socketClosed = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), null, Reply(SecureConfig));
+        var socketSession = Session(socketClosed); Prepare(socketSession);
+        Check(socketSession.Configured && socketClosed.Witness.Verified && socketClosed.Witness.Disposed);
+        var changedImage = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); changedImage.Witness.Replacement = false;
+        var imageSession = Session(changedImage); Reject(delegate { Prepare(imageSession); });
+        Check(!imageSession.Configured && changedImage.Witness.Disposed);
+        using (var cancel = new System.Threading.CancellationTokenSource())
+        {
+            var interrupted = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); interrupted.Witness.CancelOnWait = cancel;
+            var interruptedSession = Session(interrupted); bool canceled = false;
+            try { interruptedSession.PrepareAsync("fixture", "synthetic-password-1234", false, cancel.Token).GetAwaiter().GetResult(); }
+            catch (System.OperationCanceledException) { canceled = true; }
+            Check(canceled && !interruptedSession.Configured && interrupted.Paths.Count == 3 && interrupted.Witness.Disposed);
+        }
+        var expires = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); expires.Witness.Block = true;
+        var expireSession = new SunshineSetupSession(expires, delegate(int ignored, System.Threading.CancellationToken token) { return System.Threading.Tasks.Task.FromResult(0); }, 10);
+        bool expired = false;
+        try { Prepare(expireSession); } catch (SunshineSetupFailure) { expired = true; }
+        Check(expired && !expireSession.Configured && expires.Paths.Count == 3 && expires.Witness.Disposed);
+        var readExpires = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}")); readExpires.BlockReadback = true;
+        var readExpireSession = new SunshineSetupSession(readExpires, delegate(int ignored, System.Threading.CancellationToken token) { return System.Threading.Tasks.Task.FromResult(0); }, 10);
+        bool readExpired = false;
+        try { Prepare(readExpireSession); } catch (SunshineSetupFailure) { readExpired = true; }
+        Check(readExpired && !readExpireSession.Configured && readExpires.Paths.Count == 4 && !readExpires.Witness.Verified && readExpires.Witness.Disposed);
         var changed = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig.Replace("80000", "70000")));
         Reject(delegate { Prepare(Session(changed)); }); Check(changed.Paths.Count == 3);
         var saveFailed = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig), Reply("{\"status\":false}"));

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # SPDX-License-Identifier: GPL-3.0-only
 # Execute the actual primary-action function with inert leaves. No GUI, sockets,
 # SCM, installer, administrator token or user preference is accessed.
@@ -40,14 +40,14 @@ function Start-Process {
     $process|Add-Member ScriptMethod WaitForExit {}
     return $process
 }
-foreach ($case in @('source','installed-ok','installed-cancel','installed-fail','custom-service','service-denied','custom-port','probe-unknown','fresh','fresh-fail')) {
+foreach ($case in @('source','installed-ok','installed-cancel','installed-fail','installed-missing','custom-service','service-denied','custom-port','probe-unknown','fresh','fresh-fail')) {
     $LauncherPath=if ($case -ceq 'source') {''} else {'/synthetic/Knot.exe'}
     $status=[pscustomobject]@{Text=''};$advancedPanel=[pscustomobject]@{Visible=$false}
     $script:busy=@();$script:starts=0;$script:installs=0;$script:failed=$false;$script:quickInstall=$false
     $script:installed=$case.StartsWith('installed')
     $script:service=if ($case -ceq 'custom-service') {'present'} elseif ($case -ceq 'service-denied') {'denied'} else {'missing'}
     $script:probe=if ($case -ceq 'probe-unknown') {$null} elseif ($case -ceq 'custom-port') {$true} else {$false}
-    $script:result=if ($case -ceq 'installed-cancel') {1602} elseif ($case -ceq 'installed-fail') {2} else {0}
+    $script:result=if ($case -ceq 'installed-missing') {$null} elseif ($case -ceq 'installed-cancel') {1602} elseif ($case -ceq 'installed-fail') {2} else {0}
     $script:installAction={
         Expect $script:quickInstall 'Fresh install must choose combined install/native setup'
         $script:installs++
@@ -69,6 +69,6 @@ foreach ($case in @('source','installed-ok','installed-cancel','installed-fail',
     }
     if ($case -ceq 'installed-cancel') {Expect ($status.Text -match '유지') 'Cancel must retain completed configuration, not promise rollback'}
     if ($case -ceq 'installed-ok') {Expect ($status.Text -match '성공 여부는 Mac') 'Configured host must not imply a working stream'}
-    if ($case -ceq 'service-denied' -or $case -ceq 'fresh-fail') {Expect $script:failed 'Failure must be sanitized and stop automatic installation'}
+    if ($case -ceq 'service-denied' -or $case -ceq 'fresh-fail' -or $case -ceq 'installed-missing') {Expect $script:failed 'Failure must be sanitized and stop automatic installation'}
 }
 @{status='passed';checks=$script:checks;actualPrimaryAction=$true;freshSyntheticOnly=$true;network=$false;serviceAccess=$false;gui=$false} | ConvertTo-Json -Compress

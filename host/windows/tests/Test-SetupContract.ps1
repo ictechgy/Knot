@@ -136,7 +136,7 @@ foreach ($negative in @('$form=New-Object Windows.Forms.Form',('# Assert-Desktop
 }
 Expect-SourceOrder $gui '$expected=Read-MacSetup $requestPath' '$process=Start-Process -FilePath $elevatedExecutable -Verb RunAs' 'Request captured before native broker elevation in source'
 Expect ($gui.Contains('$control -is [Windows.Forms.ComboBox]') -and $gui.Contains('$reply.address -cne $selectedAddress')) 'Busy controls and result comparison use the captured selection'
-Expect ([regex]::Matches($gui,'\$null=\$process\.Handle').Count -eq 2 -and [regex]::Matches($gui,'\$null -eq \$process\.ExitCode').Count -eq 2) 'Both child process paths cache handles and reject missing exit codes'
+Expect ([regex]::Matches($gui,'\$null=\$process\.Handle').Count -eq 3 -and [regex]::Matches($gui,'\$null -eq \$process\.ExitCode').Count -eq 3) 'All three child process paths cache handles and reject missing exit codes'
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
  $coreRejected=$false
  try { Initialize-ConnectionExportDirectory 'C:\SyntheticExportNeverCreated' }
