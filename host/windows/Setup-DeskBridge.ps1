@@ -243,7 +243,7 @@ $script:installAction={
         $process.WaitForExit()
         if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
         if ($script:quickInstall -and $process.ExitCode -in @(0,1602,2)) {
-            $status.Text=if ($process.ExitCode -eq 0) {'설치와 계정 확인을 마쳤습니다. PIN 승인에는 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 화면 전송 성공은 Mac에서 확인하세요.'} elseif ($process.ExitCode -eq 1602) {'간편 연결을 취소했습니다. 이미 완료된 설치·설정은 유지됩니다. 연결 준비로 다시 시작하세요.'} else {'간편 연결을 완료하지 못했습니다. 표시된 안내나 고급·수동 설정을 확인하세요. 완료된 설치와 기존 인증서는 유지됩니다.'}
+            $status.Text=if ($process.ExitCode -eq 0) {'설치와 계정 확인을 마쳤습니다. PIN 승인에는 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 화면 전송 성공은 Mac에서 확인하세요.'} elseif ($process.ExitCode -eq 1602) {'간편 연결을 취소했습니다. 이미 완료된 설치·설정은 유지됩니다. 연결 준비로 다시 시작하세요.'} else {'간편 연결을 완료하지 못했습니다. 표시된 안내나 고급·수동 설정을 확인하세요. 이미 완료된 단계와 기존 인증서는 유지됩니다.'}
             return
         }
         $result=Get-SunshineInstallResult -ExitCode $process.ExitCode -Broker:([bool]$LauncherPath)

@@ -85,10 +85,18 @@ internal static class SunshineSetupResourceFactory
     }
 }
 
+internal sealed class SunshinePendingLoad
+{
+    internal readonly List<SunshinePendingPair> Items; internal readonly string Failure;
+    internal bool Succeeded { get { return Failure == null; } }
+    internal SunshinePendingLoad(List<SunshinePendingPair> items, string failure = null) { Items = items; Failure = failure; }
+}
+
 internal static class SunshineSetupPolicy
 {
     internal const string Version = "2026.914.233613";
     internal const int MaximumBody = 262144;
+    internal const string ReapplyRecovery = "설정 저장 또는 재시작 확인을 마치지 못했습니다. 이 창의 '보안 설정 다시 적용 · 재시작'을 눌러 다시 확인하세요. 확인 전에는 PIN 승인을 준비하지 않습니다. 인증서는 교체하지 않습니다.";
     internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 고급 설정에서 Sunshine을 확인하세요.";
     internal static void Require(bool condition) { if (!condition) throw new SunshineSetupFailure(Manual); }
     internal static bool Matches(byte[] expected, byte[] actual)
@@ -136,8 +144,14 @@ internal static class SunshineSetupPolicy
     internal static string ReadyMessage(bool configured)
     {
         return configured ? "보안 설정 저장과 재시작을 확인했습니다. 이제 Mac에서 새 연결 요청을 시작하고 아래에서 PIN을 확인하세요."
-            : "계정 인증과 저장된 보안 설정을 확인했습니다. Sunshine을 재시작하지 않았으며 현재 적용 상태는 다시 확인하지 않았습니다. 요청한 Mac과 PIN을 확인하세요.";
+            : "계정 인증과 저장된 보안 설정을 확인했습니다. Sunshine을 재시작하지 않았으며 현재 적용 상태는 다시 확인하지 않았습니다. 요청한 Mac과 PIN을 확인하세요. 이전 준비가 실패했거나 중단되었다면 '보안 설정 다시 적용 · 재시작'을 먼저 사용하세요.";
     }
+    internal static string PendingFailure(bool security)
+    {
+        return security ? "요청 목록의 보안 확인에 실패했습니다. 준비 완료 상태는 유지됩니다. '요청 새로고침'으로 다시 확인하세요. 인증서를 교체하거나 검증을 생략하지 않습니다."
+            : "요청 목록을 불러오지 못했습니다. 준비 완료 상태는 유지됩니다. '요청 새로고침'으로 다시 확인하세요.";
+    }
+    internal static string PendingStatus(bool configured, string failure) { return ReadyMessage(configured) + Environment.NewLine + failure; }
     internal static bool CanPair(bool busy, bool pairingReady, bool selected) { return !busy && pairingReady && selected; }
     internal static bool IsWelcome(SunshineApiReply reply) { return reply.Status == 307 && reply.Location == "/welcome"; }
     internal static void ValidateCredentials(string username, string password, bool create)
@@ -323,6 +337,9 @@ internal static class SunshineSetupDispatch
 internal sealed class SunshineSetupSession
 {
     private readonly ISunshineSetupApi api; private readonly Func<int, CancellationToken, Task> delay; private readonly int restartTimeoutMilliseconds; private string authorization; internal bool Configured { get; private set; } internal bool PairingReady { get; private set; }
+    internal bool NeedsSecurityReapply { get; private set; }
+    private bool authenticated;
+    internal bool CanReapply { get { return authenticated && authorization != null && (PairingReady || NeedsSecurityReapply); } }
     internal SunshineSetupSession(ISunshineSetupApi api, Func<int, CancellationToken, Task> delay = null, int restartTimeoutMilliseconds = 45000)
     {
         SunshineSetupPolicy.Require(restartTimeoutMilliseconds > 0 && restartTimeoutMilliseconds <= 45000);
@@ -331,7 +348,7 @@ internal sealed class SunshineSetupSession
     internal Task<SunshineApiReply> ProbeAsync(CancellationToken cancel) { return api.SendAsync("/api/config", null, null, cancel); }
     internal async Task PrepareAsync(string username, string password, bool allowFirstAccount, CancellationToken cancel)
     {
-        Configured = false; PairingReady = false;
+        Configured = false; PairingReady = false; authenticated = false;
         authorization = null;
         SunshineApiReply probe = await ProbeAsync(cancel).ConfigureAwait(false);
         bool first = SunshineSetupPolicy.IsWelcome(probe);
@@ -342,20 +359,22 @@ internal sealed class SunshineSetupSession
             SunshineSetupPolicy.Require(allowFirstAccount);
             string body = SunshineSetupJson.Write(new Dictionary<string, object> { { "currentUsername", "" }, { "currentPassword", "" },
                 { "newUsername", username }, { "newPassword", password }, { "confirmNewPassword", password } });
+            NeedsSecurityReapply = true;
             SunshineSetupPolicy.Success(await api.SendAsync("/api/password", body, null, cancel).ConfigureAwait(false));
         }
         authorization = SunshineSetupPolicy.Authorization(username, password);
         var original = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
+        authenticated = true;
         // Reopening solely to approve a Mac must preserve its pending PIN
         // request. The saved configuration is checked; live application is not
         // re-verified or claimed in this authenticated pairing-only path.
-        if (!first && SunshineSetupPolicy.Equal(original, SunshineSetupPolicy.Secure(original)))
+        if (!first && !NeedsSecurityReapply && SunshineSetupPolicy.Equal(original, SunshineSetupPolicy.Secure(original)))
         { cancel.ThrowIfCancellationRequested(); PairingReady = true; return; }
         await ApplySecurityAsync(original, cancel).ConfigureAwait(false);
     }
     internal async Task ReapplySecurityAsync(CancellationToken cancel)
     {
-        SunshineSetupPolicy.Require(PairingReady && authorization != null);
+        SunshineSetupPolicy.Require(CanReapply);
         PairingReady = false; Configured = false;
         var original = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
         await ApplySecurityAsync(original, cancel).ConfigureAwait(false);
@@ -371,10 +390,12 @@ internal sealed class SunshineSetupSession
             // the UI also requires other editors closed. A final readback is mandatory.
             var latest = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
             SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(original, latest));
+            NeedsSecurityReapply = true;
             SunshineSetupPolicy.Success(await api.SendAsync("/api/config", SunshineSetupJson.Write(desired), authorization, cancel).ConfigureAwait(false));
             saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
             SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved));
         }
+        NeedsSecurityReapply = true;
         // GET config reads the saved file, not live settings. Success therefore
         // requires the exact pre-request process to exit, plus an authenticated
         // readback and a distinct, verified replacement listener after restart.
@@ -401,7 +422,7 @@ internal sealed class SunshineSetupSession
                         saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, deadline.Token).ConfigureAwait(false));
                         SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved));
                         witness.VerifyReplacement(deadline.Token);
-                        deadline.Token.ThrowIfCancellationRequested(); Configured = true; PairingReady = true; return;
+                        deadline.Token.ThrowIfCancellationRequested(); Configured = true; PairingReady = true; NeedsSecurityReapply = false; return;
                     }
                     catch (IOException) { }
                 }
@@ -409,13 +430,21 @@ internal sealed class SunshineSetupSession
         }
         }
         catch (OperationCanceledException)
-        { cancel.ThrowIfCancellationRequested(); throw new SunshineSetupFailure("Sunshine 재시작 확인 시간이 지났습니다. 빠른 설정을 다시 여세요. 인증서는 교체하지 않습니다."); }
-        throw new SunshineSetupFailure("Sunshine 재시작을 아직 확인하지 못했습니다. 잠시 뒤 빠른 설정을 다시 여세요. 인증서는 교체하지 않습니다.");
+        { cancel.ThrowIfCancellationRequested(); throw new SunshineSetupFailure("Sunshine 재시작 확인 시간이 지났습니다. 이 창의 '보안 설정 다시 적용 · 재시작'을 사용하세요. 인증서는 교체하지 않습니다."); }
+        throw new SunshineSetupFailure("Sunshine 재시작을 아직 확인하지 못했습니다. 이 창의 '보안 설정 다시 적용 · 재시작'을 사용하세요. 인증서는 교체하지 않습니다.");
     }
     internal async Task<List<SunshinePendingPair>> PendingAsync(CancellationToken cancel)
     {
         SunshineSetupPolicy.Require(PairingReady && authorization != null);
         return SunshineSetupPolicy.Pairings(await api.SendAsync("/api/pin", null, authorization, cancel).ConfigureAwait(false));
+    }
+    internal async Task<SunshinePendingLoad> LoadPendingAsync(CancellationToken cancel)
+    {
+        SunshineSetupPolicy.Require(PairingReady && authorization != null);
+        try { return new SunshinePendingLoad(await PendingAsync(cancel).ConfigureAwait(false)); }
+        catch (OperationCanceledException) { throw; }
+        catch (SunshineSetupFailure) { return new SunshinePendingLoad(new List<SunshinePendingPair>(), SunshineSetupPolicy.PendingFailure(true)); }
+        catch (Exception) { cancel.ThrowIfCancellationRequested(); return new SunshinePendingLoad(new List<SunshinePendingPair>(), SunshineSetupPolicy.PendingFailure(false)); }
     }
     internal async Task PairAsync(SunshinePendingPair selected, string pin, CancellationToken cancel)
     {
@@ -426,7 +455,7 @@ internal sealed class SunshineSetupSession
         SunshineSetupPolicy.Require(found);
         SunshineSetupPolicy.Success(await api.SendAsync("/api/pin", body, authorization, cancel).ConfigureAwait(false));
     }
-    internal void Clear() { authorization = null; Configured = false; PairingReady = false; }
+    internal void Clear() { authorization = null; authenticated = false; Configured = false; PairingReady = false; }
 }
 
 #if !KNOT_QUICKSETUP_POLICY_ONLY
@@ -741,13 +770,13 @@ internal sealed class SunshineQuickSetupForm : Form
             Completed = session.PairingReady; status.Text = SunshineSetupPolicy.ReadyMessage(session.Configured);
             await RefreshPendingAsync();
         }); };
-        refresh.Click += async delegate { await WorkAsync(async delegate { pending.Items.Clear(); pending.SelectedIndex = -1; await RefreshPendingAsync(); if (closing) return; status.Text = pending.Items.Count == 0 ? "아직 연결 요청이 없습니다. Mac에서 먼저 이 PC에 연결하세요." : "요청한 Mac을 직접 선택하고 Mac에 표시된 PIN을 입력하세요."; }); };
+        refresh.Click += async delegate { await WorkAsync(async delegate { pending.Items.Clear(); pending.SelectedIndex = -1; if (!await RefreshPendingAsync() || closing) return; status.Text = pending.Items.Count == 0 ? "아직 연결 요청이 없습니다. Mac에서 먼저 이 PC에 연결하세요." : "요청한 Mac을 직접 선택하고 Mac에 표시된 PIN을 입력하세요."; }); };
         pair.Click += async delegate { await WorkAsync(async delegate { var selected = pending.SelectedItem as SunshinePendingPair;
             string selectedPin = pin.Text;
             try { SunshineSetupSession active = session; await Task.Run(delegate { return active.PairAsync(selected, selectedPin, cancellation); }); if (closing) return; pending.Items.Clear(); status.Text = "선택한 Mac의 PIN 연결이 완료되었습니다. Mac에서 화면을 열 수 있습니다."; }
             finally { if (!closing) pin.Clear(); selectedPin = null; } }); };
         reapply.Click += async delegate {
-            if (busy || session == null || !session.PairingReady || session.Configured) return;
+            if (busy || session == null || !session.CanReapply || session.Configured) return;
             if (MessageBox.Show(this, "Mac에서 진행 중인 PIN 요청을 먼저 취소하세요. 계속하면 Sunshine을 재시작하여 현재 화면 연결과 대기 중인 PIN 요청이 끊깁니다. 완료 후 Mac에서 새 연결 요청을 시작하세요. 지금 보안 설정을 다시 적용할까요?", "Knot · 재시작 확인", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             await WorkAsync(async delegate {
                 Completed = false; pending.Items.Clear(); pending.SelectedIndex = -1; pin.Clear(); status.Text = "보안 설정을 다시 적용하고 재시작을 확인하는 중…";
@@ -757,12 +786,14 @@ internal sealed class SunshineQuickSetupForm : Form
         };
         FormClosing += delegate { closing = true; lifetime.Cancel(); password.Clear(); pin.Clear(); if (session != null) session.Clear(); };
     }
-    private async Task RefreshPendingAsync()
+    private async Task<bool> RefreshPendingAsync()
     {
         SunshineSetupSession active = session;
-        List<SunshinePendingPair> items = await Task.Run(delegate { return active.PendingAsync(cancellation); });
-        if (closing) return;
-        pending.Items.Clear(); foreach (var item in items) pending.Items.Add(item); pending.SelectedIndex = -1;
+        pending.Items.Clear(); pending.SelectedIndex = -1;
+        SunshinePendingLoad result = await Task.Run(delegate { return active.LoadPendingAsync(cancellation); });
+        if (closing) return false;
+        if (!result.Succeeded) { status.Text = SunshineSetupPolicy.PendingStatus(active.Configured, result.Failure); return false; }
+        foreach (var item in result.Items) pending.Items.Add(item); pending.SelectedIndex = -1; return true;
     }
     private void UpdatePairAvailability()
     {
@@ -823,8 +854,8 @@ internal sealed class SunshineQuickSetupForm : Form
         username.Enabled = false; password.Enabled = false; pending.Enabled = false; pin.Enabled = false;
         try { await action(); }
         catch (OperationCanceledException) { }
-        catch (SunshineSetupFailure error) { HadFailure = true; if (!closing) status.Text = error.Message; }
-        catch (Exception) { HadFailure = true; if (!closing) status.Text = SunshineSetupPolicy.Manual; }
+        catch (SunshineSetupFailure error) { HadFailure = true; if (!closing) status.Text = error.Message + (session != null && session.NeedsSecurityReapply ? Environment.NewLine + SunshineSetupPolicy.ReapplyRecovery : ""); }
+        catch (Exception) { HadFailure = true; if (!closing) status.Text = session != null && session.NeedsSecurityReapply ? SunshineSetupPolicy.ReapplyRecovery : SunshineSetupPolicy.Manual; }
         finally {
             busy = false;
             if (!closing) {
@@ -832,7 +863,7 @@ internal sealed class SunshineQuickSetupForm : Form
                 username.Enabled = session != null && !ready; password.Enabled = username.Enabled;
                 pending.Enabled = ready; pin.Enabled = ready;
                 prepare.Enabled = session != null && !ready; refresh.Enabled = ready; UpdatePairAvailability();
-                reapply.Visible = ready && !session.Configured; reapply.Enabled = reapply.Visible;
+                reapply.Visible = session != null && session.CanReapply && !session.Configured; reapply.Enabled = reapply.Visible;
             }
         }
     }

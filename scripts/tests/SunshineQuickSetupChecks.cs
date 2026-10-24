@@ -2,7 +2,7 @@
 // Fresh inert protocol fixtures only. No HTTP implementation, Forms, files or host APIs.
 public static class SunshineQuickSetupChecks
 {
-    private static int count;
+    private static int count, windowsAclChecks;
     private static void Check(bool value) { if (!value) throw new System.Exception("Quick setup fixture failed."); count++; }
     private static void Reject(System.Action action)
     { bool rejected = false; try { action(); } catch (SunshineSetupFailure) { rejected = true; } Check(rejected); }
@@ -11,6 +11,52 @@ public static class SunshineQuickSetupChecks
     private const string BasicConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\"}";
     private const string SecureConfig = "{\"status\":true,\"platform\":\"windows\",\"version\":\"2026.914.233613\",\"encoder\":\"nvenc\",\"bitrate\":\"80000\",\"lan_encryption_mode\":\"2\",\"wan_encryption_mode\":\"2\",\"upnp\":\"disabled\",\"origin_web_ui_allowed\":\"pc\"}";
     private const string Pairs = "{\"pairings\":[{\"id\":\"0123456789abcdef0123456789abcdef\",\"name\":\"Synthetic Mac\",\"address\":\"192.168.1.4\"}]}";
+    private static void CheckWindowsAclProjection()
+    {
+        // Managed security-descriptor values only. No path, file/key handle,
+        // GetSecurityInfo or OS ACL read/write participates in these fixtures.
+        if (System.Environment.OSVersion.Platform != System.PlatformID.Win32NT) return;
+        int before = count;
+        var system = new System.Security.Principal.SecurityIdentifier(new byte[] { 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0 }, 0);
+        var everyone = new System.Security.Principal.SecurityIdentifier(new byte[] { 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 }, 0);
+        // 0 absent DACL, 1 present NULL DACL, 2 empty deny-all DACL,
+        // 3 explicit Everyone FullControl, 4 explicit SYSTEM FullControl.
+        for (int mode = 0; mode < 5; mode++)
+        {
+            System.Security.AccessControl.RawAcl dacl = mode < 2 ? null : new System.Security.AccessControl.RawAcl(2, 1);
+            if (mode >= 3) dacl.InsertAce(0, new System.Security.AccessControl.CommonAce(System.Security.AccessControl.AceFlags.None,
+                System.Security.AccessControl.AceQualifier.AccessAllowed, 0x1f01ff, mode == 3 ? everyone : system, false, null));
+            var flags = mode == 0 ? System.Security.AccessControl.ControlFlags.None : System.Security.AccessControl.ControlFlags.DiscretionaryAclPresent;
+            var raw = new System.Security.AccessControl.RawSecurityDescriptor(flags, system, null, null, dacl);
+            var bytes = new byte[raw.BinaryLength]; raw.GetBinaryForm(bytes, 0);
+            var common = new System.Security.AccessControl.CommonSecurityDescriptor(false, false, bytes, 0);
+            Check(common.DiscretionaryAcl != null && (common.ControlFlags & System.Security.AccessControl.ControlFlags.DiscretionaryAclPresent) != 0);
+            Check(common.DiscretionaryAcl.Count == (mode == 2 ? 0 : 1));
+            if (mode < 2)
+            {
+                var ace = common.DiscretionaryAcl[0] as System.Security.AccessControl.CommonAce;
+                Check(ace != null && ace.SecurityIdentifier.Equals(everyone) && ace.AccessMask == -1);
+            }
+            foreach (var projected in new System.Security.AccessControl.FileSystemSecurity[] {
+                new System.Security.AccessControl.FileSecurity(), new System.Security.AccessControl.DirectorySecurity() })
+            {
+                projected.SetSecurityDescriptorBinaryForm(bytes, System.Security.AccessControl.AccessControlSections.Access | System.Security.AccessControl.AccessControlSections.Owner);
+                Check(SunshineSetupPolicy.TrustedSid(projected.GetOwner(typeof(System.Security.Principal.SecurityIdentifier)).Value));
+                var rules = projected.GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier));
+                Check(rules.Count == (mode == 2 ? 0 : 1)); bool safe = true, confidential = true;
+                foreach (System.Security.AccessControl.FileSystemAccessRule rule in rules)
+                {
+                    bool allow = rule.AccessControlType == System.Security.AccessControl.AccessControlType.Allow;
+                    bool inheritOnly = (rule.PropagationFlags & System.Security.AccessControl.PropagationFlags.InheritOnly) != 0;
+                    safe &= SunshineSetupPolicy.SafeAclRule(rule.IdentityReference.Value, (int)rule.FileSystemRights, allow, inheritOnly);
+                    confidential &= SunshineSetupPolicy.SafeKeyAclRule(rule.IdentityReference.Value, (int)rule.FileSystemRights, allow, inheritOnly);
+                    if (mode < 2) Check(rule.IdentityReference.Equals(everyone) && (int)rule.FileSystemRights == -1);
+                }
+                Check(safe == (mode == 2 || mode == 4) && confidential == (mode == 2 || mode == 4));
+            }
+        }
+        windowsAclChecks = count - before;
+    }
     private sealed class Resource : System.IDisposable
     {
         internal int Disposals;
@@ -184,7 +230,7 @@ public static class SunshineQuickSetupChecks
     public static void Main() { System.Console.WriteLine(Run()); }
     public static string Run()
     {
-        count = 0; CheckDispatch(); CheckOwnedFactory(); CheckIdempotentCleanup();
+        count = 0; windowsAclChecks = 0; CheckWindowsAclProjection(); CheckDispatch(); CheckOwnedFactory(); CheckIdempotentCleanup();
         Check(SunshineSetupPolicy.TrustedProcessSid("S-1-5-18"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-32-544"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-21-1-2-3-1001"));
@@ -313,6 +359,43 @@ public static class SunshineQuickSetupChecks
         Check(!unauthenticatedSession.PairingReady && !unauthenticatedSession.Configured && !unauthenticated.Captured);
         Reject(delegate { unauthenticatedSession.PendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         var neverSignedIn = Session(new Fake()); Reject(delegate { neverSignedIn.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
+        // A successful save followed by failure must never be mistaken for an
+        // already-applied configuration on a retry in this same session.
+        var partialRestart = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig), Reply(Success), Reply(SecureConfig), new SunshineApiReply(500, "{}"),
+            new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        var partialSession = Session(partialRestart); Reject(delegate { Prepare(partialSession); });
+        Check(partialSession.NeedsSecurityReapply && partialSession.CanReapply && !partialSession.PairingReady && !partialSession.Configured);
+        Check(partialRestart.Paths.Count == 6); partialRestart.Witness = new Witness(); Prepare(partialSession);
+        Check(partialSession.Configured && partialSession.PairingReady && !partialSession.NeedsSecurityReapply && partialRestart.Paths.Count == 10);
+        int configPosts = 0; for (int i = 0; i < partialRestart.Paths.Count; i++) if (partialRestart.Paths[i] == "/api/config" && partialRestart.Bodies[i] != null) configPosts++;
+        Check(configPosts == 1 && partialRestart.Paths[8] == "/api/restart");
+        var partialRead = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig), Reply(Success), new SunshineApiReply(500, "{}"),
+            new SunshineApiReply(401, ""), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        var partialReadSession = Session(partialRead); Reject(delegate { Prepare(partialReadSession); });
+        Check(partialReadSession.NeedsSecurityReapply && partialReadSession.CanReapply && !partialReadSession.PairingReady && !partialRead.Captured);
+        Prepare(partialReadSession); Check(partialReadSession.Configured && !partialReadSession.NeedsSecurityReapply && partialRead.Paths[7] == "/api/restart");
+        var explicitRecovery = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig), Reply(Success), new SunshineApiReply(500, "{}"),
+            Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        var recoverySession = Session(explicitRecovery); Reject(delegate { Prepare(recoverySession); });
+        Check(recoverySession.CanReapply && !recoverySession.PairingReady);
+        recoverySession.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(recoverySession.Configured && recoverySession.PairingReady && !recoverySession.NeedsSecurityReapply && explicitRecovery.Paths.Count == 8);
+        Check(explicitRecovery.Auth[5] == explicitRecovery.Auth[1]);
+        Check(SunshineSetupPolicy.ReapplyRecovery.Contains("보안 설정 다시 적용 · 재시작") && SunshineSetupPolicy.ReadyMessage(false).Contains("이전 준비가 실패했거나 중단"));
+        // List loading is a separate result. Its failure preserves completed
+        // preparation, reports trust errors explicitly and never selects a peer.
+        partialRestart.Replies.Enqueue(null);
+        SunshinePendingLoad load = partialSession.LoadPendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(!load.Succeeded && load.Items.Count == 0 && partialSession.PairingReady && partialSession.Configured);
+        Check(load.Failure.Contains("요청 새로고침") && SunshineSetupPolicy.PendingStatus(partialSession.Configured, load.Failure).StartsWith(SunshineSetupPolicy.ReadyMessage(true), System.StringComparison.Ordinal));
+        var listTrust = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), new SunshineApiReply(401, "{}"), Reply(Pairs));
+        var listSession = Session(listTrust); Prepare(listSession);
+        load = listSession.LoadPendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(!load.Succeeded && load.Items.Count == 0 && listSession.PairingReady && !listSession.Configured && !listTrust.Captured);
+        Check(load.Failure.Contains("보안 확인에 실패") && load.Failure.Contains("검증을 생략하지 않습니다"));
+        load = listSession.LoadPendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();
+        Check(load.Succeeded && load.Items.Count == 1 && listSession.PairingReady && !listTrust.Paths.Contains("/api/restart"));
+        var notReady = Session(new Fake()); Reject(delegate { notReady.LoadPendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         foreach (int code in new int[] { 400, 401, 403, 500 })
         {
             var rejectedRestart = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), Reply(SecureConfig), new SunshineApiReply(code, "{}"), Reply(SecureConfig));
@@ -353,6 +436,6 @@ public static class SunshineQuickSetupChecks
         Reject(delegate { Prepare(Session(saveFailed)); }); Check(!saveFailed.Paths.Contains("/api/restart"));
         var badReadback = new Fake(new SunshineApiReply(401, ""), Reply(BasicConfig), Reply(BasicConfig), Reply(Success), Reply(BasicConfig));
         Reject(delegate { Prepare(Session(badReadback)); }); Check(!badReadback.Paths.Contains("/api/restart"));
-        return "{\"status\":\"passed\",\"checks\":" + count.ToString(System.Globalization.CultureInfo.InvariantCulture) + ",\"freshSyntheticOnly\":true,\"nativeApisInvoked\":false}";
+        return "{\"status\":\"passed\",\"checks\":" + count.ToString(System.Globalization.CultureInfo.InvariantCulture) + ",\"freshSyntheticOnly\":true,\"nativeApisInvoked\":false,\"syntheticWindowsAclProjection\":" + (windowsAclChecks > 0 ? "true" : "false") + ",\"syntheticWindowsAclChecks\":" + windowsAclChecks.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}";
     }
 }
