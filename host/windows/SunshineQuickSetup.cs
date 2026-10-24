@@ -68,6 +68,11 @@ internal sealed class SunshineSetupOwnedResource<T> : IDisposable where T : clas
     }
     public void Dispose() { DisposeResource(); registration.Dispose(); }
 }
+internal static class SunshineSetupCleanup
+{
+    internal static void Once(ref int started, Action cleanup)
+    { if (Interlocked.Exchange(ref started, 1) == 0) cleanup(); }
+}
 internal static class SunshineSetupResourceFactory
 {
     internal static Task<SunshineSetupOwnedResource<T>> CreateAsync<T>(Func<T> factory, CancellationToken cancellation) where T : class, IDisposable
@@ -701,7 +706,7 @@ internal sealed class SunshineQuickSetupForm : Form
     private readonly ComboBox pending = new ComboBox(); private readonly TextBox status = new TextBox();
     private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
     private readonly CancellationToken cancellation;
-    private SunshinePinnedApi api; private SunshineSetupSession session; private bool closing, busy;
+    private SunshinePinnedApi api; private SunshineSetupSession session; private bool closing, busy; private int cleanupStarted;
     internal bool Completed { get; private set; }
     internal bool HadFailure { get; private set; }
     internal SunshineQuickSetupForm()
@@ -832,7 +837,15 @@ internal sealed class SunshineQuickSetupForm : Form
         }
     }
     protected override void Dispose(bool disposing)
-    { if (disposing) { lifetime.Cancel(); if (session != null) session.Clear(); if (api != null) api.Dispose(); lifetime.Dispose(); } base.Dispose(disposing); }
+    {
+        try
+        {
+            if (disposing) SunshineSetupCleanup.Once(ref cleanupStarted, delegate {
+                closing = true; lifetime.Cancel(); if (session != null) session.Clear(); if (api != null) api.Dispose(); lifetime.Dispose();
+            });
+        }
+        finally { base.Dispose(disposing); }
+    }
 }
 internal static class SunshineQuickSetup
 {

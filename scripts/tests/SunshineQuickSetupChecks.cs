@@ -16,6 +16,21 @@ public static class SunshineQuickSetupChecks
         internal int Disposals;
         public void Dispose() { System.Threading.Interlocked.Increment(ref Disposals); }
     }
+    private static void CheckIdempotentCleanup()
+    {
+        foreach (bool formClosing in new bool[] { true, false })
+        {
+            int started = 0, cleanupCalls = 0, cancellations = 0;
+            var cancellation = new System.Threading.CancellationTokenSource(); var resource = new Resource();
+            cancellation.Token.Register(delegate { System.Threading.Interlocked.Increment(ref cancellations); });
+            // Ordinary FormClosing cancels early; direct disposal has no such event.
+            if (formClosing) cancellation.Cancel();
+            System.Action cleanup = delegate { cleanupCalls++; cancellation.Cancel(); resource.Dispose(); cancellation.Dispose(); };
+            SunshineSetupCleanup.Once(ref started, cleanup); // WinForms Close/Dispose
+            SunshineSetupCleanup.Once(ref started, cleanup); // enclosing using/Dispose
+            Check(cleanupCalls == 1 && cancellations == 1 && resource.Disposals == 1);
+        }
+    }
     private static void CheckOwnedFactory()
     {
         using (var cancel = new System.Threading.CancellationTokenSource())
@@ -169,7 +184,7 @@ public static class SunshineQuickSetupChecks
     public static void Main() { System.Console.WriteLine(Run()); }
     public static string Run()
     {
-        count = 0; CheckDispatch(); CheckOwnedFactory();
+        count = 0; CheckDispatch(); CheckOwnedFactory(); CheckIdempotentCleanup();
         Check(SunshineSetupPolicy.TrustedProcessSid("S-1-5-18"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-32-544"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-21-1-2-3-1001"));
