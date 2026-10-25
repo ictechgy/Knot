@@ -151,5 +151,25 @@ func runDesktopRecoveryChecks() throws -> Int {
     release?.resume(); await cleanup.value
     guard completed == [0, 1, 2, 3] else { throw ModelCheckFailure(message: "parallel owner cleanup was skipped") }
     count += 2
+    let drain = DesktopTerminationDrain()
+    var busy = true, ready = 0, refused = 0
+    drain.begin(timeout: .seconds(1), poll: .milliseconds(1), protectedWork: { busy }, ready: { ready += 1 }, refused: { refused += 1 })
+    drain.begin(protectedWork: { false }, ready: { ready += 100 }, refused: { refused += 100 })
+    try await Task.sleep(for: .milliseconds(10))
+    guard drain.waiting && ready == 0 && refused == 0 else { throw ModelCheckFailure(message: "update interrupted protected work") }
+    busy = false
+    for _ in 0..<1000 where drain.waiting { try await Task.sleep(for: .milliseconds(1)) }
+    guard !drain.waiting && ready == 1 && refused == 0 else { throw ModelCheckFailure(message: "update did not drain exactly once") }
+    busy = true
+    drain.begin(timeout: .milliseconds(5), poll: .milliseconds(1), protectedWork: { busy }, ready: { ready += 1 }, refused: { refused += 1 })
+    for _ in 0..<1000 where drain.waiting { try await Task.sleep(for: .milliseconds(1)) }
+    guard !drain.waiting && ready == 1 && refused == 1 else { throw ModelCheckFailure(message: "busy update did not refuse at its deadline") }
+    busy = false
+    try await Task.sleep(for: .milliseconds(5))
+    guard ready == 1 else { throw ModelCheckFailure(message: "timed-out update quit later") }
+    drain.begin(poll: .milliseconds(1), protectedWork: { false }, ready: { ready += 1 }, refused: { refused += 1 })
+    for _ in 0..<1000 where drain.waiting { try await Task.sleep(for: .milliseconds(1)) }
+    guard ready == 2 && refused == 1 else { throw ModelCheckFailure(message: "update cannot retry after timeout") }
+    count += 5
     return count
 }

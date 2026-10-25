@@ -18,7 +18,7 @@ English · [한국어](README.ko.md)
 
 The app UI and most setup guides are currently in Korean.
 
-The source tree is **0.2.0-preview.22**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
+The source tree is **0.2.0-preview.23**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
 
 ## Supported connections
 
@@ -66,7 +66,7 @@ Follow the steps below to connect. **Screen access does not require SSH setup.**
 
 ### Open Windows from Mac
 
-**Current source-build Windows setup:** install and open **Knot**. Connection preparation begins automatically: Knot installs and starts the pinned Sunshine component, generates a fresh account, stores credentials using Windows DPAPI with administrator-only access, and applies required security settings. An existing Sunshine account needs one login, then is remembered. Keep the prepared window open, choose the requesting Mac and approve its PIN; the request list refreshes automatically. Sunshine remains a separately licensed service managed through Knot. Existing pairing is retained. Updates gracefully close owned Knot windows, migrate the old executable name to `Knot.exe`, and reopen the app; busy configuration or client sessions must finish first. Unsupported/custom installations use **고급·수동 설정**. The published preview.16 packages below retain their older manual flow.
+**Current source-build Windows setup:** install and open **Knot**. Connection preparation begins automatically: Knot installs and starts the pinned Sunshine component, generates a fresh account, stores credentials using Windows DPAPI with administrator-only access, and applies required security settings. An existing Sunshine account needs one login, then is remembered. Keep the prepared window open, choose the requesting Mac and approve its PIN; the request list refreshes automatically. Sunshine remains a separately licensed service managed through Knot. Existing pairing is retained. Updates gracefully close owned Knot windows, migrate the old executable name to `Knot.exe`, and reopen the app; active screen sessions close automatically; configuration work drains before replacement, with a bounded refusal if it cannot finish. Unsupported/custom installations use **고급·수동 설정**. The published preview.16 packages below retain their older manual flow.
 
 1. Install the Windows setup EXE, open **Knot 설정** from the Start menu and choose **이 Windows 공유** (share this Windows PC). Follow the Sunshine installation steps.
 2. In a **Windows browser**, open `https://localhost:47990` and create the Sunshine administrator account. Open **Configuration → Network** and set both LAN and WAN encryption modes to **Required for all clients** (**모든 사용자에게 필수** in Korean), then **Save → Apply**. Check that a Desktop app is available.
@@ -105,7 +105,9 @@ Recursive folders, resume, automatic synchronization and remote deletion are not
 
 Official Sunshine and Windows Moonlight packages are downloaded separately on explicit user action, with pinned size/hash checks. The initial download requires internet access. Unmodified Moonlight may also request compatibility, controller and update information. Knot adds no automatic clipboard synchronization. See [SECURITY.md](SECURITY.md) for protocol limits and validation scope.
 
-The native application updater uses pinned Sparkle/WinSparkle runtimes and requires signed update artifacts. It waits for screen, files, enrollment and sharing work to finish. Updates preserve pairing and SSH settings; changed host certificates still require explicit recovery. A short-lived, one-use receipt can reverify an existing PC after a newer build starts, without automatic PIN pairing or transfer resume. Portable Windows quick-setup builds require an installed version for automatic updates. See [publisher setup and limitations](docs/UPDATES.md).
+**Current source-build upgrades:** open **Install Knot.app** beside Knot.app in the Mac DMG, then choose **설치 및 다시 시작**. On Windows, run the new setup EXE normally. Both installers request a graceful quit, replace the app and reopen it automatically. Screen sessions disconnect; newer apps wait for transfers and setup work before quitting. For the first upgrade from preview.22 or older, finish transfers/setup first. A protected Mac installation is refused before quitting; an administrator must replace it.
+
+The native online updater uses pinned Sparkle/WinSparkle runtimes and requires signed update artifacts. The current publisher remains unconfigured. Updates preserve pairing and SSH settings; changed host certificates still require explicit recovery. A short-lived, one-use receipt can reverify an existing PC after a newer build starts, without automatic PIN pairing or transfer resume. Portable Windows quick-setup builds require an installed version for automatic updates. See [publisher setup and limitations](docs/UPDATES.md).
 
 ## Build from source
 

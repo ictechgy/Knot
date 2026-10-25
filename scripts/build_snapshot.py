@@ -13,7 +13,9 @@ REQUIRED_CHECK_STAGES = {"synthetic-checks", "synthetic-model-checks", "build-co
                          "rtsp-replay-checks", "inspect-app-entitlements", "inspect-dependencies",
                          "compile-host-supervisor", "sign-host-supervisor", "verify-host-supervisor",
                          "inspect-host-supervisor-entitlements", "inspect-host-supervisor-dependencies",
-                         "mac-host-lifetime-checks", "private-storage-checks", "update-policy-checks", "enrollment-protocol-checks"}
+                         "mac-host-lifetime-checks", "private-storage-checks", "update-policy-checks", "enrollment-protocol-checks",
+                         "mac-installer-checks", "compile-mac-installer", "sign-mac-installer", "verify-mac-installer",
+                         "inspect-mac-installer-entitlements", "inspect-mac-installer-dependencies"}
 
 
 def unchanged_supervisor_digest(supervisor, expected):
@@ -173,6 +175,8 @@ def validate_completed_build(root, build, require_release=False):
             raise BuildSnapshotError("Signed releases require an optimized release build")
         if completed.get("appManifest") != tree_snapshot(root / "dist/Knot.app"):
             raise BuildSnapshotError("App bundle changed after the successful build; rebuild")
+        if completed.get("installerManifest") != tree_snapshot(root / "dist/Install Knot.app"):
+            raise BuildSnapshotError("Local installer changed after the successful build; rebuild")
         if completed.get("hostSupervisor") != host_supervisor_snapshot(root / "dist/Knot.app"):
             raise BuildSnapshotError("Host supervisor differs from its checked build; rebuild")
         if lifetime_checks.get("testedSupervisorSHA256") != completed["hostSupervisor"]["sha256"]:

@@ -44,7 +44,7 @@ class WindowsPayloadCheckRecordTests(unittest.TestCase):
         source = {path: 'c' * 64 for path in (
             'packaging/windows/Launcher.cs', 'client/windows/Tests.cs', 'client/windows/EngineStore.cs',
             'scripts/tests/ReverseDiscoveryChecks.cs', 'client/windows/QrImageReader.cs',
-            'scripts/tests/test_reverse_qr.cs', 'scripts/tests/test_reverse_qr_windows.cs')}
+            'scripts/tests/test_reverse_qr.cs', 'scripts/tests/test_reverse_qr_windows.cs', 'host/windows/KnotUpdateForm.cs')}
         source.update({path: '8' * 64 for path in HEADLESS_SOURCE_PATHS})
         decoder = {'sha256': 'e' * 64, 'upstreamCommit': 'f' * 40, 'compilerExitCode': 0}
         self.build = {'sha256': 'a' * 64, 'managedSha256': 'b' * 64,
@@ -71,7 +71,7 @@ class WindowsPayloadCheckRecordTests(unittest.TestCase):
                            'windowsImageCodecRuntimeTested': False, 'compiledAssemblySha256': '1' * 64,
                            'runnerSha256': '2' * 64, 'qrDecoder': decoder,
                            'counts': {key: MINIMUM_WINDOWS_CHECKS[key] for key in ('reverse-client', 'reverse-discovery')},
-                           'sourceSha256': {path: digest for path, digest in source.items() if path.startswith('client/windows/') or path == 'scripts/tests/ReverseDiscoveryChecks.cs'},
+                           'sourceSha256': {path: digest for path, digest in source.items() if path.startswith('client/windows/') or path in ('scripts/tests/ReverseDiscoveryChecks.cs', 'host/windows/KnotUpdateForm.cs')},
                            'invocations': [{'label': label, 'exitCode': 0} for label in (
                                'compile-actual-reverse-client', 'restore-offline-runner', 'compile-offline-runner', 'execute-pure-reverse-checks')]},
                        'reverseQR': {'status': 'PASS', 'checks': 65, 'actualDecoder': True, 'freshSyntheticOnly': True,
@@ -181,6 +181,13 @@ class WindowsPayloadCheckRecordTests(unittest.TestCase):
         changed = copy.deepcopy(self.checks)
         del changed['reverseClient']['sourceSha256']['client/windows/EngineStore.cs']
         with self.assertRaises(ValueError): validate_windows_check_record(changed, self.build)
+
+    def test_shared_update_form_must_be_bound_to_reverse_checks(self):
+        for value in (None, 'd' * 64):
+            changed = copy.deepcopy(self.checks)
+            if value is None: del changed['reverseClient']['sourceSha256']['host/windows/KnotUpdateForm.cs']
+            else: changed['reverseClient']['sourceSha256']['host/windows/KnotUpdateForm.cs'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError): validate_windows_check_record(changed, self.build)
 
     def test_replaced_decoder_or_qr_fixture_is_rejected(self):
         for section, key in (('reverseClient', 'qrDecoder'), ('reverseQR', 'fixtureSha256'), ('reverseQRWindows', 'fixtureSha256')):
@@ -313,6 +320,9 @@ class BuildSnapshotTests(unittest.TestCase):
         self.supervisor.parent.mkdir()
         self.supervisor.write_bytes(struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + b"SYNTHETIC ONLY")
         self.supervisor.chmod(0o755)
+        installer = self.root / "dist/Install Knot.app/Contents/MacOS/KnotInstaller"
+        installer.parent.mkdir(parents=True); installer.write_bytes(b"SYNTHETIC LOCAL INSTALLER")
+        installer.chmod(0o755)
         self.build = self.root / "evidence/synthetic-build"
         self.build.mkdir(parents=True)
         self.snapshot_now()
@@ -331,7 +341,8 @@ class BuildSnapshotTests(unittest.TestCase):
                 "unrestrictedChildModeRefused", "wrapperAndProfileUnavailableRefused")}}))
         self.record = {"schema": 1, "configuration": "release", "checksPassed": True,
                        "appManifest": tree_snapshot(self.root / "dist/Knot.app"),
-                       "hostSupervisor": host_supervisor_snapshot(self.root / "dist/Knot.app")}
+                       "hostSupervisor": host_supervisor_snapshot(self.root / "dist/Knot.app"),
+                       "installerManifest": tree_snapshot(self.root / "dist/Install Knot.app")}
         self.write_record()
 
     def write_record(self):
@@ -405,6 +416,17 @@ class BuildSnapshotTests(unittest.TestCase):
     def test_replaced_binary_is_rejected(self):
         self.app.write_bytes(b"another executable")
         with self.assertRaisesRegex(BuildSnapshotError, "App bundle changed"): self.validate()
+
+    def test_local_installer_is_required_and_immutable(self):
+        installer = self.root / "dist/Install Knot.app/Contents/MacOS/KnotInstaller"
+        installer.write_bytes(b"REPLACED SYNTHETIC INSTALLER")
+        with self.assertRaisesRegex(BuildSnapshotError, "Local installer changed"): self.validate()
+        installer.unlink()
+        with self.assertRaises(BuildSnapshotError): self.validate()
+
+    def test_local_installer_proof_cannot_be_omitted(self):
+        del self.record["installerManifest"]; self.write_record()
+        with self.assertRaisesRegex(BuildSnapshotError, "Local installer changed"): self.validate()
 
     def test_extra_bundle_file_is_rejected(self):
         (self.app.parent / "Unexpected").write_bytes(b"extra payload")

@@ -12,6 +12,9 @@ Import-Module (Join-Path $PSScriptRoot 'SetupReadiness.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Enrollment.psm1') -Force
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+if (-not ('KnotUpdateForm' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'KnotUpdateForm.cs') -ReferencedAssemblies System.dll,System.Windows.Forms.dll,System.Drawing.dll
+}
 [Windows.Forms.Application]::EnableVisualStyles()
 try { Assert-DesktopSetupToken } catch {
     [Windows.Forms.MessageBox]::Show((Get-SetupFailureText $_ -Context 'ElevatedToken'),'Knot','OK','Error') | Out-Null
@@ -21,7 +24,7 @@ if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -
     [Windows.Forms.MessageBox]::Show('이 프리뷰는 Windows 11 x64에서 사용할 수 있습니다. PC의 Windows 버전과 시스템 종류를 확인하세요.','Knot','OK','Error') | Out-Null
     exit 3
 }
-$form = New-Object Windows.Forms.Form
+$form = New-Object KnotUpdateForm
 $form.Text = 'Knot · Windows 연결'; $form.Size = New-Object Drawing.Size(780,760)
 $form.MinimumSize = New-Object Drawing.Size(640,480); $form.StartPosition = 'CenterScreen'
 $form.AutoScaleDimensions=New-Object Drawing.SizeF(96,96); $form.AutoScaleMode='Dpi'
@@ -81,16 +84,25 @@ function Get-SetupControls($Root) {
     foreach ($control in $Root.Controls) { $control; Get-SetupControls $control }
 }
 $script:setupBusyDepth=0
+function Update-BusyControls {
+    $effectiveBusy=$script:setupBusyDepth -gt 0
+    foreach ($control in (Get-SetupControls $flow)) {
+        if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.ComboBox]) { $control.Enabled = -not ($effectiveBusy -or $form.UpdateCloseRequested) }
+    }
+    $form.UseWaitCursor=$effectiveBusy
+    $form.UpdateWorkDidFinish()
+}
+$form.UpdateProtectedWork=[Func[bool]]{ $script:setupBusyDepth -gt 0 }
+$form.Add_UpdateCloseStateChanged({
+    if ($form.UpdateCloseRequested) { $status.Text='진행 중인 설정을 마치면 Knot을 자동으로 업데이트하고 다시 엽니다.' }
+    Update-BusyControls
+})
 function Set-Busy([bool] $Busy) {
     # Installation can run its bounded local check before download cleanup.
     # Keep the outer operation's controls locked until its own finally exits.
     if ($Busy) { $script:setupBusyDepth++ }
     else { $script:setupBusyDepth=[Math]::Max(0,$script:setupBusyDepth-1) }
-    $effectiveBusy=$script:setupBusyDepth -gt 0
-    foreach ($control in (Get-SetupControls $flow)) {
-        if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.ComboBox]) { $control.Enabled = -not $effectiveBusy }
-    }
-    $form.UseWaitCursor=$effectiveBusy
+    Update-BusyControls
 }
 function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('Status','Settings','PIN','Encryption')][string] $Open='Status') {
     Set-Busy $true; $probe=$null; $script:quickSetupPortResponded=$null

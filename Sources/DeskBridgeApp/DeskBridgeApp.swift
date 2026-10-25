@@ -28,11 +28,13 @@ struct DeskBridgeApp: App {
         Window("Knot", id: "main") {
             MainView(linux: linux).environmentObject(desktop).environmentObject(files).environmentObject(macHost)
                 .frame(minWidth: 880, minHeight: 620)
+                .disabled(lifecycle.preparingToTerminate)
         }.defaultSize(width: 1200, height: 760)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appInfo) {
                 Button("업데이트 확인…") { KnotUpdates.shared.checkForUpdates() }
+                    .disabled(lifecycle.preparingToTerminate)
                 Button("오픈소스 라이선스") {
                     openCredits("LICENSE", extension: "txt")
                 }
@@ -54,8 +56,10 @@ struct DeskBridgeApp: App {
     }
 }
 @MainActor
-final class AppLifecycle: NSObject, NSApplicationDelegate {
+final class AppLifecycle: NSObject, NSApplicationDelegate, ObservableObject {
     private let termination = DesktopTermination()
+    private let drain = DesktopTerminationDrain()
+    @Published private(set) var preparingToTerminate = false
     private var terminating = false
     private var updateObservers: Set<AnyCancellable> = []
     static weak var desktop: DesktopModel?
@@ -75,7 +79,7 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
     private func configureUpdates() {
         let updates = KnotUpdates.shared
         updates.isIdle = { [weak self] in
-            guard self?.terminating == false,
+            guard self?.terminating == false, self?.preparingToTerminate == false,
                   let desktop = Self.desktop, let linux = Self.linuxDesktop,
                   let files = Self.files, let host = Self.macHost else { return false }
             return !desktop.busy && !desktop.stream.isEngaged && !linux.busy && !linux.stream.isEngaged
@@ -106,6 +110,23 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if termination.finished { return .terminateNow }
+        guard !preparingToTerminate else { return .terminateLater }
+        preparingToTerminate = true
+        drain.begin(protectedWork: {
+            Self.desktop?.busy == true || Self.linuxDesktop?.busy == true ||
+            Self.files?.busy == true || Self.files?.enrollmentActive == true ||
+            Self.macHost?.downloading == true || Self.macHost?.busy == true
+        }, ready: { [weak self] in
+            guard let self else { sender.reply(toApplicationShouldTerminate: false); return }
+            KnotUpdates.shared.prepareForRelaunch()
+            self.finishTermination(sender)
+        }, refused: { [weak self] in
+            self?.preparingToTerminate = false
+            sender.reply(toApplicationShouldTerminate: false)
+        })
+        return .terminateLater
+    }
+    private func finishTermination(_ sender: NSApplication) {
         terminating = true
         termination.begin(revoke: {
             Self.desktop?.beginShutdown()
@@ -120,6 +141,5 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
                 { await Self.macHost?.shutdown() }
             ])
         }, reply: { sender.reply(toApplicationShouldTerminate: true) })
-        return .terminateLater
     }
 }

@@ -8,10 +8,20 @@ The public publisher configuration in `packaging/updates/publisher.json` is inte
 
 Unsigned Mac preview builds keep automatic updating disabled even if a future publisher configuration exists. They do not disable hardened-runtime Library Validation to load an updater. The configured updater is linked only by a Developer ID build. On Windows, a portable quick-setup EXE directs users to the installed version instead of installing somewhere else and reopening an obsolete portable copy.
 
-## Update behavior
+## Local installer updates in preview.23
+
+The all-null publisher does not prevent a user-initiated local upgrade. Open **Install Knot.app** beside Knot.app in the downloaded Mac DMG, or run the new Windows setup EXE normally. The installer requests a graceful close, replaces the application and reopens it automatically. It does not force-kill processes or change pairing, keys, certificates, Sunshine accounts or file sharing.
+
+The Mac helper validates the payload and destination, stages a verified newer app before requesting quit, locks the destination directory, and uses an atomic bundle exchange. A signed app requires the same Apple signing team; an ad-hoc preview checks local integrity only, not publisher authenticity. It selects the exact running copy, or a single known installed copy, and refuses ambiguous copies or redirected paths. A protected existing location is refused before quit; administrator replacement is required. It never silently creates a second user-local copy beside a protected installation. A launch failure rolls back an existing installation. It waits up to 140 seconds; preview.23 apps allow protected transfers/enrollment/setup to drain for up to 120 seconds before normal bounded teardown. Finish transfers/setup yourself once when upgrading preview.22 or older; an older binary cannot acquire the new drain barrier from the installer.
+
+Windows uses an owner-scoped close request: new forms block new actions and drain setup work; the remote client closes its own contained engine. The bridge retains process identities and observes unsupported descendants without signaling them. Legacy owners get a 15-second budget; an acknowledged new owner gets at most 180 seconds. Failure cancels only that request and leaves the installation unchanged. The manual Inno installer owns relaunch; `/KNOTUPDATERHANDOFF=1` suppresses that relaunch for the verified online handoff, which already owns a single non-elevated restart. UAC is still required for Windows installation; launch the installer normally so Inno retains the original user token.
+
+The synthetic tests exercise real ad-hoc bundle validation, staging, replacement/rollback and protected-work drain on macOS; fresh owned WinForms fixtures test delayed closure, observer-only descendants, per-owner deadlines and request cancellation on Windows. They do not execute the production installer or establish signed online-upgrade acceptance.
+
+## Online update behavior
 
 - Mac: **Knot → 업데이트 확인** invokes Sparkle's native UI. Configured releases check automatically; installation is explicit. Screen sessions, file transfers, Mac sharing, enrollment and setup work must finish before an update relaunch. A pending installation blocks new work while allowing disconnect and cleanup.
-- Windows: the role chooser shows update status and an **업데이트 확인** action. Checks run while the installed helper is open and idle; there is no background update service when Knot is closed. Choosing a sharing/client operation atomically makes the helper busy. A pending installer atomically prevents a new operation.
+- Windows: the role chooser shows update status and an **업데이트 확인** action. Checks run while the installed helper is open; there is no background update service when Knot is closed. A verified pending installer atomically prevents a new operation and asks the owned UI to drain and close, including an active client session.
 - Windows installation admission binds the actual bootstrap image to the stable Inno registration under HKLM's 64-bit view. A custom previously registered installation directory remains supported. No auto-update is started by an elevated setup broker.
 - Windows uses a dedicated, non-elevated handoff. It inherits an allowlisted handle to the exact native parent process, waits for that process to exit and release its image/path locks, then requests the ordinary installer authorization. It never uninstalls first. The stable Inno AppId is retained.
 

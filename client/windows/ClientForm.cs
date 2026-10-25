@@ -8,7 +8,7 @@ using System.Windows.Forms;
 
 namespace DeskBridge.Reverse
 {
-    internal sealed class ClientForm : Form
+    internal sealed class ClientForm : KnotUpdateForm
     {
         private readonly EngineStore store;
         private readonly HostPlatform platform;
@@ -59,6 +59,7 @@ namespace DeskBridge.Reverse
                 UpdateWrapping();
             };
             FormClosing += OnClosing;
+            UpdateCloseStateChanged += delegate { UpdateControls(); };
             UpdateControls();
         }
 
@@ -129,7 +130,7 @@ namespace DeskBridge.Reverse
             Add(Description("4K 원본 화질에는 호스트의 4K 캡처·인코딩과 이 PC의 4K 디코딩 지원이 필요합니다. 높은 해상도·전송률은 네트워크 부하를 늘립니다. 호스트 디스플레이 설정은 자동으로 바꾸지 않습니다."));
             macCommandKeys.Text = HostText(ClientMessage.CommandOption);
             macCommandKeys.Visible = platform == HostPlatform.Mac; macCommandKeys.AutoSize = true; changing.Add(macCommandKeys); Add(macCommandKeys);
-            fullscreen.CheckedChanged += delegate { if (!fullscreen.Checked) macCommandKeys.Checked = false; macCommandKeys.Enabled = !busy && !closing && fullscreen.Checked && platform == HostPlatform.Mac; };
+            fullscreen.CheckedChanged += delegate { if (!fullscreen.Checked) macCommandKeys.Checked = false; macCommandKeys.Enabled = !busy && !closing && !UpdateCloseRequested && fullscreen.Checked && platform == HostPlatform.Mac; };
             var streamActions = Row(); connect.Text = HostText(ClientMessage.StreamButton); connect.AutoSize = true; connect.Click += async delegate { await LaunchAsync(false); }; streamActions.Controls.Add(connect); Add(streamActions);
             Add(Description(HostText(ClientMessage.Keyboard)));
             Add(Description(HostText(ClientMessage.Shortcuts)));
@@ -325,7 +326,7 @@ namespace DeskBridge.Reverse
         }
 
         private bool Begin(string message)
-        { if (busy || closing) return false; busy = true; operation = new CancellationTokenSource(); SetStatus(message); UpdateControls(); return true; }
+        { if (busy || closing || UpdateCloseRequested) return false; busy = true; operation = new CancellationTokenSource(); SetStatus(message); UpdateControls(); return true; }
         private void End()
         {
             if (operation != null) { operation.Dispose(); operation = null; }
@@ -352,11 +353,11 @@ namespace DeskBridge.Reverse
         private void UpdateControls()
         {
             if (IsDisposed || Disposing) return;
-            foreach (Control control in changing) control.Enabled = !busy && !closing;
+            foreach (Control control in changing) control.Enabled = !busy && !closing && !UpdateCloseRequested;
             if (platform != HostPlatform.Mac) macCommandKeys.Checked = false;
-            macCommandKeys.Enabled = !busy && !closing && fullscreen.Checked && platform == HostPlatform.Mac;
-            install.Enabled = !busy && !closing; install.Text = store.Installed ? "화면 엔진 파일 다시 확인" : "화면 엔진 받기";
-            pair.Enabled = connect.Enabled = !busy && !closing && store.Installed && selectedAddress != null;
+            macCommandKeys.Enabled = !busy && !closing && !UpdateCloseRequested && fullscreen.Checked && platform == HostPlatform.Mac;
+            install.Enabled = !busy && !closing && !UpdateCloseRequested; install.Text = store.Installed ? "화면 엔진 파일 다시 확인" : "화면 엔진 받기";
+            pair.Enabled = connect.Enabled = !busy && !closing && !UpdateCloseRequested && store.Installed && selectedAddress != null;
             cancel.Enabled = busy && !closing; cancel.Visible = busy;
             cancel.Text = qrReading ? "QR 결과 사용 취소" : "작업 취소";
         }
