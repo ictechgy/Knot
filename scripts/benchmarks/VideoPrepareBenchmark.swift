@@ -181,7 +181,7 @@ private func correctness(_ baseline: BaselineVideoDecoder, _ candidate: Candidat
         [99, 0, 0, 1, 1, 2], [0, 0, 0, 0, 1, 5, 0, 0], [0, 0, 1, 5, 0, 0, 0, 0, 1, 6],
         [0, 0, 1, 9, 0, 0, 1, 6, 0, 0, 0, 1, 7, 1, 0, 0, 1, 8, 1, 0, 0, 1, 5, 1]]
     var random = PRNG()
-    var fuzz = malformed.map(Data.init)
+    var fuzz = malformed.map { Data($0) }
     for index in 0..<1500 {
         let count = Int(random.next() % 193)
         var bytes = (0..<count).map { _ in UInt8(random.next() % (index % 2 == 0 ? 4 : 256)) }
