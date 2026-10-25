@@ -15,7 +15,7 @@ function Test-ElevationGuardOrder([string] $Source) {
  $tokens=$null; $errors=$null
  $ast=[Management.Automation.Language.Parser]::ParseInput($Source,[ref]$tokens,[ref]$errors)
  $guards=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Assert-DesktopSetupToken'},$true))
- $forms=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'New-Object' -and $node.CommandElements.Count -gt 1 -and $node.CommandElements[1].Extent.Text -eq 'Windows.Forms.Form'},$true))
+ $forms=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'New-Object' -and $node.CommandElements.Count -gt 1 -and $node.CommandElements[1].Extent.Text -in @('Windows.Forms.Form','KnotUpdateForm')},$true))
  return $errors.Count -eq 0 -and $guards.Count -eq 1 -and $forms.Count -eq 1 -and $guards[0].Extent.StartOffset -lt $forms[0].Extent.StartOffset
 }
 $prefix=[byte[]](0,0,0,11,115,115,104,45,101,100,50,53,53,49,57,0,0,0,32)
@@ -130,9 +130,12 @@ Expect-SourceOrder $resumeSource 'Set-Service -Name sshd -StartupType $record.St
 Expect-SourceOrder $resumeSource 'Set-ManagedConfigAcl $config' '& $sshd -t' 'Restored config protection precedes server validation in source'
 $gui=[IO.File]::ReadAllText((Join-Path $root 'Setup-DeskBridge.ps1'))
 Expect (Test-ElevationGuardOrder $gui) 'Actual elevation guard command precedes the form creation command'
-Expect (Test-ElevationGuardOrder ('Assert-DesktopSetupToken' + "`n" + '$form=New-Object Windows.Forms.Form')) 'Positive synthetic guard-order parser fixture'
-foreach ($negative in @('$form=New-Object Windows.Forms.Form',('# Assert-DesktopSetupToken' + "`n" + '$form=New-Object Windows.Forms.Form'),('$form=New-Object Windows.Forms.Form' + "`n" + 'Assert-DesktopSetupToken'))) {
- Expect (-not (Test-ElevationGuardOrder $negative)) 'Missing, commented or late elevation guard rejected by parser fixture'
+foreach ($formType in @('Windows.Forms.Form','KnotUpdateForm')) {
+ $create='$form=New-Object '+$formType
+ Expect (Test-ElevationGuardOrder ('Assert-DesktopSetupToken' + "`n" + $create)) 'Positive synthetic guard-order parser fixture'
+ foreach ($negative in @($create,('# Assert-DesktopSetupToken' + "`n" + $create),($create + "`n" + 'Assert-DesktopSetupToken'))) {
+  Expect (-not (Test-ElevationGuardOrder $negative)) 'Missing, commented or late elevation guard rejected by parser fixture'
+ }
 }
 Expect-SourceOrder $gui '$expected=Read-MacSetup $requestPath' '$process=Start-Process -FilePath $elevatedExecutable -Verb RunAs' 'Request captured before native broker elevation in source'
 Expect ($gui.Contains('$control -is [Windows.Forms.ComboBox]') -and $gui.Contains('$reply.address -cne $selectedAddress')) 'Busy controls and result comparison use the captured selection'
