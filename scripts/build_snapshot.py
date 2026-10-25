@@ -88,10 +88,13 @@ def tree_snapshot(root):
             # Sparkle's versioned framework requires these exact, pinned links.
             # No other application symlink is admitted or followed.
             from update_runtime import sparkle_links
-            expected = {"Contents/Frameworks/" + name: target for name, target in sparkle_links(Path(__file__).resolve().parent.parent).items()}
+            links = sparkle_links(Path(__file__).resolve().parent.parent)
+            prefixes = ("Contents/Frameworks/", "Contents/Helpers/Knot.app/Contents/Frameworks/")
+            expected = {prefix + name: target for prefix in prefixes for name, target in links.items()}
             relative = path.relative_to(root).as_posix()
             target = os.readlink(path)
-            framework = (root / "Contents/Frameworks/Sparkle.framework").resolve()
+            prefix = prefixes[1] if relative.startswith(prefixes[1]) else prefixes[0]
+            framework = (root / (prefix + "Sparkle.framework")).resolve()
             if expected.get(relative) != target or not path.resolve().is_relative_to(framework):
                 raise BuildSnapshotError("Unexpected app bundle symlink")
             result[relative] = {"sha256": hashlib.sha256(target.encode()).hexdigest(), "mode": 0o777, "symlink": target}
@@ -181,6 +184,8 @@ def validate_completed_build(root, build, require_release=False):
             raise BuildSnapshotError("Host supervisor differs from its checked build; rebuild")
         if lifetime_checks.get("testedSupervisorSHA256") != completed["hostSupervisor"]["sha256"]:
             raise BuildSnapshotError("Host supervisor lifetime proof belongs to a different helper; rebuild")
+        if tree_snapshot(root / "dist/Install Knot.app/Contents/Helpers/Knot.app") != completed["appManifest"]:
+            raise BuildSnapshotError("Local installer payload differs from the tested app; rebuild")
         return completed, checks
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise BuildSnapshotError("Incomplete or invalid build evidence; rebuild") from error

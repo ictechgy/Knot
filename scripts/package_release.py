@@ -151,6 +151,9 @@ with tempfile.TemporaryDirectory(prefix="deskbridge-package-") as temporary:
         run("notarize-app", ["/usr/bin/xcrun", "notarytool", "submit", str(notarize_zip), "--keychain-profile", args.notary_profile, "--wait"])
         run("staple-app", ["/usr/bin/xcrun", "stapler", "staple", str(app)])
         run("validate-app-ticket", ["/usr/bin/xcrun", "stapler", "validate", str(app)])
+        embedded_payload = installer / "Contents/Helpers/Knot.app"
+        shutil.rmtree(embedded_payload)
+        shutil.copytree(app, embedded_payload, symlinks=True)
         run("sign-local-installer-release", ["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", args.identity, str(installer)])
         installer_zip = Path(temporary) / "notarize-installer.zip"
         run("notary-installer-zip", ["/usr/bin/ditto", "-c", "-k", "--keepParent", str(installer), str(installer_zip)])
@@ -158,6 +161,8 @@ with tempfile.TemporaryDirectory(prefix="deskbridge-package-") as temporary:
         run("staple-local-installer", ["/usr/bin/xcrun", "stapler", "staple", str(installer)])
         run("validate-local-installer-ticket", ["/usr/bin/xcrun", "stapler", "validate", str(installer)])
     run("verify-staged-local-installer", ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(installer)])
+    if tree_snapshot(installer / "Contents/Helpers/Knot.app") != tree_snapshot(app):
+        raise SystemExit("Packaged installer payload differs from the checked/re-signed app.")
     installer_entitlements = run("inspect-staged-local-installer-entitlements", ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(installer)])
     if installer_entitlements.strip() and plistlib.loads(installer_entitlements) != {}:
         raise SystemExit("The packaged local installer must have no entitlements.")

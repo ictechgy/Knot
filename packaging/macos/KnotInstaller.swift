@@ -49,13 +49,14 @@ import Foundation
         working = true; install.isEnabled = false
         Task { @MainActor in
             var transaction: KnotInstallTransaction?
-            var target: URL?
             var didQuit = false
             do {
                 status.stringValue = "설치할 앱과 설치 위치를 확인하는 중…"; await Task.yield()
-                let source = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Knot.app")
+                // Gatekeeper may translocate this helper on first open. All
+                // required content travels inside its signed bundle.
+                let source = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Knot.app")
                 let running = NSRunningApplication.runningApplications(withBundleIdentifier: "org.deskbridge.app")
-                let destination = try destination(running: running); target = destination
+                let destination = try destination(running: running)
                 transaction = try KnotInstallTransaction(source: source, destination: destination)
                 status.stringValue = "Knot의 파일 전송·설정 작업과 정상 종료를 기다리는 중…"; await Task.yield()
                 for app in running {
@@ -77,13 +78,15 @@ import Foundation
                 status.stringValue = "설치 완료 · Knot을 다시 열었습니다. 기존 PC 연결 설정을 사용할 수 있습니다."
                 working = false; install.title = "완료"; install.target = NSApp; install.action = #selector(NSApplication.terminate(_:)); install.isEnabled = true
             } catch {
-                var restored = false
-                if let transaction, transaction.committed, transaction.previous != nil {
-                    do { try transaction.rollback(); restored = true } catch { }
+                let recovery: KnotInstallRecovery.Result?
+                if let transaction {
+                    recovery = await KnotInstallRecovery.restore(transaction, wasRunning: didQuit, reopen: open)
+                } else { recovery = nil }
+                if recovery?.needsRecovery == true {
+                    status.stringValue = "자동 복구를 완료하지 못했습니다. " + (recovery?.detail ?? "")
+                } else {
+                    status.stringValue = ((error as? LocalizedError)?.errorDescription ?? "업데이트를 완료하지 못했습니다.") + " " + (recovery?.detail ?? "")
                 }
-                if let transaction, !transaction.committed { try? transaction.discardStaged() }
-                if didQuit, let target, restored || transaction?.committed == false { try? await open(target) }
-                status.stringValue = (error as? LocalizedError)?.errorDescription ?? "업데이트를 완료하지 못했습니다. 기존 앱과 연결 설정은 보존했습니다."
                 working = false; install.isEnabled = true
             }
         }

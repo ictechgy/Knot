@@ -48,9 +48,10 @@ function Add-Text([string] $Text,[int] $Height=40) {
     $label.MinimumSize=New-Object Drawing.Size(0,$Height); $label.MaximumSize=New-Object Drawing.Size(710,0)
     $script:section.Controls.Add($label); return $label
 }
-function Add-Button([string] $Text,[scriptblock] $Action) {
+function Add-Button([string] $Text,[scriptblock] $Action,[switch] $AllowDuringUpdate) {
     $button=New-Object Windows.Forms.Button; $button.Text=$Text; $button.Size=New-Object Drawing.Size(330,34)
-    $button.Add_Click($Action); $script:section.Controls.Add($button); return $button
+    $button.Add_Click({ if (-not $form.UpdateCloseRequested -or $AllowDuringUpdate) { & $Action } }.GetNewClosure())
+    $script:section.Controls.Add($button); return $button
 }
 $title = Add-Text 'Windows를 Mac의 한 화면으로' 38
 $title.Font = New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold)
@@ -294,13 +295,13 @@ $script:installAction={
     }
 }
 $install=Add-Button 'Sunshine 설치 · 수동' $script:installAction
-$downloadCancel=Add-Button '다운로드 취소' { $script:cancelDownload=$true }; $downloadCancel.Visible=$false
+$downloadCancel=Add-Button '다운로드 취소' { $script:cancelDownload=$true } -AllowDuringUpdate; $downloadCancel.Visible=$false
 $advancedPanel.Controls.Remove($downloadCancel); $flow.Controls.Add($downloadCancel)
 $null = Add-Text '2   이 Windows에서 Sunshine 초기 설정 · 처음 한 번' 30
 $null = Add-Text "Sunshine은 별도 창 없이 백그라운드에서 실행됩니다. 아래 버튼으로 이 Windows의 브라우저를 여세요. 초기 계정을 만들고 로그인합니다. 이 계정은 Sunshine 설정용이며 Mac에서 로그인하지 않습니다.`r`n영상 암호화 설정 열기 → LAN Encryption Mode / WAN Encryption Mode를 둘 다 Required for all clients로 선택하세요. 한국어: LAN/WAN 암호화 모드 → 모든 사용자에게 필수. Save → Apply/재시작까지 완료하세요. Wi-Fi와 Tailscale도 LAN으로 분류될 수 있어 LAN 설정이 필요합니다. Desktop 앱도 확인하세요." 118
 $localPortStatus=Add-Text '로컬 설정 포트: 아직 확인하지 않았습니다. 포트 응답은 Sunshine 로그인이나 화면 연결 성공을 의미하지 않습니다.' 46
 $checkLocal=Add-Button '설정 상태 새로고침' { Invoke-SunshineLocalCheck }
-$localCheckCancel=Add-Button '설정 포트 확인 취소' { $script:cancelLocalCheck=$true }; $localCheckCancel.Visible=$false
+$localCheckCancel=Add-Button '설정 포트 확인 취소' { $script:cancelLocalCheck=$true } -AllowDuringUpdate; $localCheckCancel.Visible=$false
 $open = Add-Button '이 Windows에서 Sunshine 설정 열기' { Invoke-SunshineLocalCheck -Open Settings }
 $encryption = Add-Button '영상 암호화 설정 열기' { Invoke-SunshineLocalCheck -Open Encryption }
 $null = Add-Text '직접 열기: 이 Windows의 Edge/Chrome → https://localhost:47990/ · localhost는 현재 브라우저를 연 컴퓨터를 뜻합니다. Mac에서는 열지 마세요.' 48

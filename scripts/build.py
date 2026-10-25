@@ -210,6 +210,11 @@ installer_info = {"CFBundleExecutable": "KnotInstaller", "CFBundleIdentifier": "
 with (installer / "Contents/Info.plist").open("wb") as handle: plistlib.dump(installer_info, handle)
 shutil.copy2(ROOT / "Assets/Brand/AppIcon.icns", installer_resources / "AppIcon.icns")
 shutil.copy2(ROOT / "LICENSE", installer_resources / "LICENSE")
+installer_payload = installer / "Contents/Helpers/Knot.app"
+installer_payload.parent.mkdir()
+shutil.copytree(app, installer_payload, symlinks=True)
+if tree_snapshot(installer_payload) != tree_snapshot(app):
+    raise SystemExit("Embedded installer payload differs from the tested app.")
 run("sign-mac-installer", ["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime", str(installer)])
 run("verify-mac-installer", ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(installer)])
 installer_entitlements = run("inspect-mac-installer-entitlements", ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(installer)])

@@ -39,10 +39,9 @@ namespace DeskBridge.Reverse
                 {
                     if (!Configured) return "이 프리뷰는 자동 업데이트가 아직 연결되지 않았습니다. 새 버전은 공식 배포 페이지에서 받으세요.";
                     if (portable) return "설치 프로그램으로 설치한 Knot에서 자동 업데이트를 사용할 수 있습니다. 실행 파일을 직접 연 경우 공식 설치 파일을 사용하세요.";
-                    if (accepting) return "업데이트를 준비했습니다. 진행 중인 설정을 기다리고 연결을 정리한 뒤 Knot을 자동으로 다시 엽니다.";
+                    if (accepting) return "업데이트를 준비했습니다. 연결을 마친 뒤 Knot을 다시 엽니다.";
                     if (!started) return "업데이트 확인을 시작하지 못했습니다. 공식 설치 파일로 업데이트하세요.";
-                    return idle ? "새 버전을 자동으로 확인합니다. 설치를 선택하면 Knot을 자동 종료·업데이트·재실행하며 연결 정보는 유지됩니다."
-                        : "사용 중에도 새 버전을 확인합니다. 설치를 선택하면 진행 중인 설정을 기다린 뒤 자동으로 다시 엽니다.";
+                    return idle ? "새 버전을 자동으로 확인합니다. 설치 전에 확인하며 연결 정보는 유지됩니다." : "사용 중에는 업데이트를 설치하지 않습니다.";
                 }
             }
         }
@@ -90,7 +89,7 @@ namespace DeskBridge.Reverse
                 library = LoadLibraryEx(runtime, IntPtr.Zero, 0x00000100 | 0x00000800);
                 if (library == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
                 cleanup = Bind<VoidCall>("win_sparkle_cleanup"); check = Bind<VoidCall>("win_sparkle_check_update_with_ui");
-                canShutdownRoot = delegate { lock (Gate) return !stopped ? 1 : 0; };
+                canShutdownRoot = delegate { lock (Gate) return idle && !stopped ? 1 : 0; };
                 shutdownRoot = delegate { try { RequestExitSafely(); } catch (Exception) { /* Never unwind into native callbacks. */ } };
                 errorRoot = delegate { /* WinSparkle owns its fixed native error UI. */ };
                 installerRoot = HandleVerifiedInstaller;
@@ -146,7 +145,7 @@ namespace DeskBridge.Reverse
             string directory = null;
             lock (Gate)
             {
-                if (!started || stopped || accepting) return -1;
+                if (!started || stopped || accepting || !idle) return -1;
                 accepting = true; // One atomic admission; SetIdle(false) now refuses all new work.
             }
             try

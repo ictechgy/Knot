@@ -10,6 +10,35 @@ struct KnotInstallIdentity: Equatable {
     let team: String?
 }
 
+enum KnotInstallRecovery {
+    struct Result { let needsRecovery: Bool; let detail: String }
+    @MainActor static func restore(_ transaction: KnotInstallTransaction, wasRunning: Bool,
+                                  reopen: @MainActor (URL) async throws -> Void) async -> Result {
+        if transaction.committed, transaction.previous != nil {
+            do { try transaction.rollback() }
+            catch {
+                // Keep the exact backup; a failed rollback must never be
+                // reported as a successful restoration or cleaned up.
+                return Result(needsRecovery: true, detail: "기존 앱 보관 위치: \(transaction.staged.path). 설치 위치: \(transaction.destination.path). 이 두 앱을 보존하고 관리자에게 복구를 요청하세요. 연결 설정은 변경하지 않았습니다.")
+            }
+        }
+        if transaction.committed {
+            return Result(needsRecovery: true, detail: "새 앱은 \(transaction.destination.path)에 있습니다. Finder에서 직접 실행해 주세요. 연결 설정은 변경하지 않았습니다.")
+        }
+        var detail = ""
+        do { try transaction.discardStaged() }
+        catch { detail = "임시 앱을 자동 정리하지 못했습니다: \(transaction.staged.path). " }
+        if wasRunning {
+            do {
+                try transaction.verifyPreviousDestination()
+                try await reopen(transaction.destination)
+            }
+            catch { return Result(needsRecovery: true, detail: detail + "기존 앱으로 되돌렸지만 자동 실행하지 못했습니다. Finder에서 \(transaction.destination.path)를 여세요.") }
+        }
+        return Result(needsRecovery: false, detail: detail)
+    }
+}
+
 enum KnotInstallFailure: Error, LocalizedError {
     case unsafePath, invalidApplication, protectedLocation, olderVersion, changedApplication, cannotReplace
     var errorDescription: String? {
@@ -149,6 +178,13 @@ final class KnotInstallTransaction {
 
     private func checkParent() throws {
         guard KnotInstallValidation.sameNode(parentNode, try KnotInstallValidation.ordinaryDirectory(parent)) else { throw KnotInstallFailure.changedApplication }
+    }
+
+    func verifyPreviousDestination() throws {
+        try checkParent()
+        guard !committed, let previous, let destinationNode,
+              KnotInstallValidation.sameNode(destinationNode, try KnotInstallValidation.ordinaryDirectory(destination)),
+              try validate(destination) == previous else { throw KnotInstallFailure.changedApplication }
     }
 
     func commit() throws {

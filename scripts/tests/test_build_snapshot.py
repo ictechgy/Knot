@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Offline regression cases: source additions/removals and binary replacement must invalidate packaging."""
 from pathlib import Path
-import copy, json, os, shlex, struct, subprocess, sys, tempfile, unittest
+import copy, json, os, shlex, shutil, struct, subprocess, sys, tempfile, unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -323,6 +323,7 @@ class BuildSnapshotTests(unittest.TestCase):
         installer = self.root / "dist/Install Knot.app/Contents/MacOS/KnotInstaller"
         installer.parent.mkdir(parents=True); installer.write_bytes(b"SYNTHETIC LOCAL INSTALLER")
         installer.chmod(0o755)
+        shutil.copytree(self.root / "dist/Knot.app", self.root / "dist/Install Knot.app/Contents/Helpers/Knot.app")
         self.build = self.root / "evidence/synthetic-build"
         self.build.mkdir(parents=True)
         self.snapshot_now()
@@ -427,6 +428,12 @@ class BuildSnapshotTests(unittest.TestCase):
     def test_local_installer_proof_cannot_be_omitted(self):
         del self.record["installerManifest"]; self.write_record()
         with self.assertRaisesRegex(BuildSnapshotError, "Local installer changed"): self.validate()
+
+    def test_embedded_payload_cannot_reuse_updated_outer_inventory(self):
+        payload = self.root / "dist/Install Knot.app/Contents/Helpers/Knot.app/Contents/MacOS/DeskBridge"
+        payload.write_bytes(b"UNTESTED SYNTHETIC PAYLOAD")
+        self.record["installerManifest"] = tree_snapshot(self.root / "dist/Install Knot.app"); self.write_record()
+        with self.assertRaisesRegex(BuildSnapshotError, "payload differs"): self.validate()
 
     def test_extra_bundle_file_is_rejected(self):
         (self.app.parent / "Unexpected").write_bytes(b"extra payload")

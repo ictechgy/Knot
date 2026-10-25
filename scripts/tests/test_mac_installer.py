@@ -32,7 +32,7 @@ class MacInstallerTests(unittest.TestCase):
             subprocess.run(["/usr/bin/swiftc", "-swift-version", "6", "-parse-as-library", str(core), str(ROOT / "scripts/tests/MacInstallerChecks.swift"), "-o", str(checker)], check=True)
             result = subprocess.run([str(checker), str(fixture)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("25 checks passed", result.stdout)
+            self.assertIn("29 checks passed", result.stdout)
             print(result.stdout.strip())
             # Compile the real AppKit entry point without running its installer.
             subprocess.run(["/usr/bin/swiftc", "-swift-version", "6", "-parse-as-library", str(core), str(ROOT / "packaging/macos/KnotInstaller.swift"), "-o", str(fixture / "KnotInstaller")], check=True)

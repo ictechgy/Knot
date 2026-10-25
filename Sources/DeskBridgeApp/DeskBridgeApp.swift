@@ -28,7 +28,12 @@ struct DeskBridgeApp: App {
         Window("Knot", id: "main") {
             MainView(linux: linux).environmentObject(desktop).environmentObject(files).environmentObject(macHost)
                 .frame(minWidth: 880, minHeight: 620)
-                .disabled(lifecycle.preparingToTerminate)
+                .safeAreaInset(edge: .bottom) {
+                    if lifecycle.preparingToTerminate {
+                        Text("진행 중인 작업을 마치면 Knot을 종료합니다. 파일 전송이나 연결 설정을 취소할 수 있습니다.")
+                            .font(.callout).padding(10)
+                    }
+                }
         }.defaultSize(width: 1200, height: 760)
         .commands {
             CommandGroup(replacing: .newItem) {}

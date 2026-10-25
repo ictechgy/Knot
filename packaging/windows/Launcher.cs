@@ -104,7 +104,6 @@ internal static class Launcher
                     DeskBridge.Reverse.KnotUpdates.Start(bootstrap, directory, BootstrapParentID, BootstrapCreationFileTime,
                         delegate {
                             updateContext.Post(delegate(object ignored) {
-                                RequestOwnedSetupClose();
                                 var forms = new List<Form>();
                                 foreach (Form form in Application.OpenForms) forms.Add(form);
                                 foreach (Form form in forms) if (!form.IsDisposed) form.Close();
@@ -119,7 +118,7 @@ internal static class Launcher
                 start.WorkingDirectory = directory;
                 start.UseShellExecute = false;
                 start.CreateNoWindow = true;
-                int hostResult = RunAndWait(start, true);
+                int hostResult = RunAndWait(start);
                 if (hostResult == 12)
                 {
                     DeskBridge.Reverse.KnotUpdates.SetIdle(true);
@@ -346,47 +345,14 @@ internal static class Launcher
         throw new InvalidOperationException("파일 설정을 시작하거나 완료하지 못했습니다. 조직의 스크립트 실행 정책과 설치 안내를 확인하세요.");
     }
 
-    private static int RunAndWait(ProcessStartInfo start, bool pumpUpdateMessages = false)
+    private static int RunAndWait(ProcessStartInfo start)
     {
         using (Process child = Process.Start(start))
         {
             if (child == null) throw new InvalidOperationException("설정 프로세스를 열지 못했습니다.");
-            // The native updater callback posts to this GUI thread. Keep it
-            // responsive while the separate PowerShell setup window drains.
-            if (pumpUpdateMessages)
-            {
-                ownedSetup = child;
-                try {
-                    while (!child.WaitForExit(50)) {
-                        Application.DoEvents();
-                        if (setupCloseRequested) RequestOwnedSetupClose();
-                    }
-                } finally { ownedSetup = null; setupCloseRequested = false; }
-            }
-            else child.WaitForExit();
+            child.WaitForExit();
             return child.ExitCode;
         }
-    }
-
-    private static Process ownedSetup;
-    private static bool setupCloseRequested;
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessageW(string message);
-    [DllImport("user32.dll")] private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wparam, IntPtr lparam, uint flags, uint timeout, out IntPtr result);
-    private static readonly uint UpdateCloseMessage = RegisterWindowMessageW("Knot.SafeCloseForUpdate.v2");
-    private static readonly IntPtr UpdateCloseOwner = new IntPtr((Guid.NewGuid().GetHashCode() & Int32.MaxValue) + 1L);
-    private static void RequestOwnedSetupClose()
-    {
-        setupCloseRequested = true;
-        Process child = ownedSetup;
-        if (child == null || child.HasExited) return;
-        // Close only the exact child owned by this launcher. Its form queues the
-        // request until settings work completes; no process-name kill is used.
-        child.Refresh();
-        if (child.MainWindowHandle == IntPtr.Zero) return; // Retry once the child creates its window.
-        IntPtr result;
-        SendMessageTimeoutW(child.MainWindowHandle, UpdateCloseMessage, new IntPtr(1), UpdateCloseOwner, 2, 500, out result);
-        if (result == new IntPtr(2)) setupCloseRequested = false;
-        else child.CloseMainWindow();
     }
 
     private static string WindowsPowerShell()

@@ -5,10 +5,10 @@ import Darwin
 /// Operates only on newly generated, inert, ad-hoc-signed fixtures supplied by
 /// test_mac_installer.py. Never launches an application or reads user app data.
 @main struct MacInstallerChecks {
-    static func main() {
-        do { try run() } catch { print("Synthetic installer check failed: \(error)"); exit(1) }
+    @MainActor static func main() async {
+        do { try await run() } catch { print("Synthetic installer check failed: \(error)"); exit(1) }
     }
-    static func run() throws {
+    @MainActor static func run() async throws {
         let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let fm = FileManager.default
         let payload = root.appendingPathComponent("payload/Knot.app")
@@ -100,6 +100,28 @@ import Darwin
         try fm.createSymbolicLink(at: linkedParent, withDestinationURL: path.deletingLastPathComponent())
         try refuses("parent symlink") { _ = try KnotInstallTransaction(source: payload, destination: linkedParent.appendingPathComponent("Knot.app")) }
         try check(!(try fm.contentsOfDirectory(atPath: path.deletingLastPathComponent().path)).contains(".knot-install.lock"), "no persistent user-owned lock")
+        let recover = try destination("recover-launch-failure")
+        do {
+            let tx = try KnotInstallTransaction(source: payload, destination: recover)
+            try tx.commit()
+            let result = await KnotInstallRecovery.restore(tx, wasRunning: true, reopen: { _ in throw KnotInstallFailure.cannotReplace })
+            try check(result.needsRecovery && result.detail.contains(recover.path), "reopen failure is explicit")
+            try check(try KnotInstallValidation.identity(recover) == oldID, "launch failure restores old app")
+        }
+        let failedRollback = try destination("failed-rollback")
+        do {
+            var refuseOld = false
+            let tx = try KnotInstallTransaction(source: payload, destination: failedRollback, validate: { url in
+                let identity = try KnotInstallValidation.identity(url)
+                if refuseOld && identity == oldID { throw KnotInstallFailure.changedApplication }
+                return identity
+            })
+            try tx.commit(); refuseOld = true
+            var reopened = false
+            let result = await KnotInstallRecovery.restore(tx, wasRunning: true, reopen: { _ in reopened = true })
+            try check(result.needsRecovery && result.detail.contains(tx.staged.path) && !reopened, "failed rollback requires recovery")
+            try check(fm.fileExists(atPath: tx.staged.path), "failed rollback preserves backup")
+        }
         print("Mac installer: \(count) checks passed; synthetic signed bundles only; no app launched")
     }
 }
