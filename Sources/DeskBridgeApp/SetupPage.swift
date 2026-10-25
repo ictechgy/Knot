@@ -19,11 +19,11 @@ struct SetupPage: View {
                 VStack(spacing: 12) {
                     step(number: "1", title: "Windows 준비", subtitle: nil) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Windows에서 Sunshine을 실행하세요. Mac과 같은 Wi-Fi 또는 Tailscale로 연결할 수 있어요.")
+                            Text("Windows에서 Knot을 여세요. 화면 공유 구성요소와 첫 계정은 자동으로 준비해요. 같은 Wi-Fi 또는 Tailscale로 연결할 수 있어요.")
                                 .foregroundStyle(.secondary)
                             DisclosureGroup("준비 방법 보기", isExpanded: $windowsDetailsExpanded) {
                                 VStack(alignment: .leading, spacing: 12) {
-                                    Text("동봉된 Windows quick-setup EXE를 두 번 클릭하세요. ‘연결 준비 · 자동 설정’을 누르면 필요한 Sunshine 설치와 계정·보안·PIN 창으로 이어집니다. 파일 설정은 나중에 추가할 수 있어요.")
+                                    Text("Windows용 Knot을 설치하고 여세요. 관리자 승인을 하면 필요한 구성요소 설치와 계정·보안 설정이 이어집니다. Sunshine을 따로 설치하거나 열 필요가 없어요. 기존 Sunshine 계정은 처음 한 번만 로그인하세요. 파일 설정은 나중에 추가할 수 있어요.")
                                     Link("Sunshine 공식 프로젝트", destination: URL(string: "https://github.com/LizardByte/Sunshine")!)
                                     QuietHelp(text: "Windows 도우미의 ‘모니터 없이 사용’에서 안내를 확인하세요. 가상 화면 자동 설치는 드라이버 보안 검토로 현재 보류 중입니다. 최초 설정에는 모니터나 다른 접속 수단이 필요합니다.", symbol: "display")
                                     QuietHelp(text: "최신 Windows Knot의 간편 연결에서 필수 암호화를 적용하세요. 고급·수동 설정에서는 Sunshine의 LAN/WAN 암호화 모드를 모두 ‘모든 사용자에게 필수’(Required for all clients)로 Save → Apply합니다.", symbol: "lock")
@@ -42,7 +42,7 @@ struct SetupPage: View {
                                 .foregroundStyle(.secondary)
                             HStack(spacing: 12) {
                                 Button("PC 찾기 / QR 연결", action: onDesktop)
-                                Text("페어링한 뒤 Sunshine의 Desktop을 열면 됩니다.")
+                                Text("페어링한 뒤 ‘Windows 열기’를 누르세요.")
                                     .font(.system(size: 12)).foregroundStyle(.secondary)
                             }
                         }

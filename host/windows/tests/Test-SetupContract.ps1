@@ -112,8 +112,8 @@ foreach ($entry in @(@('Disable-DeskBridgeSFTP.ps1','Stop-Service'),@('Resume-De
  }
 }
 $disableSource=[IO.File]::ReadAllText((Join-Path $root 'Disable-DeskBridgeSFTP.ps1'))
-Expect-SourceOrder $disableSource 'Stop-ManagedSessionWorkers' 'DeskBridge access is already disabled.' 'Repeated revocation worker cleanup precedes its success message in source'
-Expect-SourceOrder $disableSource 'Set-Service -Name sshd -StartupType $record.StartupBefore' 'DeskBridge access is already disabled.' 'Repeated revocation startup restore precedes its success message in source'
+Expect-SourceOrder $disableSource 'Stop-ManagedSessionWorkers' 'Knot access is already disabled.' 'Repeated revocation worker cleanup precedes its success message in source'
+Expect-SourceOrder $disableSource 'Set-Service -Name sshd -StartupType $record.StartupBefore' 'Knot access is already disabled.' 'Repeated revocation startup restore precedes its success message in source'
 $enableSource=[IO.File]::ReadAllText((Join-Path $root 'Enable-DeskBridgeSFTP.ps1'))
 Expect-SourceOrder $enableSource 'Assert-ProtectedDirectory $sshDirectory' 'Get-WindowsCapability' 'Existing SSH directory check precedes optional-feature operations in source'
 Expect-SourceOrder $enableSource 'Assert-ProtectedFile $keygen -WindowsBinary' '& $keygen -l' 'Key generator check precedes execution in source'

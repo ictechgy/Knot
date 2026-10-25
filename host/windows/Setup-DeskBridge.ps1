@@ -51,15 +51,15 @@ function Add-Button([string] $Text,[scriptblock] $Action) {
 }
 $title = Add-Text 'Windows를 Mac의 한 화면으로' 38
 $title.Font = New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold)
-$null = Add-Text '연결 준비를 누르면 필요한 설치와 보안 설정을 한 창에서 진행합니다.' 32
+$null = Add-Text '필요한 구성요소 설치와 계정·보안 설정을 자동으로 준비합니다. Sunshine을 따로 열 필요가 없습니다.' 48
 $script:quickInstall=$false
 $quick=Add-Button '연결 준비 · 자동 설정' { Invoke-QuickSetup }
-$quick.AccessibleDescription='필요한 Sunshine 설치 후 관리자 로그인, 필수 암호화 설정과 Mac PIN 승인을 한 창에서 진행합니다.'
-$null = Add-Text '처음 한 번 Windows 관리자 승인과 Sunshine 계정 입력이 필요합니다. Mac의 PIN을 승인한 뒤에는 저장된 연결을 사용하세요. 보안 설정을 처음 적용하거나 다시 적용할 때 Sunshine이 재시작될 수 있습니다.' 64
+$quick.AccessibleDescription='화면 공유 구성요소 설치, 계정 생성과 보안 설정을 자동으로 진행합니다. Mac PIN만 이 창에서 승인합니다.'
+$null = Add-Text 'Windows 관리자 승인 후 처음 계정은 자동으로 만듭니다. 기존 Sunshine 계정만 처음 한 번 로그인하세요. Mac의 PIN을 승인한 뒤에는 저장된 연결을 사용하세요. 보안 설정을 처음 적용하거나 다시 적용할 때 Sunshine이 재시작될 수 있습니다.' 64
 $status=New-Object Windows.Forms.TextBox
 $status.AccessibleName='Windows 연결 설정 상태'; $status.AccessibleDescription='진행 상황과 다음 단계 안내입니다. 내용을 선택해 복사할 수 있습니다.'
 $status.ReadOnly=$true; $status.Multiline=$true; $status.ScrollBars='Vertical'; $status.BorderStyle='None'; $status.BackColor=[Drawing.SystemColors]::Control
-$status.Text='「연결 준비 · 자동 설정」으로 시작하세요. 기존 인증서와 PIN 페어링은 유지합니다.'
+$status.Text='연결 준비를 시작합니다. 관리자 승인 후 Mac의 요청과 PIN을 확인하세요.'
 $status.Dock='Fill'
 $status.Margin=New-Object Windows.Forms.Padding(20,8,20,8)
 $layout.Controls.Add($status,0,1)
@@ -176,6 +176,7 @@ function Invoke-QuickSetup {
         $status.Text='Windows 관리자 확인 후 Knot 간편 연결 창을 여는 중…'
         $process=Start-Process -FilePath $LauncherPath -Verb RunAs -ArgumentList '--elevated-operation QuickSetupSunshine' -PassThru
         $null=$process.Handle
+        if ($process) { $form.Hide() }
         while (-not $process.HasExited) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
         $process.WaitForExit()
         if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
@@ -187,8 +188,15 @@ function Invoke-QuickSetup {
             $status.Text='간편 연결을 완료하지 못했습니다. 관리자 창의 안내를 확인하거나 고급·수동 설정을 사용하세요. 기존 인증서는 유지됩니다.'
         }
     } catch { Show-Failure $_ }
-    finally { $script:quickInstall=$false; Set-Busy $false }
+    finally { $script:quickInstall=$false; if (-not $form.IsDisposed) { $form.Show(); $form.Activate() }; Set-Busy $false }
 }
+$remoteActions=New-Object Windows.Forms.FlowLayoutPanel; $remoteActions.AutoSize=$true
+foreach ($remote in @(@('Mac에 접속',10),@('Linux에 접속',11),@('업데이트 / 버전',12))) {
+    $button=New-Object Windows.Forms.Button; $button.Text=$remote[0]; $button.Tag=$remote[1]; $button.AutoSize=$true
+    $button.Add_Click({ param($sender,$eventArgs) $form.Tag=[int]$sender.Tag; $form.Close() })
+    $remoteActions.Controls.Add($button)
+}
+$flow.Controls.Add($remoteActions)
 $advancedToggle=Add-Button '＋ 고급·수동 설정' {}
 $advancedPanel=New-Object Windows.Forms.FlowLayoutPanel
 $advancedPanel.FlowDirection='TopDown'; $advancedPanel.WrapContents=$false; $advancedPanel.AutoSize=$true
@@ -239,6 +247,7 @@ $script:installAction={
         }
         $process=Start-Process -FilePath $installExecutable -Verb RunAs -ArgumentList $installArguments -PassThru
         $null=$process.Handle
+        if ($process) { $form.Hide() }
         while (-not $process.HasExited) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
         $process.WaitForExit()
         if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
@@ -269,7 +278,7 @@ $script:installAction={
                 try { Remove-Item -LiteralPath $folder -Recurse -Force }
                 catch { $status.Text += [Environment]::NewLine+'임시 다운로드 파일을 정리하지 못했습니다. 설정은 다시 시도하거나 창을 닫을 수 있습니다.' }
             }
-        } finally { Set-Busy $false }
+        } finally { if (-not $form.IsDisposed) { $form.Show(); $form.Activate() }; Set-Busy $false }
     }
 }
 $install=Add-Button 'Sunshine 설치 · 수동' $script:installAction
@@ -298,7 +307,7 @@ $null = Add-Text 'Mac의 Windows 화면에서 근처 PC 선택 → 「PIN으로 
 $pin=Add-Button '이 Windows에서 PIN 입력 화면 열기' { Invoke-SunshineLocalCheck -Open PIN }
 $null = Add-Text 'Sunshine 로그인이 먼저 나오면 2단계에서 만든 계정으로 로그인한 뒤 PIN 메뉴를 여세요. 설정을 바꾼 뒤에도 기존 PIN 페어링은 지우지 마세요. PC가 목록에 없으면 아래 QR / 링크를 사용하세요.' 55
 $script:section=$flow
-$null = Add-Text '먼저 이 Windows의 「연결 준비」를 마치고 그 창을 열어 두세요. 이어서 Mac에서 근처 PC → PC 확인 → PIN으로 연결을 누르고, Windows 창에서 Mac의 요청과 PIN을 승인합니다. 검색되지 않으면 QR / 링크를 사용하세요.' 68
+$null = Add-Text 'Windows의 연결 준비 창을 열어 두세요. 이어서 Mac에서 근처 PC → PC 확인 → PIN으로 연결을 누르고, Windows 창에서 Mac의 요청과 PIN을 승인합니다. 검색되지 않으면 QR / 링크를 사용하세요.' 68
 $qrButton = Add-Button '연결 QR / 링크 보기…' {
     Set-Busy $true
     try {
@@ -434,7 +443,7 @@ function Invoke-FileSetup([string] $Operation, $AutomaticRequest=$null, $Automat
             catch { throw (Get-SetupFailureText $_ -Context 'DesktopUser') }
         }
         $message=if ($Operation -eq 'DisableFiles') {'파일 접속을 해제하고 현재 파일 연결을 종료합니다. 공유 파일은 보존됩니다.'} elseif ($Operation -eq 'EnableFiles') {
-            'OpenSSH Server, 전용 일반 계정, C:\DeskBridgeShare\files, 선택한 Mac 주소 전용 방화벽을 설정합니다. 공유 파일을 사용할 Windows 사용자: ' + $desktopUser.Name + ' (' + $desktopUser.SID.Value + '). 기존 SSH 설정은 바꾸지 않습니다. 계속할까요?'
+            'OpenSSH Server, 전용 일반 계정, Knot 공유 폴더 (기존 파일 경로 유지), 선택한 Mac 주소 전용 방화벽을 설정합니다. 공유 파일을 사용할 Windows 사용자: ' + $desktopUser.Name + ' (' + $desktopUser.SID.Value + '). 기존 SSH 설정은 바꾸지 않습니다. 계속할까요?'
         } else {'Windows 호스트 공개 키를 내보내기 위해 관리자 확인이 필요합니다.'}
         if ($Operation -eq 'EnableFiles') {
             $message += "`n`nMac 공개 키 지문: " + (Get-KeyFingerprint $expected.clientPublicKey)
@@ -508,7 +517,7 @@ function Invoke-FileSetup([string] $Operation, $AutomaticRequest=$null, $Automat
 $enable = Add-Button '파일 전송 설정 · 연결 파일 만들기…' { Invoke-FileSetup 'EnableFiles' }
 $export = Add-Button '이미 설정한 연결 파일 다시 저장…' { Invoke-FileSetup 'Export' }
 $disable = Add-Button '이 Windows의 파일 접속 해제…' { Invoke-FileSetup 'DisableFiles' }
-$null = Add-Text '저장한 Windows 연결 파일을 Mac에서 불러오고, 표시된 SSH 지문이 같은지 직접 비교하세요. 공유 폴더: C:\DeskBridgeShare\files' 50
+$null = Add-Text '저장한 Windows 연결 파일을 Mac에서 불러오고, 표시된 SSH 지문이 같은지 직접 비교하세요. 공유 폴더: Knot 공유 폴더 (기존 파일 경로 유지)' 50
 $script:setupContentWidth=-1; $script:setupContentDpi=0
 function Resize-SetupContent {
     $available=[Math]::Max(280,$flow.ClientSize.Width-$flow.Padding.Horizontal-[Windows.Forms.SystemInformation]::VerticalScrollBarWidth-12)
@@ -538,8 +547,12 @@ $form.Add_Shown({
     $form.Location=New-Object Drawing.Point(($area.Left+($area.Width-$form.Width)/2),($area.Top+($area.Height-$form.Height)/2))
     Resize-SetupContent
     Update-WindowsAddresses
-    # Checks begin on explicit action; showing the window never probes the service.
+    # Opening Knot is the user's connection-preparation action. Source scripts stay manual.
+    if ($LauncherPath) { $form.BeginInvoke([Action]{ Invoke-QuickSetup }) | Out-Null }
 })
 $form.Add_FormClosing({param($sender,$eventArgs) if ($form.UseWaitCursor) {$eventArgs.Cancel=$true}})
 [void]$form.ShowDialog()
+$roleExit=if ($form.Tag -in @(10,11,12)) {[int]$form.Tag} else {0}
+if ($form.Icon) { $form.Icon.Dispose() }
 $form.Dispose()
+exit $roleExit

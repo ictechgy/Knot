@@ -78,8 +78,8 @@ internal static class WindowsUpdateChecks
             Check(rejected, "Changed handoff bytes admitted.");
           }
           finally { File.Delete(fixture); }
-          Check(UpdateSecurity.RegisteredExecutable(@"C:\Program Files\Knot\") == @"C:\Program Files\Knot\DeskBridge-Windows.exe", "Registered custom path lost.");
-          Check(UpdateSecurity.RegisteredExecutable(@"D:\Apps\My Knot") == @"D:\Apps\My Knot\DeskBridge-Windows.exe", "Custom installation path refused.");
+          Check(UpdateSecurity.RegisteredExecutable(@"C:\Program Files\Knot\") == @"C:\Program Files\Knot\Knot.exe", "Registered custom path lost.");
+          Check(UpdateSecurity.RegisteredExecutable(@"D:\Apps\My Knot") == @"D:\Apps\My Knot\Knot.exe", "Custom installation path refused.");
           Check(UpdateSecurity.RegisteredExecutable(@"\\server\share") == null, "Network installation path admitted.");
           Check(UpdateSecurity.RegisteredExecutable(@"C:\Apps\..\Knot") == null, "Unnormalized registration admitted.");
           Check(UpdateSecurity.RegisteredExecutable("relative") == null, "Relative registration admitted.");

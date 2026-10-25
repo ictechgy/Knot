@@ -483,7 +483,7 @@ function Remove-ManagedFirewallAccess {
     if ($configured.Count -gt 0) { Remove-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -PolicyStore PersistentStore -ErrorAction Stop }
     foreach ($store in @('PersistentStore','ActiveStore')) {
         $remaining=@(Get-NamedManagedFirewallRules -PolicyStore $store)
-        if ($remaining.Count -ne 0) { throw 'DeskBridge firewall access remains configured or effective. Retain the helper and review policy manually.' }
+        if ($remaining.Count -ne 0) { throw 'Knot firewall access remains configured or effective. Retain the helper and review policy manually.' }
     }
 }
 function Get-FileAccessInactivityProjection {

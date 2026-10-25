@@ -22,7 +22,7 @@ using System.Windows.Forms;
 using Microsoft.Win32.SafeHandles;
 #endif
 
-internal sealed class SunshineSetupFailure : Exception
+internal class SunshineSetupFailure : Exception
 {
     internal SunshineSetupFailure(string message) : base(message) { }
 }
@@ -97,7 +97,7 @@ internal static class SunshineSetupPolicy
     internal const string Version = "2026.914.233613";
     internal const int MaximumBody = 262144;
     internal const string ReapplyRecovery = "설정 저장 또는 재시작 확인을 마치지 못했습니다. 이 창의 '보안 설정 다시 적용 · 재시작'을 눌러 다시 확인하세요. 확인 전에는 PIN 승인을 준비하지 않습니다. 인증서는 교체하지 않습니다.";
-    internal const string LoginRecovery = "Sunshine 계정 생성 또는 로그인 확인을 마치지 못했습니다. 이 창의 '로그인하고 연결 준비'에서 사용자 이름과 비밀번호를 다시 입력하세요. 첫 계정은 생성을 다시 시도하고, 기존 계정은 다시 로그인합니다. 인증 전에는 재시작이나 PIN 승인을 진행하지 않습니다.";
+    internal const string LoginRecovery = "Sunshine 계정 생성 또는 로그인 확인을 마치지 못했습니다. 이 창의 연결 준비를 다시 시도하세요. 보관한 계정은 자동으로 재사용하며, 기존 계정 인증이 필요하면 로그인 입력란을 표시합니다. 인증 전에는 재시작이나 PIN 승인을 진행하지 않습니다.";
     internal static string RecoveryGuidance(bool needsReapply, bool canReapply)
     { return needsReapply ? (canReapply ? ReapplyRecovery : LoginRecovery) : ""; }
     internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 고급 설정에서 Sunshine을 확인하세요.";
@@ -354,8 +354,12 @@ internal sealed class SunshineSetupSession
         this.api = api; this.delay = delay ?? new Func<int, CancellationToken, Task>(Task.Delay); this.restartTimeoutMilliseconds = restartTimeoutMilliseconds;
     }
     internal Task<SunshineApiReply> ProbeAsync(CancellationToken cancel) { return api.SendAsync("/api/config", null, null, cancel); }
-    internal async Task PrepareAsync(string username, string password, bool allowFirstAccount, CancellationToken cancel)
+    private Action<bool> recoveryChanged;
+    internal void RestoreRecovery(bool pending) { if (pending) NeedsSecurityReapply = true; }
+    private void SetRecovery(bool pending) { if (recoveryChanged != null) recoveryChanged(pending); NeedsSecurityReapply = pending; }
+    internal async Task PrepareAsync(string username, string password, bool allowFirstAccount, CancellationToken cancel, Action onAuthenticated = null, Action<bool> recoveryChanged = null)
     {
+        this.recoveryChanged = recoveryChanged;
         Configured = false; PairingReady = false; authenticated = false;
         authorization = null;
         SunshineApiReply probe = await ProbeAsync(cancel).ConfigureAwait(false);
@@ -367,12 +371,14 @@ internal sealed class SunshineSetupSession
             SunshineSetupPolicy.Require(allowFirstAccount);
             string body = SunshineSetupJson.Write(new Dictionary<string, object> { { "currentUsername", "" }, { "currentPassword", "" },
                 { "newUsername", username }, { "newPassword", password }, { "confirmNewPassword", password } });
-            NeedsSecurityReapply = true;
+            SetRecovery(true);
             SunshineSetupPolicy.Success(await api.SendAsync("/api/password", body, null, cancel).ConfigureAwait(false));
         }
         authorization = SunshineSetupPolicy.Authorization(username, password);
-        var original = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
-        authenticated = true;
+        SunshineApiReply authenticatedReply = await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false);
+        if (authenticatedReply.Status == 401) throw new SunshineLoginRequired();
+        var original = SunshineSetupPolicy.Config(authenticatedReply);
+        authenticated = true; if (onAuthenticated != null) onAuthenticated();
         // Reopening solely to approve a Mac must preserve its pending PIN
         // request. The saved configuration is checked; live application is not
         // re-verified or claimed in this authenticated pairing-only path.
@@ -398,12 +404,12 @@ internal sealed class SunshineSetupSession
             // the UI also requires other editors closed. A final readback is mandatory.
             var latest = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
             SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(original, latest));
-            NeedsSecurityReapply = true;
+            SetRecovery(true);
             SunshineSetupPolicy.Success(await api.SendAsync("/api/config", SunshineSetupJson.Write(desired), authorization, cancel).ConfigureAwait(false));
             saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, cancel).ConfigureAwait(false));
             SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved));
         }
-        NeedsSecurityReapply = true;
+        SetRecovery(true);
         // GET config reads the saved file, not live settings. Success therefore
         // requires the exact pre-request process to exit, plus an authenticated
         // readback and a distinct, verified replacement listener after restart.
@@ -430,7 +436,7 @@ internal sealed class SunshineSetupSession
                         saved = SunshineSetupPolicy.Config(await api.SendAsync("/api/config", null, authorization, deadline.Token).ConfigureAwait(false));
                         SunshineSetupPolicy.Require(SunshineSetupPolicy.Equal(desired, saved));
                         witness.VerifyReplacement(deadline.Token);
-                        deadline.Token.ThrowIfCancellationRequested(); Configured = true; PairingReady = true; NeedsSecurityReapply = false; return;
+                        deadline.Token.ThrowIfCancellationRequested(); SetRecovery(false); Configured = true; PairingReady = true; return;
                     }
                     catch (IOException) { }
                 }
@@ -470,6 +476,7 @@ internal sealed class SunshineSetupSession
 internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
 {
     private readonly List<IDisposable> locks = new List<IDisposable>(); private byte[] expected; private string protectedExecutable;
+    internal SunshineProtectedAccountStore OpenAccountStore() { return new SunshineProtectedAccountStore(Path.Combine(Path.GetDirectoryName(protectedExecutable), @"config\credentials"), expected); }
     internal bool VerifiedInstalledVersion { get; private set; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
@@ -480,6 +487,24 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
             string parent = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             string install = Path.Combine(parent, "Sunshine");
             string certificate = Path.Combine(install, @"config\credentials\cacert.pem");
+            // Knot owns engine startup in this flow; users never need to launch
+            // the engine's separate application. Preserve disabled/custom services.
+            string serviceBinary = Path.Combine(install, @"tools\sunshinesvc.exe");
+            for (var current = new DirectoryInfo(Path.GetDirectoryName(serviceBinary)); current != null; current = current.Parent)
+            {
+                SafeFileHandle handle = CreateFile(current.FullName, 1, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+                SunshineSetupPolicy.Require(!handle.IsInvalid); locks.Add(handle);
+            }
+            SunshineSetupPolicy.ValidateProtectedAncestors(delegate { Launcher.AssertProtectedAncestors(Path.GetDirectoryName(serviceBinary)); });
+            AssertProtectedAcl(Directory.GetAccessControl(install)); AssertProtectedAcl(Directory.GetAccessControl(Path.GetDirectoryName(serviceBinary)));
+            foreach (string engineFile in new[] { serviceBinary, Path.Combine(install, "sunshine.exe") })
+            {
+                SunshineSetupPolicy.Require((File.GetAttributes(engineFile) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0);
+                locks.Add(new FileStream(engineFile, FileMode.Open, FileAccess.Read, FileShare.Read)); AssertProtectedFile(engineFile);
+            }
+            SunshineSetupPolicy.Require(FileVersionInfo.GetVersionInfo(Path.Combine(install, "sunshine.exe")).ProductVersion == SunshineSetupPolicy.Version);
+            SunshineServiceStartup.EnsureStarted(serviceBinary);
+
             if (!Directory.Exists(Path.GetDirectoryName(certificate))) throw new IOException();
             // Lock each directory against rename/delete before validating the path.
             for (var current = new DirectoryInfo(Path.GetDirectoryName(certificate)); current != null; current = current.Parent)
@@ -742,13 +767,17 @@ internal sealed class SunshineQuickSetupForm : Form
     private readonly Button prepare = new Button(), refresh = new Button(), pair = new Button(), reapply = new Button();
     private readonly ComboBox pending = new ComboBox(); private readonly TextBox status = new TextBox();
     private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
+    private readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 2000 };
     private readonly CancellationToken cancellation;
-    private SunshinePinnedApi api; private SunshineSetupSession session; private bool closing, busy; private int cleanupStarted;
+    private SunshinePinnedApi api; private SunshineSetupSession session; private SunshineProtectedAccountStore accountStore; private SunshineAccountController accounts;
+    private readonly FlowLayoutPanel accountFields = new FlowLayoutPanel(); private bool manualAccount; private bool closing, busy; private int cleanupStarted;
     internal bool Completed { get; private set; }
     internal bool HadFailure { get; private set; }
     internal SunshineQuickSetupForm()
     {
         cancellation = lifetime.Token;
+        var applicationIcon = Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location); Icon = applicationIcon;
+        Disposed += delegate { if (applicationIcon != null) applicationIcon.Dispose(); };
         Text = "Knot · 이 PC 연결 준비"; StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(620, 650); Size = MinimumSize;
         Font = new Font("Segoe UI", 10); AutoScaleDimensions = new SizeF(96F, 96F); AutoScaleMode = AutoScaleMode.Dpi;
         username.AccessibleName = "Sunshine 사용자 이름"; password.AccessibleName = "Sunshine 비밀번호";
@@ -756,11 +785,16 @@ internal sealed class SunshineQuickSetupForm : Form
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 14, AutoScroll = true };
         Controls.Add(layout);
         layout.Controls.Add(new Label { Text = "이 PC를 Mac에서 열기", AutoSize = true, Font = new Font(Font.FontFamily, 18, FontStyle.Bold) });
-        layout.Controls.Add(new Label { Text = "Sunshine 계정으로 보안 설정을 준비하고 이 창에서 PIN을 입력합니다.\n계정 정보는 이 창에서만 사용하며 Knot에 저장하지 않습니다.", AutoSize = true, Margin = new Padding(0, 10, 0, 12) });
-        layout.Controls.Add(new Label { Text = "Sunshine 사용자 이름 (Windows 로그인 계정 아님)", AutoSize = true }); username.Width = 510; username.MaxLength = 128; username.Text = "knot"; layout.Controls.Add(username);
-        layout.Controls.Add(new Label { Text = "Sunshine 비밀번호 · 처음 만드는 계정은 16바이트 이상", AutoSize = true }); password.Width = 510; password.MaxLength = 1024; password.UseSystemPasswordChar = true; layout.Controls.Add(password);
+        layout.Controls.Add(new Label { Text = "Sunshine 계정은 Knot이 자동으로 준비하고 Windows에서 암호화해 보관합니다.\n이 PC를 선택한 Mac의 PIN만 아래에서 확인하세요.", AutoSize = true, Margin = new Padding(0, 10, 0, 12) });
+        accountFields.AutoSize = true; accountFields.FlowDirection = FlowDirection.TopDown; accountFields.WrapContents = false; accountFields.Visible = false;
+        accountFields.Controls.Add(new Label { Text = "기존 Sunshine 계정 · 처음 한 번만 로그인", AutoSize = true });
+        username.Width = 510; username.MaxLength = 128; username.Text = "knot"; accountFields.Controls.Add(username);
+        accountFields.Controls.Add(new Label { Text = "기존 Sunshine 비밀번호 (Windows 로그인 비밀번호 아님)", AutoSize = true });
+        password.Width = 510; password.MaxLength = 1024; password.UseSystemPasswordChar = true; accountFields.Controls.Add(password);
+        accountFields.Controls.Add(new Label { Text = "인증에 성공하면 이 PC의 관리자만 접근할 수 있게 암호화해 기억합니다. 기존 비밀번호는 바꾸지 않습니다.", AutoSize = true, MaximumSize = new Size(510, 0) });
+        layout.Controls.Add(accountFields);
         layout.Controls.Add(new Label { Text = "다른 Sunshine 설정 창을 닫고 진행하세요. 저장된 보안 설정이 맞으면 재시작 없이 PIN 승인을 준비합니다. 처음이거나 설정 변경이 필요하면 화면 암호화를 필수로 하고, 공유기 자동 포트 열기를 끄고, 관리 화면을 이 PC로 제한한 뒤 재시작합니다. 진행 중인 화면 연결이 잠시 끊길 수 있습니다.", AutoSize = true, MaximumSize = new Size(530, 0), Margin = new Padding(0, 10, 0, 10) });
-        prepare.Text = "로그인하고 연결 준비"; prepare.AutoSize = true; prepare.Enabled = false; layout.Controls.Add(prepare);
+        prepare.Text = "연결 준비 다시 시도"; prepare.AutoSize = true; prepare.Enabled = false; layout.Controls.Add(prepare);
         status.ReadOnly = true; status.Multiline = true; status.ScrollBars = ScrollBars.Vertical; status.Width = 530; status.Height = 96;
         status.AccessibleName = "연결 준비 상태와 오류 안내"; status.BackColor = SystemColors.Window; status.Text = "이 PC의 Sunshine 인증서를 확인하는 중…"; status.Margin = new Padding(0, 12, 0, 12); layout.Controls.Add(status);
         layout.Controls.Add(new Label { Text = "연결할 Mac에서 Knot의 이 PC를 선택하세요. 요청한 Mac의 이름과 주소를 직접 확인한 뒤 PIN을 입력하세요.", AutoSize = true, MaximumSize = new Size(530, 0) });
@@ -768,16 +802,10 @@ internal sealed class SunshineQuickSetupForm : Form
         var pairing = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "선택한 Mac 연결"; pair.AutoSize = true; pair.Enabled = false; pairing.Controls.Add(new Label { Text = "Mac의 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); layout.Controls.Add(pairing);
         reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; layout.Controls.Add(reapply);
         var close = new Button { Text = "닫기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
+        poll.Tick += async delegate { if (!busy && !closing && session != null && session.PairingReady && pending.Items.Count == 0) await WorkAsync(async delegate { if (!await RefreshPendingAsync()) poll.Stop(); }); };
         pending.SelectedIndexChanged += delegate { UpdatePairAvailability(); };
         Shown += async delegate { ClampToWorkingArea(); await WorkAsync(InitializeAsync); };
-        prepare.Click += async delegate { await WorkAsync(async delegate {
-            string user = username.Text, secret = password.Text; Completed = false; pending.Items.Clear(); pending.SelectedIndex = -1; pin.Clear(); prepare.Enabled = false; status.Text = "보안 설정을 저장하고 확인하는 중…";
-            SunshineSetupSession active = session; bool allowFirst = api.VerifiedInstalledVersion;
-            try { await Task.Run(delegate { return active.PrepareAsync(user, secret, allowFirst, cancellation); }); } finally { if (!closing) password.Clear(); secret = null; }
-            if (closing) return;
-            Completed = session.PairingReady; status.Text = SunshineSetupPolicy.ReadyMessage(session.Configured);
-            await RefreshPendingAsync();
-        }); };
+        prepare.Click += async delegate { await WorkAsync(PrepareAccountAsync); };
         refresh.Click += async delegate { await WorkAsync(async delegate { pending.Items.Clear(); pending.SelectedIndex = -1; if (!await RefreshPendingAsync() || closing) return; status.Text = pending.Items.Count == 0 ? "아직 연결 요청이 없습니다. Mac에서 먼저 이 PC에 연결하세요." : "요청한 Mac을 직접 선택하고 Mac에 표시된 PIN을 입력하세요."; }); };
         pair.Click += async delegate { await WorkAsync(async delegate { var selected = pending.SelectedItem as SunshinePendingPair;
             string selectedPin = pin.Text;
@@ -792,7 +820,38 @@ internal sealed class SunshineQuickSetupForm : Form
                 status.Text = SunshineSetupPolicy.ReadyMessage(session.Configured);
             });
         };
-        FormClosing += delegate { closing = true; lifetime.Cancel(); password.Clear(); pin.Clear(); if (session != null) session.Clear(); };
+        FormClosing += delegate { closing = true; poll.Stop(); lifetime.Cancel(); password.Clear(); pin.Clear(); if (session != null) session.Clear(); if (accounts != null) accounts.Clear(); };
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessageW(string message);
+    private static readonly uint SafeUpdateClose = RegisterWindowMessageW("Knot.SafeCloseForUpdate.v1");
+    protected override void WndProc(ref Message message)
+    {
+        if (SafeUpdateClose != 0 && message.Msg == SafeUpdateClose)
+        {
+            bool accept = !busy && !closing; message.Result = accept ? new IntPtr(1) : IntPtr.Zero;
+            if (accept) BeginInvoke(new Action(Close)); return;
+        }
+        base.WndProc(ref message);
+    }
+    private void ShowAccountLogin()
+    {
+        manualAccount = true; accountFields.Visible = true; prepare.Text = "한 번 로그인하고 기억하기";
+        status.Text = "이미 만든 Sunshine 계정으로 한 번만 로그인하세요. 이후에는 Knot이 자동으로 연결을 준비합니다. 계정을 초기화하거나 기존 페어링을 지우지 않습니다.";
+    }
+    private async Task PrepareAccountAsync()
+    {
+        Completed = false; pending.Items.Clear(); pending.SelectedIndex = -1; pin.Clear();
+        status.Text = "Sunshine 계정과 보안 설정을 자동으로 준비하는 중…";
+        string user = username.Text, secret = password.Text; bool manual = manualAccount;
+        SunshineAccountController activeAccounts = accounts; SunshineSetupSession activeSession = session;
+        bool verified = api.VerifiedInstalledVersion;
+        try { await Task.Run(delegate { return activeAccounts.PrepareAsync(activeSession, manual, user, secret, verified, cancellation); }); }
+        catch (SunshineLoginRequired) { if (!closing) ShowAccountLogin(); return; }
+        finally { if (!closing) password.Clear(); secret = null; }
+        if (closing) return;
+        manualAccount = false; accountFields.Visible = false; prepare.Text = "연결 준비 다시 시도";
+        Completed = session.PairingReady; status.Text = SunshineSetupPolicy.ReadyMessage(session.Configured);
+        if (await RefreshPendingAsync()) poll.Start();
     }
     private async Task<bool> RefreshPendingAsync()
     {
@@ -836,11 +895,21 @@ internal sealed class SunshineQuickSetupForm : Form
                         SunshineApiReply probe = await Task.Run(delegate { return active.ProbeAsync(startup.Token); });
                         startup.Token.ThrowIfCancellationRequested(); if (closing) throw new OperationCanceledException();
                         SunshineSetupPolicy.Require(probe.Status == 401 || SunshineSetupPolicy.IsWelcome(probe));
-                        status.Text = SunshineSetupPolicy.IsWelcome(probe) ? "Sunshine 계정을 처음 만듭니다. 기억할 사용자 이름과 긴 비밀번호를 입력하세요." : "기존 Sunshine 계정으로 로그인하세요. 기존 비밀번호를 바꾸지 않습니다.";
-                        initialized = true; prepare.Enabled = true; return;
+                        SunshinePinnedApi verifiedApi = api;
+                        using (var lease = await SunshineSetupResourceFactory.CreateAsync(delegate { return verifiedApi.OpenAccountStore(); }, startup.Token))
+                            accountStore = lease.Take(startup.Token, !closing);
+                        SunshineProtectedAccountStore verifiedStore = accountStore;
+                        accounts = await Task.Run(delegate { return new SunshineAccountController(verifiedStore); });
+                        cancellation.ThrowIfCancellationRequested(); if (closing) throw new OperationCanceledException();
+                        initialized = true;
+                        if (SunshineSetupPolicy.IsWelcome(probe) || accounts.HasAccount) await PrepareAccountAsync();
+                        else ShowAccountLogin();
+                        return;
                     }
                     catch (IOException)
                     {
+                        if (initialized) throw;
+                        if (accountStore != null) accountStore.Dispose(); accountStore = null; accounts = null;
                         if (api != null) api.Dispose(); api = null; session = null;
                     }
                     await Task.Delay(500, startup.Token);
@@ -852,7 +921,7 @@ internal sealed class SunshineQuickSetupForm : Form
         }
         finally
         {
-            if (!initialized) { if (session != null) session.Clear(); if (api != null) api.Dispose(); api = null; session = null; }
+            if (!initialized) { if (accounts != null) accounts.Clear(); if (accountStore != null) accountStore.Dispose(); accountStore = null; accounts = null; if (session != null) session.Clear(); if (api != null) api.Dispose(); api = null; session = null; }
         }
     }
     private async Task WorkAsync(Func<Task> action)
@@ -884,7 +953,7 @@ internal sealed class SunshineQuickSetupForm : Form
         try
         {
             if (disposing) SunshineSetupCleanup.Once(ref cleanupStarted, delegate {
-                closing = true; lifetime.Cancel(); if (session != null) session.Clear(); if (api != null) api.Dispose(); lifetime.Dispose();
+                closing = true; poll.Stop(); poll.Dispose(); lifetime.Cancel(); if (session != null) session.Clear(); if (accounts != null) accounts.Clear(); if (accountStore != null) accountStore.Dispose(); if (api != null) api.Dispose(); lifetime.Dispose();
             });
         }
         finally { base.Dispose(disposing); }

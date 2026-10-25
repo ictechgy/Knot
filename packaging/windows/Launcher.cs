@@ -110,15 +110,7 @@ internal static class Launcher
                             }, null);
                         });
                 }
-                DeskBridge.Reverse.KnotUpdates.SetIdle(true);
-                DeskBridge.Reverse.WindowsRole role = DeskBridge.Reverse.WindowsRoleChooser.Choose();
-                if (role == DeskBridge.Reverse.WindowsRole.Cancel) return 0;
                 if (!DeskBridge.Reverse.KnotUpdates.SetIdle(false)) return 0;
-                if (role == DeskBridge.Reverse.WindowsRole.OpenMac || role == DeskBridge.Reverse.WindowsRole.OpenLinux)
-                {
-                    DeskBridge.Reverse.ClientMain.RunEmbedded(bootstrap, role == DeskBridge.Reverse.WindowsRole.OpenLinux ? DeskBridge.Reverse.HostPlatform.Linux : DeskBridge.Reverse.HostPlatform.Mac);
-                    return 0;
-                }
                 string powershell = WindowsPowerShell();
                 var start = new ProcessStartInfo(powershell,
                     "-NoLogo -NoProfile -STA -ExecutionPolicy RemoteSigned -File " + Quote(Path.Combine(directory, "Setup-DeskBridge.ps1")) +
@@ -126,7 +118,18 @@ internal static class Launcher
                 start.WorkingDirectory = directory;
                 start.UseShellExecute = false;
                 start.CreateNoWindow = true;
-                if (RunAndWait(start) != 0)
+                int hostResult = RunAndWait(start);
+                if (hostResult == 12)
+                {
+                    DeskBridge.Reverse.KnotUpdates.SetIdle(true);
+                    DeskBridge.Reverse.WindowsRoleChooser.ShowUpdates(); return 0;
+                }
+                if (hostResult == 10 || hostResult == 11)
+                {
+                    DeskBridge.Reverse.ClientMain.RunEmbedded(bootstrap, hostResult == 11 ? DeskBridge.Reverse.HostPlatform.Linux : DeskBridge.Reverse.HostPlatform.Mac);
+                    return 0;
+                }
+                if (hostResult != 0)
                     throw new InvalidOperationException("설정 창을 열지 못했거나 정상 종료하지 못했습니다. 조직에서 AllSigned를 강제하면 별도로 서명한 스크립트나 조직에서 승인한 수동 배포가 필요합니다. 이 프리뷰의 스크립트는 Authenticode 서명이 없습니다.");
             }
             return 0;
