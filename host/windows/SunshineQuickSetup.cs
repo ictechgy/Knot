@@ -503,6 +503,22 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
                 locks.Add(new FileStream(engineFile, FileMode.Open, FileAccess.Read, FileShare.Read)); AssertProtectedFile(engineFile);
             }
             SunshineSetupPolicy.Require(FileVersionInfo.GetVersionInfo(Path.Combine(install, "sunshine.exe")).ProductVersion == SunshineSetupPolicy.Version);
+            // Validate existing runtime directories and command-bearing config
+            // metadata before starting a stopped SYSTEM service. No contents read.
+            foreach (string directory in new[] { Path.Combine(install, "config"), Path.GetDirectoryName(certificate) })
+            {
+                if (!Directory.Exists(directory)) continue;
+                SafeFileHandle handle = CreateFile(directory, 1, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+                SunshineSetupPolicy.Require(!handle.IsInvalid); locks.Add(handle);
+                SunshineSetupPolicy.ValidateProtectedAncestors(delegate { Launcher.AssertProtectedAncestors(directory); });
+                AssertProtectedAcl(Directory.GetAccessControl(directory));
+            }
+            foreach (string configFile in new[] { Path.Combine(install, @"config\sunshine.conf"), Path.Combine(install, @"config\apps.json") })
+                if (File.Exists(configFile))
+                {
+                    SunshineSetupPolicy.Require((File.GetAttributes(configFile) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0);
+                    AssertProtectedFile(configFile);
+                }
             SunshineServiceStartup.EnsureStarted(serviceBinary);
 
             if (!Directory.Exists(Path.GetDirectoryName(certificate))) throw new IOException();
