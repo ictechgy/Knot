@@ -59,7 +59,7 @@ struct StreamConfiguration: Sendable {
         let configuration = StreamConnection.Configuration(width: configuration.width, height: configuration.height,
             fps: configuration.fps, bitrateKbps: configuration.bitrateKbps,
             videoFormats: [.h264, .hevc], audio: .stereo, remote: configuration.remote,
-            routeMTU: configuration.remote ? 1280 : nil)
+            routeMTU: configuration.remote ? 1280 : nil, sdrColorMode: .desktopSRGB)
         let picture = DesktopInputView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720))
         let win = NSWindow(contentRect: picture.frame, styleMask: [.titled,.closable,.miniaturizable,.resizable],
                            backing: .buffered, defer: false)

@@ -1827,7 +1827,23 @@ diff --git a/GlimmerEngine/Session/StreamBridgeContext.swift b/GlimmerEngine/Ses
 diff --git a/GlimmerEngine/Session/StreamConnection+Configuration.swift b/GlimmerEngine/Session/StreamConnection+Configuration.swift
 --- a/GlimmerEngine/Session/StreamConnection+Configuration.swift
 +++ b/GlimmerEngine/Session/StreamConnection+Configuration.swift
-@@ -38 +38 @@
+@@ -4,0 +5,9 @@
++
++/// How SDR desktop RGB code values are interpreted after YCbCr decoding.
++/// This does not change the negotiated matrix, range, pixel values or HDR handling.
++public enum SDRColorMode: Sendable {
++    case source
++    /// Sunshine's SDR desktop capture retains sRGB code values while tagging Rec.709 video.
++    /// Reinterpret only Rec.709 SDR without an explicit gamma as desktop sRGB.
++    case desktopSRGB
++}
+@@ -14 +23,2 @@
+-                    remote: Bool = false, routeMTU: Int? = nil) {
++                    remote: Bool = false, routeMTU: Int? = nil,
++                    sdrColorMode: SDRColorMode = .source) {
+@@ -18,0 +29 @@
++            request.sdrColorMode = sdrColorMode
+@@ -38 +49 @@
 -                colorSpace: request.colorSpace.cValue, colorRange: request.colorRange.cValue, encryptionFlags: 0,
 +                colorSpace: request.colorSpace.cValue, colorRange: request.colorRange.cValue, encryptionFlags: Int32(StreamSecurityPolicy.requiredFeatures),
 diff --git a/GlimmerEngine/Session/StreamSession+Connect.swift b/GlimmerEngine/Session/StreamSession+Connect.swift
@@ -2406,7 +2422,22 @@ diff --git a/GlimmerEngine/Video/VideoDecoder+Suppression.swift b/GlimmerEngine/
 diff --git a/GlimmerEngine/Video/VideoDecoder.swift b/GlimmerEngine/Video/VideoDecoder.swift
 --- a/GlimmerEngine/Video/VideoDecoder.swift
 +++ b/GlimmerEngine/Video/VideoDecoder.swift
-@@ -450,2 +450,2 @@
+@@ -25 +25,2 @@
+-         colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full) {
++         colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full,
++         sdrColorMode: SDRColorMode = .source) {
+@@ -30,0 +32 @@
++        self.sdrColorMode = sdrColorMode
+@@ -41 +43,2 @@
+-    package convenience init(colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full) {
++    package convenience init(colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full,
++                             sdrColorMode: SDRColorMode = .source) {
+@@ -43 +46 @@
+-                  colorSpace: colorSpace, colorRange: colorRange)
++                  colorSpace: colorSpace, colorRange: colorRange, sdrColorMode: sdrColorMode)
+@@ -47,0 +51 @@
++    nonisolated let sdrColorMode: SDRColorMode
+@@ -450,2 +454,2 @@
 -    /// `decodeGateDisposition` either clears it on a genuine IDR (feed it -
 -    /// the resync IDR won the race) or converts it into DR_NEED_IDR exactly
 +    /// `commitReservedDecode` clears it only after reserving a genuine IDR.
@@ -2425,3 +2456,43 @@ diff --git a/GlimmerEngine/Models/Types.swift b/GlimmerEngine/Models/Types.swift
 +    case securityNegotiation(StreamSecurityPolicy.Failure)
 @@ -285,0 +288 @@
 +        case .securityNegotiation(let failure): return failure.localizedDescription
+diff --git a/GlimmerEngine/Models/StreamRequest.swift b/GlimmerEngine/Models/StreamRequest.swift
+--- a/GlimmerEngine/Models/StreamRequest.swift
++++ b/GlimmerEngine/Models/StreamRequest.swift
+@@ -41,0 +42 @@
++    package var sdrColorMode: SDRColorMode = .source
+diff --git a/GlimmerEngine/Video/VideoDecoder+Color.swift b/GlimmerEngine/Video/VideoDecoder+Color.swift
+--- a/GlimmerEngine/Video/VideoDecoder+Color.swift
++++ b/GlimmerEngine/Video/VideoDecoder+Color.swift
+@@ -81,0 +82,13 @@
++        let resolvedPrimaries = primaries ?? fallback.primaries
++        let resolvedMatrix = matrix ?? fallback.matrix
++        let sourceTransfer = transfer ?? fallback.transfer
++        // Desktop capture preserves the display's nonlinear RGB code values. Sunshine's
++        // SDR Rec.709 label describes its YCbCr encoding, but applying a second video
++        // transfer interpretation on macOS lifts desktop midtones (128 becomes ~139).
++        // Opt in only for known Rec.709 SDR; keep explicit gamma, other gamuts and HDR.
++        let desktopSDR = sdrColorMode == .desktopSRGB && !controlHDR && gamma == nil
++            && (transfer != nil || !tenBit)
++            && resolvedPrimaries == kCVImageBufferColorPrimaries_ITU_R_709_2 as String
++            && resolvedMatrix == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
++            && sourceTransfer == kCVImageBufferTransferFunction_ITU_R_709_2 as String
++        let resolvedTransfer = desktopSDR ? kCVImageBufferTransferFunction_sRGB as String : sourceTransfer
+@@ -83,3 +96,2 @@
+-           cached.primaries == primaries ?? fallback.primaries,
+-           cached.transfer == transfer ?? fallback.transfer,
+-           cached.matrix == matrix ?? fallback.matrix, cached.range == range, cached.gamma == gamma {
++           cached.primaries == resolvedPrimaries, cached.transfer == resolvedTransfer,
++           cached.matrix == resolvedMatrix, cached.range == range, cached.gamma == gamma {
+@@ -88,2 +100,2 @@
+-        return VideoColorDescription(primaries: primaries ?? fallback.primaries,
+-                                     transfer: transfer ?? fallback.transfer, matrix: matrix ?? fallback.matrix,
++        return VideoColorDescription(primaries: resolvedPrimaries,
++                                     transfer: resolvedTransfer, matrix: resolvedMatrix,
+diff --git a/GlimmerEngine/Video/VideoDisplayInfo.swift b/GlimmerEngine/Video/VideoDisplayInfo.swift
+--- a/GlimmerEngine/Video/VideoDisplayInfo.swift
++++ b/GlimmerEngine/Video/VideoDisplayInfo.swift
+@@ -25 +25,2 @@
+-        self.init(colorSpace: configuration.request.colorSpace, colorRange: configuration.request.colorRange)
++        self.init(colorSpace: configuration.request.colorSpace, colorRange: configuration.request.colorRange,
++                  sdrColorMode: configuration.request.sdrColorMode)

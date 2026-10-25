@@ -39,6 +39,7 @@ package struct StreamRequest: Sendable {
     package var videoFormats: VideoFormats
     package var colorSpace: ColorSpace = .rec709
     package var colorRange: ColorRange = .full
+    package var sdrColorMode: SDRColorMode = .source
     /// Moonlight's "play audio on host PC": the PC keeps its own sound and
     /// this Mac silences the stream (not the system volume).
     package var playAudioOnHost: Bool = false

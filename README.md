@@ -18,7 +18,7 @@ English · [한국어](README.ko.md)
 
 The app UI and most setup guides are currently in Korean.
 
-The source tree is **0.2.0-preview.20**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
+The source tree is **0.2.0-preview.21**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
 
 ## Supported connections
 
@@ -42,6 +42,7 @@ Windows has an optional **모니터 없이 사용** (use without a monitor) setu
 - **Discovery, QR and links:** choose a PC through Bonjour on your LAN or import an address QR/link. The Mac app supports QR images, camera scanning and links; the Windows client supports QR images and links.
 - **Explicit pairing:** discovery results and QR codes are only address hints. PIN approval and saved certificate checks establish the connection.
 - **Screen quality:** source builds offer up to 4K (3840×2160), 60 fps and 100 Mbps. Mac automatic bitrate uses 20/30/60 Mbps at 1080p/1440p/4K. Select quality before opening a stream; higher bitrate needs more bandwidth, and 4K requires host display/capture/encoder support. Knot does not automatically change the host display resolution.
+- **Desktop colors on Mac:** source builds preserve sRGB desktop midtones when displaying ordinary Sunshine Rec.709 SDR capture. HDR and output quantization range keep their existing interpretation; see [color handling and synthetic validation](docs/STREAM_COLOR.md).
 - **Optional file transfer:** from the Mac client, browse the Windows share and upload or download individual files with progress and cancellation. Existing files are never overwritten.
 - **Native apps:** SwiftUI/AppKit on Mac, WinForms on Windows and GTK for the Linux host. The Windows screen engine runs in a separate Moonlight window.
 

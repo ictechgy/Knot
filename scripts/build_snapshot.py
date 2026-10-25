@@ -9,7 +9,7 @@ class BuildSnapshotError(ValueError):
 
 REQUIRED_CHECK_STAGES = {"synthetic-checks", "synthetic-model-checks", "build-contract-checks", "system-dependency-policy-checks",
                          "input-batching-checks", "control-hardening-checks", "desktop-input-backpressure-checks",
-                         "video-frame-lifecycle-checks", "stream-launch-lifecycle-checks", "media-receive-lifecycle-checks", "audio-notice-power-checks",
+                         "video-frame-lifecycle-checks", "video-color-checks", "stream-launch-lifecycle-checks", "media-receive-lifecycle-checks", "audio-notice-power-checks",
                          "rtsp-replay-checks", "inspect-app-entitlements", "inspect-dependencies",
                          "compile-host-supervisor", "sign-host-supervisor", "verify-host-supervisor",
                          "inspect-host-supervisor-entitlements", "inspect-host-supervisor-dependencies",

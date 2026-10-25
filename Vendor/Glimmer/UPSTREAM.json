@@ -1359,6 +1359,7 @@
     "GlimmerEngine/Input/InputText.swift",
     "GlimmerEngine/Input/StreamInput.swift",
     "GlimmerEngine/Models/StreamFailure.swift",
+    "GlimmerEngine/Models/StreamRequest.swift",
     "GlimmerEngine/Models/Types.swift",
     "GlimmerEngine/Network/ControlTransport.swift",
     "GlimmerEngine/Network/EnetControlChannel+ControlLoop.swift",
@@ -1395,9 +1396,11 @@
     "GlimmerEngine/Session/StreamSession+Start.swift",
     "GlimmerEngine/Session/StreamSession+Wake.swift",
     "GlimmerEngine/Session/StreamSession.swift",
+    "GlimmerEngine/Video/VideoDecoder+Color.swift",
     "GlimmerEngine/Video/VideoDecoder+Decode.swift",
     "GlimmerEngine/Video/VideoDecoder+Suppression.swift",
-    "GlimmerEngine/Video/VideoDecoder.swift"
+    "GlimmerEngine/Video/VideoDecoder.swift",
+    "GlimmerEngine/Video/VideoDisplayInfo.swift"
   ],
   "newFiles": [
     "GlimmerEngine/Protocol/StreamSecurityPolicy.swift",
