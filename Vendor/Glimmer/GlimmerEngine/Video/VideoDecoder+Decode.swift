@@ -322,8 +322,8 @@ extension VideoDecoder {
             preparedSample = makeSampleBuffer(
                 rawData: pictureData, rtpTimestamp: pending.rtpTimestamp)
         } else {
-            let avcc = convertAnnexBToAVCC(pictureData)
-            preparedSample = makeSampleBuffer(rawData: avcc, rtpTimestamp: pending.rtpTimestamp)
+            preparedSample = makeSampleBuffer(rawData: pictureData,
+                rtpTimestamp: pending.rtpTimestamp, annexB: true)
         }
 
         guard let sample = preparedSample else {

@@ -18,7 +18,7 @@ English · [한국어](README.ko.md)
 
 The app UI and most setup guides are currently in Korean.
 
-The source tree is **0.2.0-preview.21**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
+The source tree is **0.2.0-preview.22**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
 
 ## Supported connections
 

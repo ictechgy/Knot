@@ -2370,6 +2370,11 @@ diff --git a/GlimmerEngine/Video/VideoDecoder+Decode.swift b/GlimmerEngine/Video
 +            return StreamProtocol.DR_OK
 +        case .resyncToIdr:
 +            releaseInFlightDecode()
+@@ -310,2 +325,2 @@
+-            let avcc = convertAnnexBToAVCC(pictureData)
+-            preparedSample = makeSampleBuffer(rawData: avcc, rtpTimestamp: pending.rtpTimestamp)
++            preparedSample = makeSampleBuffer(rawData: pictureData,
++                rtpTimestamp: pending.rtpTimestamp, annexB: true)
 diff --git a/GlimmerEngine/Video/VideoDecoder+Suppression.swift b/GlimmerEngine/Video/VideoDecoder+Suppression.swift
 --- a/GlimmerEngine/Video/VideoDecoder+Suppression.swift
 +++ b/GlimmerEngine/Video/VideoDecoder+Suppression.swift
@@ -2496,3 +2501,237 @@ diff --git a/GlimmerEngine/Video/VideoDisplayInfo.swift b/GlimmerEngine/Video/Vi
 -        self.init(colorSpace: configuration.request.colorSpace, colorRange: configuration.request.colorRange)
 +        self.init(colorSpace: configuration.request.colorSpace, colorRange: configuration.request.colorRange,
 +                  sdrColorMode: configuration.request.sdrColorMode)
+diff --git a/GlimmerEngine/Network/VideoDepacketizer+AnnexB.swift b/GlimmerEngine/Network/VideoDepacketizer+AnnexB.swift
+--- a/GlimmerEngine/Network/VideoDepacketizer+AnnexB.swift
++++ b/GlimmerEngine/Network/VideoDepacketizer+AnnexB.swift
+@@ -9,0 +10 @@
++import Darwin
+@@ -39,2 +40,2 @@
+-    /// slices) stays in ONE picData buffer in arrival order. Runs only on
+-    /// IDR frames, so the per-byte scan is off the steady-state path.
++    /// slices) stays in ONE picData buffer in arrival order. Scan the original
++    /// access unit without a whole-frame array or temporary picture-NAL copies.
+@@ -42,4 +43,21 @@
+-        let bytes = [UInt8](au)
+-        var vps: Data?, sps: Data?, pps: Data?
+-        var picData = Data()
+-        picData.reserveCapacity(bytes.count)
++        au.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
++            let starts = Self.annexBStartCodeOffsets(bytes)
++            guard !starts.isEmpty, let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
++                return [DecodeBuffer(kind: .picData, data: au)]
++            }
++            var vps: Data?, sps: Data?, pps: Data?
++            var picData = Data()
++            picData.reserveCapacity(bytes.count)
++            for (idx, start) in starts.enumerated() {
++                let end = idx + 1 < starts.count ? starts[idx + 1] : bytes.count
++                let scLen = bytes[start + 2] == 1 ? 3 : 4
++                let headerIndex = start + scLen
++                guard headerIndex < end else { continue }
++                let count = end - start
++                switch bufferKind(nalHeaderByte: bytes[headerIndex]) {
++                case .vps: vps = Data(bytes: base + start, count: count)
++                case .sps: sps = Data(bytes: base + start, count: count)
++                case .pps: pps = Data(bytes: base + start, count: count)
++                case .picData: picData.append(base + start, count: count)
++                }
++            }
+@@ -47,3 +65,7 @@
+-        let starts = Self.annexBStartCodeOffsets(bytes)
+-        guard !starts.isEmpty else {
+-            return [DecodeBuffer(kind: .picData, data: au)]
++            var out: [DecodeBuffer] = []
++            out.reserveCapacity(4)
++            if let vps { out.append(DecodeBuffer(kind: .vps, data: vps)) }
++            if let sps { out.append(DecodeBuffer(kind: .sps, data: sps)) }
++            if let pps { out.append(DecodeBuffer(kind: .pps, data: pps)) }
++            out.append(DecodeBuffer(kind: .picData, data: picData))
++            return out
+@@ -51,21 +72,0 @@
+-
+-        for (idx, start) in starts.enumerated() {
+-            let end = idx + 1 < starts.count ? starts[idx + 1] : bytes.count
+-            let scLen = bytes[start + 2] == 1 ? 3 : 4
+-            let headerIndex = start + scLen
+-            guard headerIndex < end else { continue }
+-            let nal = au.subdata(in: start..<end)
+-            switch bufferKind(nalHeaderByte: bytes[headerIndex]) {
+-            case .vps: vps = nal
+-            case .sps: sps = nal
+-            case .pps: pps = nal
+-            case .picData: picData.append(nal)
+-            }
+-        }
+-
+-        var out: [DecodeBuffer] = []
+-        if let vps { out.append(DecodeBuffer(kind: .vps, data: vps)) }
+-        if let sps { out.append(DecodeBuffer(kind: .sps, data: sps)) }
+-        if let pps { out.append(DecodeBuffer(kind: .pps, data: pps)) }
+-        out.append(DecodeBuffer(kind: .picData, data: picData))
+-        return out
+@@ -75 +76,2 @@
+-    private static func annexBStartCodeOffsets(_ bytes: [UInt8]) -> [Int] {
++    private static func annexBStartCodeOffsets(_ bytes: UnsafeRawBufferPointer) -> [Int] {
++        guard bytes.count >= 3, let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return [] }
+@@ -78,4 +80,30 @@
+-        while offset < bytes.count {
+-            let length = annexBStartCodeLength(bytes, at: offset)
+-            if length > 0 { starts.append(offset) }
+-            offset += max(1, length)
++        let limit = bytes.count - 2
++        // Skip long nonzero spans, then scan a bounded neighborhood directly.
++        // Dense escaped payloads incur at most one libc search per neighborhood,
++        // rather than a call for every zero. Small access units stay scalar.
++        let skipSparseRuns = bytes.count >= 16 * 1024
++        while offset < limit {
++            let scanEnd: Int
++            if skipSparseRuns {
++                guard let zero = memchr(base + offset, 0, bytes.count - offset) else { break }
++                offset = UnsafeRawPointer(base).distance(to: UnsafeRawPointer(zero))
++                guard offset < limit else { break }
++                scanEnd = offset + min(256, limit - offset)
++            } else {
++                scanEnd = limit
++            }
++            while offset < scanEnd {
++                if base[offset] == 0, base[offset + 1] == 0 {
++                    if base[offset + 2] == 1 {
++                        starts.append(offset)
++                        offset += 3
++                        continue
++                    }
++                    if bytes.count - offset > 3, base[offset + 2] == 0, base[offset + 3] == 1 {
++                        starts.append(offset)
++                        offset += 4
++                        continue
++                    }
++                }
++                offset += 1
++            }
+diff --git a/GlimmerEngine/Video/VideoDecoder+Bitstream.swift b/GlimmerEngine/Video/VideoDecoder+Bitstream.swift
+--- a/GlimmerEngine/Video/VideoDecoder+Bitstream.swift
++++ b/GlimmerEngine/Video/VideoDecoder+Bitstream.swift
+@@ -184,5 +184,4 @@
+-    /// Replace each Annex-B start code with a 4-byte big-endian length prefix
+-    /// (AVCC / HVCC, the form VideoToolbox consumes). Scan-then-write over
+-    /// `withUnsafeBytes` avoids a `Data -> [UInt8] -> Data` copy per frame.
+-    nonisolated func convertAnnexBToAVCC(_ data: Data) -> Data {
+-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Data in
++    /// Write AVCC/HVCC directly into CoreMedia-owned memory. The source pointer
++    /// stays inside withUnsafeBytes; asynchronous VT retention owns only the block.
++    private nonisolated func makeAnnexBBlockBuffer(_ data: Data) -> CMBlockBuffer? {
++        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> CMBlockBuffer? in
+@@ -190 +189 @@
+-                return Data()
++                return nil
+@@ -205,2 +204,4 @@
+-                        nals.append((nalStart, i - nalStart))
+-                        outSize += 4 + (i - nalStart)
++                        let length = i - nalStart
++                        guard length <= Int(UInt32.max), outSize <= Int.max - 4 - length else { return nil }
++                        nals.append((nalStart, length))
++                        outSize += 4 + length
+@@ -215,7 +216,8 @@
+-                nals.append((nalStart, count - nalStart))
+-                outSize += 4 + (count - nalStart)
+-            }
+-
+-            // Second pass: one pre-sized write of len32-BE || NAL per unit.
+-            var out = Data(count: outSize)
+-            out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) in
++                let length = count - nalStart
++                guard length <= Int(UInt32.max), outSize <= Int.max - 4 - length else { return nil }
++                nals.append((nalStart, length))
++                outSize += 4 + length
++            }
++
++            // One allocation/write; no intermediate AVCC Data copied into a second buffer.
++            return makeOwnedBlockBuffer(byteCount: outSize) { dst in
+@@ -238 +239,0 @@
+-            return out
+@@ -255,0 +257,29 @@
++    /// Allocate one contiguous block owned by CoreMedia and fill it before publication.
++    /// Never expose a borrowed Data pointer to VideoToolbox's asynchronous lifetime.
++    private nonisolated func makeOwnedBlockBuffer(
++        byteCount: Int, fill: (UnsafeMutableRawBufferPointer) -> Void
++    ) -> CMBlockBuffer? {
++        guard byteCount > 0 else { return nil }
++        var block: CMBlockBuffer?
++        let status = CMBlockBufferCreateWithMemoryBlock(
++            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
++            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
++            dataLength: byteCount, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
++        guard status == kCMBlockBufferNoErr, let block else {
++            log.error("CMBlockBufferCreateWithMemoryBlock failed: \(status)")
++            return nil
++        }
++        var contiguousLength = 0
++        var totalLength = 0
++        var pointer: UnsafeMutablePointer<Int8>?
++        let access = CMBlockBufferGetDataPointer(block, atOffset: 0,
++            lengthAtOffsetOut: &contiguousLength, totalLengthOut: &totalLength, dataPointerOut: &pointer)
++        guard access == kCMBlockBufferNoErr, contiguousLength >= byteCount,
++              totalLength == byteCount, let pointer else {
++            log.error("CMBlockBufferGetDataPointer failed or noncontiguous: \(access)")
++            return nil
++        }
++        fill(UnsafeMutableRawBufferPointer(start: pointer, count: byteCount))
++        return block
++    }
++
+@@ -259 +289 @@
+-        rawData: Data, rtpTimestamp: UInt32 = 0
++        rawData: Data, rtpTimestamp: UInt32 = 0, annexB: Bool = false
+@@ -262,34 +292,12 @@
+-
+-        // VideoToolbox may retain the sample beyond this call, so its block
+-        // memory must own a copy of the frame bytes.
+-        var blockBuffer: CMBlockBuffer?
+-        var status = CMBlockBufferCreateWithMemoryBlock(
+-            allocator: kCFAllocatorDefault,
+-            memoryBlock: nil,
+-            blockLength: rawData.count,
+-            blockAllocator: kCFAllocatorDefault,
+-            customBlockSource: nil,
+-            offsetToData: 0,
+-            dataLength: rawData.count,
+-            flags: 0,
+-            blockBufferOut: &blockBuffer)
+-        guard status == kCMBlockBufferNoErr, let bb = blockBuffer else {
+-            log.error("CMBlockBufferCreateWithMemoryBlock failed: \(status)")
+-            return nil
+-        }
+-
+-        status = CMBlockBufferAssureBlockMemory(bb)
+-        guard status == kCMBlockBufferNoErr else {
+-            log.error("CMBlockBufferAssureBlockMemory failed: \(status)")
+-            return nil
+-        }
+-
+-        status = rawData.withUnsafeBytes { rawBuf -> OSStatus in
+-            guard let base = rawBuf.baseAddress else { return kCMBlockBufferBadPointerParameterErr }
+-            return CMBlockBufferReplaceDataBytes(
+-                with: base, blockBuffer: bb, offsetIntoDestination: 0, dataLength: rawData.count)
+-        }
+-        guard status == kCMBlockBufferNoErr else {
+-            log.error("CMBlockBufferReplaceDataBytes failed: \(status)")
+-            return nil
+-        }
++        let block: CMBlockBuffer?
++        if annexB {
++            block = makeAnnexBBlockBuffer(rawData)
++        } else {
++            // AV1 OBUs already have the framing VT consumes.
++            block = rawData.withUnsafeBytes { raw in
++                makeOwnedBlockBuffer(byteCount: raw.count) { destination in
++                    destination.copyMemory(from: raw)
++                }
++            }
++        }
++        guard let bb = block else { return nil }
+@@ -325,2 +333,2 @@
+-        let sampleSize = rawData.count
+-        status = withUnsafePointer(to: timingInfo) { timingPtr in
++        let sampleSize = CMBlockBufferGetDataLength(bb)
++        let status = withUnsafePointer(to: timingInfo) { timingPtr in
