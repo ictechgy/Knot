@@ -795,6 +795,9 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
     private readonly TextBox username = new TextBox(), password = new TextBox(), pin = new TextBox();
     private readonly Button prepare = new Button(), refresh = new Button(), pair = new Button(), reapply = new Button(), invitation = new Button();
     private readonly ComboBox pending = new ComboBox(); private readonly TextBox status = new TextBox();
+    private readonly FlowLayoutPanel requestFields = new FlowLayoutPanel(), connectionDetails = new FlowLayoutPanel();
+    private readonly Button detailsToggle = new Button();
+    private readonly Label waiting = new Label();
     private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
     private readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 2000 };
     private readonly CancellationToken cancellation;
@@ -814,20 +817,23 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
                 foreach (Form owned in OwnedForms) owned.Close();
             } else if (!closing) {
                 foreach (Control control in Controls) control.Enabled = true;
-                poll.Start();
+                poll.Start(); RestoreAvailability();
             }
         };
         cancellation = lifetime.Token;
         var applicationIcon = Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location); Icon = applicationIcon;
         Disposed += delegate { if (applicationIcon != null) applicationIcon.Dispose(); };
-        Text = "Knot · 이 PC 연결 준비"; StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(620, 650); Size = MinimumSize;
+        Text = "Knot · 이 PC 연결 준비"; StartPosition = FormStartPosition.CenterScreen; MinimumSize = new Size(620, 520); Size = new Size(620, 620);
         Font = new Font("Segoe UI", 10); AutoScaleDimensions = new SizeF(96F, 96F); AutoScaleMode = AutoScaleMode.Dpi;
         username.AccessibleName = "Sunshine 사용자 이름"; password.AccessibleName = "Sunshine 비밀번호";
         pin.AccessibleName = "Mac에 표시된 4자리 PIN"; pending.AccessibleName = "연결을 요청한 Mac 이름과 주소";
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 14, AutoScroll = true };
-        Controls.Add(layout);
+        var frame = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 1, RowCount = 2 };
+        frame.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        frame.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); frame.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
+        frame.Controls.Add(layout, 0, 0); Controls.Add(frame);
         layout.Controls.Add(new Label { Text = "이 PC를 Mac에서 열기", AutoSize = true, Font = new Font(Font.FontFamily, 18, FontStyle.Bold) });
-        layout.Controls.Add(new Label { Text = "Sunshine 계정은 Knot이 자동으로 준비하고 Windows에서 암호화해 보관합니다.\n이 PC를 선택한 Mac의 PIN만 아래에서 확인하세요.", AutoSize = true, Margin = new Padding(0, 10, 0, 12) });
+        layout.Controls.Add(new Label { Text = "연결 준비는 자동으로 진행합니다.\nMac에서 이 PC를 선택한 뒤, 아래에 나타나는 요청을 확인하세요.", AutoSize = true, MaximumSize = new Size(530, 0), Margin = new Padding(0, 10, 0, 12) });
         accountFields.AutoSize = true; accountFields.FlowDirection = FlowDirection.TopDown; accountFields.WrapContents = false; accountFields.Visible = false;
         accountFields.Controls.Add(new Label { Text = "기존 Sunshine 계정 · 처음 한 번만 로그인", AutoSize = true });
         username.Width = 510; username.MaxLength = 128; username.Text = "knot"; accountFields.Controls.Add(username);
@@ -835,27 +841,41 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
         password.Width = 510; password.MaxLength = 1024; password.UseSystemPasswordChar = true; accountFields.Controls.Add(password);
         accountFields.Controls.Add(new Label { Text = "인증에 성공하면 이 PC의 관리자만 접근할 수 있게 암호화해 기억합니다. 기존 비밀번호는 바꾸지 않습니다.", AutoSize = true, MaximumSize = new Size(510, 0) });
         layout.Controls.Add(accountFields);
-        layout.Controls.Add(new Label { Text = "다른 Sunshine 설정 창을 닫고 진행하세요. 저장된 보안 설정이 맞으면 재시작 없이 PIN 승인을 준비합니다. 처음이거나 설정 변경이 필요하면 화면 암호화를 필수로 하고, 공유기 자동 포트 열기를 끄고, 관리 화면을 이 PC로 제한한 뒤 재시작합니다. 진행 중인 화면 연결이 잠시 끊길 수 있습니다.", AutoSize = true, MaximumSize = new Size(530, 0), Margin = new Padding(0, 10, 0, 10) });
-        prepare.Text = "연결 준비 다시 시도"; prepare.AutoSize = true; prepare.Enabled = false; layout.Controls.Add(prepare);
-        status.ReadOnly = true; status.Multiline = true; status.ScrollBars = ScrollBars.Vertical; status.Width = 530; status.Height = 96;
-        status.AccessibleName = "연결 준비 상태와 오류 안내"; status.BackColor = SystemColors.Window; status.Text = "이 PC의 Sunshine 인증서를 확인하는 중…"; status.Margin = new Padding(0, 12, 0, 12); layout.Controls.Add(status);
-        layout.Controls.Add(new Label { Text = "연결할 Mac에서 Knot의 이 PC를 선택하세요. 요청한 Mac의 이름과 주소를 직접 확인한 뒤 PIN을 입력하세요.", AutoSize = true, MaximumSize = new Size(530, 0) });
-        var requests = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pending.DropDownStyle = ComboBoxStyle.DropDownList; pending.Width = 380; refresh.Text = "요청 새로고침"; refresh.AutoSize = true; refresh.Enabled = false; requests.Controls.Add(pending); requests.Controls.Add(refresh); layout.Controls.Add(requests);
-        var pairing = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "선택한 Mac 연결"; pair.AutoSize = true; pair.Enabled = false; pairing.Controls.Add(new Label { Text = "Mac의 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); layout.Controls.Add(pairing);
-        invitation.Text = "이 PC의 QR / 연결 링크"; invitation.AutoSize = true; invitation.Enabled = false;
-        invitation.Click += async delegate { await WorkAsync(ShowInvitationAsync); }; layout.Controls.Add(invitation);
-        reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; layout.Controls.Add(reapply);
-        var close = new Button { Text = "닫기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
+        prepare.Text = "연결 준비 다시 시도"; prepare.AutoSize = true; prepare.Enabled = false; prepare.Visible = false; layout.Controls.Add(prepare);
+        status.ReadOnly = true; status.Multiline = true; status.ScrollBars = ScrollBars.Vertical; status.Dock = DockStyle.Fill;
+        status.AccessibleName = "연결 준비 상태와 오류 안내"; status.BackColor = SystemColors.Window; status.Text = "이 PC의 연결 준비를 시작하는 중…"; status.Margin = new Padding(0, 12, 0, 0); frame.Controls.Add(status, 0, 1);
+        waiting.Text = "연결을 준비하고 있습니다. 잠시 기다려 주세요."; waiting.AutoSize = true; waiting.MaximumSize = new Size(530, 0); waiting.Margin = new Padding(0, 12, 0, 12); layout.Controls.Add(waiting);
+        requestFields.AutoSize = true; requestFields.FlowDirection = FlowDirection.TopDown; requestFields.WrapContents = false; requestFields.Visible = false;
+        requestFields.Controls.Add(new Label { Text = "새 Mac의 연결 요청 · 이름과 주소를 확인하세요", AutoSize = true, MaximumSize = new Size(530, 0) });
+        pending.DropDownStyle = ComboBoxStyle.DropDownList; pending.Width = 510; requestFields.Controls.Add(pending);
+        var pairing = new FlowLayoutPanel { AutoSize = true }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "이 Mac 연결 허용"; pair.AutoSize = true; pair.Enabled = false;
+        pairing.Controls.Add(new Label { Text = "Mac에 표시된 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); requestFields.Controls.Add(pairing); layout.Controls.Add(requestFields);
+        refresh.Text = "연결 요청 다시 확인"; refresh.AutoSize = true; refresh.Enabled = false; refresh.Visible = false; layout.Controls.Add(refresh);
+        var discoveryHelp = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Visible = false };
+        discoveryHelp.Controls.Add(new Label { Text = "같은 Wi-Fi 또는 Tailscale에 연결하세요. 목록에 없다면 Mac의 Knot에서 이 PC의 QR 이미지나 연결 링크를 가져오세요.", AutoSize = true, MaximumSize = new Size(530, 0) });
+        invitation.Text = "이 PC의 QR / 연결 링크 보기"; invitation.AutoSize = true; invitation.Enabled = false;
+        invitation.Click += async delegate { await WorkAsync(ShowInvitationAsync); }; discoveryHelp.Controls.Add(invitation);
+        var help = new Button { Text = "Mac에서 이 PC가 보이지 않나요?", AutoSize = true };
+        help.Click += delegate { discoveryHelp.Visible = !discoveryHelp.Visible; help.Text = discoveryHelp.Visible ? "PC 찾기 도움 접기" : "Mac에서 이 PC가 보이지 않나요?"; };
+        layout.Controls.Add(help); layout.Controls.Add(discoveryHelp);
+        var details = new Label { Text = "Knot은 Sunshine 계정과 화면 암호화 설정을 준비합니다. 계정은 이 PC에서 암호화해 보관하며, 기존 계정이 있으면 한 번만 로그인합니다.\n처음 설정하거나 보안 설정을 바꿀 때 Sunshine이 재시작되어 화면 연결이 잠시 끊길 수 있습니다. 다른 Sunshine 설정 창은 닫아 주세요.", AutoSize = true, MaximumSize = new Size(530, 0) };
+        connectionDetails.AutoSize = true; connectionDetails.FlowDirection = FlowDirection.TopDown; connectionDetails.WrapContents = false; connectionDetails.Visible = false; connectionDetails.Controls.Add(details);
+        detailsToggle.Text = "연결 정보 · 문제 해결"; detailsToggle.AutoSize = true;
+        detailsToggle.Click += delegate { connectionDetails.Visible = !connectionDetails.Visible; detailsToggle.Text = connectionDetails.Visible ? "연결 정보 접기" : "연결 정보 · 문제 해결"; };
+        layout.Controls.Add(detailsToggle); layout.Controls.Add(connectionDetails);
+        reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; connectionDetails.Controls.Add(reapply);
+        var close = new Button { Text = "다른 기능으로 돌아가기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
         poll.Tick += async delegate {
             if (busy || polling || closing || UpdateCloseRequested || session == null || !session.PairingReady) return;
             polling = true;
             try { await RefreshPendingAsync(true, true); } catch (OperationCanceledException) { }
-            catch (Exception) { if (!closing) { poll.Stop(); pendingWarning = true; status.Text = "요청 자동 갱신을 중단했습니다. 요청 새로고침으로 다시 시도하세요. 연결 권한과 인증서는 변경하지 않습니다."; } }
+            catch (Exception) { if (!closing) { poll.Stop(); pendingWarning = true; status.Text = "요청 자동 갱신을 중단했습니다. 연결 요청 다시 확인을 눌러 재시도하세요. 연결 권한과 인증서는 변경하지 않습니다."; UpdatePresentation(); } }
             finally { polling = false; UpdateWorkDidFinish(); }
         };
         pending.SelectedIndexChanged += delegate { UpdatePairAvailability(); };
+        pin.TextChanged += delegate { UpdatePairAvailability(); };
         Shown += async delegate { ClampToWorkingArea(); await WorkAsync(InitializeAsync); };
-        prepare.Click += async delegate { await WorkAsync(PrepareAccountAsync); };
+        prepare.Click += async delegate { await WorkAsync(session == null ? (Func<Task>)InitializeAsync : PrepareAccountAsync); };
         refresh.Click += async delegate { await WorkAsync(async delegate { pending.Items.Clear(); pending.SelectedIndex = -1; if (!await RefreshPendingAsync() || closing) return; status.Text = pending.Items.Count == 0 ? "아직 연결 요청이 없습니다. Mac에서 먼저 이 PC에 연결하세요." : "요청한 Mac을 직접 선택하고 Mac에 표시된 PIN을 입력하세요."; }); };
         pair.Click += async delegate { await WorkAsync(async delegate { var selected = pending.SelectedItem as SunshinePendingPair;
             string selectedPin = pin.Text;
@@ -953,7 +973,7 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
         {
             pendingWarning = true; status.Text = SunshineSetupPolicy.PendingStatus(active.Configured, result.Failure);
             if (result.SecurityFailure) poll.Stop(); else { poll.Interval = 5000; poll.Start(); }
-            return false;
+            UpdatePresentation(); return false;
         }
         pending.BeginUpdate();
         try {
@@ -965,12 +985,28 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
         } finally { pending.EndUpdate(); }
         if (selected != null && pending.SelectedIndex < 0) pin.Clear();
         if (pendingWarning) { pendingWarning = false; status.Text = SunshineSetupPolicy.ReadyMessage(active.Configured); }
-        poll.Interval = 2000; poll.Start(); UpdatePairAvailability(); return true;
+        poll.Interval = 2000; poll.Start(); UpdatePresentation(); return true;
     }
     private void UpdatePairAvailability()
     {
         if (closing || pair.IsDisposed) return;
-        pair.Enabled = SunshineSetupPolicy.CanPair(busy, session != null && session.PairingReady, pending.SelectedItem is SunshinePendingPair);
+        pair.Enabled = SunshineSetupPolicy.CanPair(busy, session != null && session.PairingReady, pending.SelectedItem is SunshinePendingPair)
+            && Regex.IsMatch(pin.Text, @"\A[0-9]{4}\z");
+        pin.Enabled = !busy && !UpdateCloseRequested && session != null && session.PairingReady && pending.SelectedItem is SunshinePendingPair;
+    }
+    private void UpdatePresentation()
+    {
+        if (closing || IsDisposed) return;
+        bool ready = session != null && session.PairingReady;
+        bool hasRequests = ready && pending.Items.Count > 0;
+        requestFields.Visible = hasRequests;
+        waiting.Visible = !hasRequests && !manualAccount;
+        waiting.Text = ready ? "이 PC의 연결 준비를 마쳤습니다.\n이미 연결한 Mac에서는 「Windows 열기」를 누르세요. 새 Mac은 이 PC를 선택하면 요청이 여기에 나타납니다."
+            : "연결을 준비하고 있습니다. 아래 상태 안내를 확인하세요.";
+        prepare.Visible = !ready && (manualAccount || HadFailure);
+        refresh.Visible = ready && pendingWarning;
+        if (session != null && session.NeedsSecurityReapply) { connectionDetails.Visible = true; detailsToggle.Text = "연결 정보 접기"; }
+        UpdatePairAvailability();
     }
     private void ClampToWorkingArea()
     {
@@ -1045,14 +1081,19 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
         finally {
             busy = false;
             if (!closing && !UpdateCloseRequested) {
-                bool ready = session != null && session.PairingReady;
-                username.Enabled = session != null && !ready; password.Enabled = username.Enabled;
-                pending.Enabled = ready; pin.Enabled = ready;
-                prepare.Enabled = session != null && !ready; refresh.Enabled = ready; invitation.Enabled = session != null; UpdatePairAvailability();
-                reapply.Visible = session != null && session.CanReapply && !session.Configured; reapply.Enabled = reapply.Visible;
+                RestoreAvailability();
             }
             UpdateWorkDidFinish();
         }
+    }
+    private void RestoreAvailability()
+    {
+        bool ready = session != null && session.PairingReady;
+        username.Enabled = session != null && !ready; password.Enabled = username.Enabled;
+        pending.Enabled = ready;
+        prepare.Enabled = !ready; refresh.Enabled = ready; invitation.Enabled = session != null;
+        reapply.Visible = session != null && session.CanReapply && !session.Configured; reapply.Enabled = reapply.Visible;
+        UpdatePresentation();
     }
     protected override void Dispose(bool disposing)
     {

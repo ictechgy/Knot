@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-10-24
+- Last refreshed: 2026-10-25
 - Primary product surfaces: native macOS host connection, fullscreen desktop, SFTP file browser, Mac sharing setup, Windows sharing/client role chooser, drag-to-Applications Mac package.
 - Evidence reviewed: conversation requirements; pinned GlimmerEngine source; .omx/plans/deskbridge-v0.1.md; user-approved Concept A (Quiet Sidebar), selected 2026-10-19.
 - Approved visual references: ../design-concepts/previews/a-{desktop,files,setup}-window.png in the local deliverable; immutable copies under .omx/artifacts/visual-ralph/quiet-sidebar. Reproduce native synthetic snapshots with scripts/render_visual_fixture.py. No Local Media UI or existing user settings inspected.
@@ -174,3 +174,13 @@ Windows 설정·QR 창은 DPI에 맞춰 확대되고 현재 작업 영역 안으
 - Keep the public QR/link reachable inside the native preparation window while the outer host window is hidden. Request polling is independent of UI busy state: preserve an explicitly selected exact ID/name/address while refreshing, back off transient failures, and stop on trust failures until explicit refresh. Never disable PIN entry merely for background polling. Serialize installers across Windows sessions with a global installer mutex.
 
 - The installer close bridge uses the same native loader, image/payload pins, protected staging and sanitized elevated environment as the app before starting CLR. Never execute the managed close policy directly from inherited installer environment. Optional engine inputs use metadata probes that accept only actual not-found errors as absence; denied/unknown metadata prevents startup.
+
+
+## Windows task-focused connection UI (2026-10-25)
+
+- The user reports that both the everyday buttons and the expanded advanced panel are hard to understand. Retain native Windows controls and the existing trust/privilege boundaries; change information hierarchy rather than adding a new settings system.
+- The preparation window starts automatically as before. Show the next relevant action: existing-account login only when required, retry only after a failure, pending Mac selection and four-digit PIN approval only while requests exist. Keep explicit peer selection; never preselect or approve a discovered Mac.
+- Background request polling does not need a permanent refresh button. Show recovery refresh when polling reports a problem. Put QR/link help behind “Mac에서 이 PC가 보이지 않나요?” and the account/security explanation behind its own disclosure. Keep a selectable status footer outside the scrolling content. Closing preparation returns to other functions; it does not stop the Sunshine service or erase pairing.
+- The outer window keeps one primary preparation action. Put optional tasks under “다른 기능 및 도움”: files, headless use, opening another computer, and connection troubleshooting. Explain when each is needed. Expand one sibling task at a time without clearing inputs or starting work merely on expansion.
+- Within files, automatic enrollment is primary. JSON recovery and access revocation are separate collapsed tasks; access revocation explicitly retains shared files. Within troubleshooting, direct Sunshine installation/account/encryption/browser PIN controls require a further explicit manual-setup disclosure. Avoid numbered references to sections that are no longer visible.
+- Disclosure actions respect update/busy admission. Cancellation, existing pairing, certificate pins, SSH identity and explicit UAC/file authorization remain unchanged. Tests use actual disclosure handlers with inert controls and existing protocol/primary-action fixtures; no live service, user preferences, screen, clipboard or history is read. Real Windows layout and two-device acceptance remain separate from CI compilation.

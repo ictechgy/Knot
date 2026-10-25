@@ -58,13 +58,47 @@ function Add-Button([string] $Text,[scriptblock] $Action,[switch] $AllowDuringUp
     })
     $script:section.Controls.Add($button); return $button
 }
-$title = Add-Text 'Windows를 Mac의 한 화면으로' 38
+function Set-SetupDisclosure($Panel,[bool] $Expanded) {
+    if ($Expanded) {
+        foreach ($sibling in $Panel.Tag.Owner.Controls) {
+            if ($sibling.Tag -and $sibling.Tag.PSObject.Properties['DisclosurePanel']) {
+                Set-SetupDisclosure $sibling.Tag.DisclosurePanel $false
+            }
+        }
+    }
+    $Panel.Visible=$Expanded
+    $Panel.Tag.Toggle.Text=if ($Expanded) {'－ '+$Panel.Tag.Title} else {'＋ '+$Panel.Tag.Title}
+}
+function Add-SetupDisclosure([string] $Title,[string] $Summary) {
+    $owner=$script:section
+    $toggle=Add-Button ('＋ '+$Title) {}
+    $panel=New-Object Windows.Forms.FlowLayoutPanel
+    $panel.FlowDirection='TopDown'; $panel.WrapContents=$false; $panel.AutoSize=$true
+    $panel.AutoSizeMode='GrowAndShrink'; $panel.Width=710; $panel.Visible=$false
+    $panel.Tag=[pscustomobject]@{Toggle=$toggle;Title=$Title;Owner=$owner}
+    $toggle.Tag | Add-Member -NotePropertyName DisclosurePanel -NotePropertyValue $panel
+    $owner.Controls.Add($panel)
+    $label=New-Object Windows.Forms.Label; $label.Text=$Summary; $label.AutoSize=$true
+    $label.MaximumSize=New-Object Drawing.Size(710,0); $panel.Controls.Add($label)
+    $toggle.Add_Click({ param($sender,$eventArgs)
+        if ($form.UpdateCloseRequested -or $form.UseWaitCursor) { return }
+        $target=$sender.Tag.DisclosurePanel; $expand=-not $target.Visible
+        Set-SetupDisclosure $target $expand
+        if ($expand) { $flow.ScrollControlIntoView($target) }
+    })
+    return ,$panel
+}
+function Show-SetupTroubleshooting {
+    Set-SetupDisclosure $optionsPanel $true
+    Set-SetupDisclosure $advancedPanel $true
+}
+$title = Add-Text '이 Windows를 Mac에서 열기' 38
 $title.Font = New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold)
-$null = Add-Text '필요한 구성요소 설치와 계정·보안 설정을 자동으로 준비합니다. Sunshine을 따로 열 필요가 없습니다.' 48
+$null = Add-Text '연결 준비는 자동으로 진행합니다. Mac에서 이 PC를 선택한 뒤 Windows에 표시되는 요청을 확인하세요.' 48
 $script:quickInstall=$false
 $quick=Add-Button '연결 준비 · 자동 설정' { Invoke-QuickSetup }
 $quick.AccessibleDescription='화면 공유 구성요소 설치, 계정 생성과 보안 설정을 자동으로 진행합니다. Mac PIN만 이 창에서 승인합니다.'
-$null = Add-Text 'Windows 관리자 승인 후 처음 계정은 자동으로 만듭니다. 기존 Sunshine 계정만 처음 한 번 로그인하세요. Mac의 PIN을 승인한 뒤에는 저장된 연결을 사용하세요. 보안 설정을 처음 적용하거나 다시 적용할 때 Sunshine이 재시작될 수 있습니다.' 64
+$null = Add-Text '처음에는 Windows 관리자 승인이 필요합니다. 이미 연결한 Mac에서는 Knot의 「Windows 열기」를 사용하세요.' 48
 $status=New-Object Windows.Forms.TextBox
 $status.AccessibleName='Windows 연결 설정 상태'; $status.AccessibleDescription='진행 상황과 다음 단계 안내입니다. 내용을 선택해 복사할 수 있습니다.'
 $status.ReadOnly=$true; $status.Multiline=$true; $status.ScrollBars='Vertical'; $status.BorderStyle='None'; $status.BackColor=[Drawing.SystemColors]::Control
@@ -165,8 +199,8 @@ function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('St
 }
 function Invoke-QuickSetup {
     if ([string]::IsNullOrWhiteSpace($LauncherPath)) {
-        $status.Text='간편 연결은 설치된 Knot EXE에서 사용할 수 있습니다. 소스 폴더에서는 고급·수동 설정을 사용하세요.'
-        $advancedPanel.Visible=$true; return
+        $status.Text='간편 연결은 설치된 Knot EXE에서 사용할 수 있습니다. 소스 폴더에서는 다른 기능 및 도움 → 연결 문제 해결을 사용하세요.'
+        Show-SetupTroubleshooting; return
     }
     Set-Busy $true
     try {
@@ -183,13 +217,13 @@ function Invoke-QuickSetup {
                 $existing=@()
             }
             if ($existing.Count -gt 0) {
-                $status.Text='기존 Sunshine 서비스가 있습니다. 표준 설치 위치를 확인하지 못해 다시 설치하지 않습니다. 고급·수동 설정을 사용하세요.'
-                $advancedPanel.Visible=$true; return
+                $status.Text='기존 Sunshine 서비스가 있습니다. 표준 설치 위치를 확인하지 못해 다시 설치하지 않습니다. 다른 기능 및 도움 → 연결 문제 해결을 사용하세요.'
+                Show-SetupTroubleshooting; return
             }
             Invoke-SunshineLocalCheck -WaitMilliseconds 1000
             if ($script:quickSetupPortResponded -ne $false -or $null -eq $script:quickSetupPortResponded) {
-                $status.Text='기존 또는 확인되지 않은 로컬 서비스가 있어 자동 설치를 중단했습니다. 고급·수동 설정을 확인하세요.'
-                $advancedPanel.Visible=$true; return
+                $status.Text='기존 또는 확인되지 않은 로컬 서비스가 있어 자동 설치를 중단했습니다. 다른 기능 및 도움 → 연결 문제 해결을 확인하세요.'
+                Show-SetupTroubleshooting; return
             }
             $script:quickInstall=$true
             & $script:installAction
@@ -207,30 +241,27 @@ function Invoke-QuickSetup {
         } elseif ($process.ExitCode -eq 1602) {
             $status.Text='간편 연결 창을 닫았습니다. 완료된 설치·설정과 기존 페어링은 유지됩니다. 필요할 때 다시 누르세요.'
         } else {
-            $status.Text='간편 연결을 완료하지 못했습니다. 관리자 창의 안내를 확인하거나 고급·수동 설정을 사용하세요. 기존 인증서는 유지됩니다.'
+            $status.Text='간편 연결을 완료하지 못했습니다. 관리자 창의 안내를 확인하거나 다른 기능 및 도움 → 연결 문제 해결을 사용하세요. 기존 인증서는 유지됩니다.'
         }
     } catch { Show-Failure $_ }
     finally { $script:quickInstall=$false; if (-not $form.IsDisposed) { $form.Show(); $form.Activate() }; Set-Busy $false }
 }
+$optionsPanel=Add-SetupDisclosure '다른 기능 및 도움' '하려는 일을 선택하세요. 화면 연결만 사용할 때는 아래 설정이 필요 없습니다.'
+$script:section=$optionsPanel
+$remotePanel=Add-SetupDisclosure '이 Windows에서 다른 컴퓨터 열기' '접속할 컴퓨터를 선택하세요. Mac이나 Linux에서도 먼저 화면 공유를 켜야 합니다.'
 $remoteActions=New-Object Windows.Forms.FlowLayoutPanel; $remoteActions.AutoSize=$true
 foreach ($remote in @(@('Mac에 접속',10),@('Linux에 접속',11),@('업데이트 / 버전',12))) {
     $button=New-Object Windows.Forms.Button; $button.Text=$remote[0]; $button.Tag=$remote[1]; $button.AutoSize=$true
     $button.Add_Click({ param($sender,$eventArgs) $form.Tag=[int]$sender.Tag; $form.Close() })
     $remoteActions.Controls.Add($button)
 }
-$flow.Controls.Add($remoteActions)
-$advancedToggle=Add-Button '＋ 고급·수동 설정' {}
-$advancedPanel=New-Object Windows.Forms.FlowLayoutPanel
-$advancedPanel.FlowDirection='TopDown'; $advancedPanel.WrapContents=$false; $advancedPanel.AutoSize=$true
-$advancedPanel.AutoSizeMode='GrowAndShrink'; $advancedPanel.Width=710; $advancedPanel.Visible=$false
-$flow.Controls.Add($advancedPanel)
-$advancedToggle.Add_Click({
-    $advancedPanel.Visible=-not $advancedPanel.Visible
-    $advancedToggle.Text=if ($advancedPanel.Visible) {'－ 고급·수동 설정 접기'} else {'＋ 고급·수동 설정'}
-})
+$remotePanel.Controls.Add($remoteActions)
+$advancedPanel=Add-SetupDisclosure '연결 문제 해결' '먼저 「연결 준비 · 자동 설정」을 다시 시도하세요. 자동 설정이 어려운 기존 Sunshine 설치는 아래에서 확인할 수 있습니다.'
 $script:section=$advancedPanel
-$null = Add-Text '1   화면 연결 프로그램 설치' 30
-$null = Add-Text 'Sunshine이 Windows 화면을 Mac으로 전달합니다. 이미 설치했다면 다음 단계로 가세요.' 36
+$manualPanel=Add-SetupDisclosure '화면 공유를 직접 설정해야 하나요?' '기존 Sunshine을 직접 관리할 때만 사용하세요. 처음 설치라면 위의 자동 설정을 사용하면 됩니다.'
+$script:section=$manualPanel
+$null = Add-Text '화면 공유 프로그램 직접 설치' 30
+$null = Add-Text 'Sunshine이 아직 없을 때만 설치하세요. 이미 설치된 버전을 바꾸기 위한 버튼이 아닙니다.' 36
 $script:installAction={
     Set-Busy $true; $folder=$null; $download=$null; $verifiedDownload=$null
     try {
@@ -274,7 +305,7 @@ $script:installAction={
         $process.WaitForExit()
         if ($null -eq $process.ExitCode) { throw 'Sunshine 설치 결과를 확인하지 못했습니다. Windows 설치 안내를 확인하세요.' }
         if ($script:quickInstall -and $process.ExitCode -in @(0,1602,2)) {
-            $status.Text=if ($process.ExitCode -eq 0) {'설치와 계정 확인을 마쳤습니다. PIN 승인에는 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 화면 전송 성공은 Mac에서 확인하세요.'} elseif ($process.ExitCode -eq 1602) {'간편 연결을 취소했습니다. 이미 완료된 설치·설정은 유지됩니다. 연결 준비로 다시 시작하세요.'} else {'간편 연결을 완료하지 못했습니다. 표시된 안내나 고급·수동 설정을 확인하세요. 이미 완료된 단계와 기존 인증서는 유지됩니다.'}
+            $status.Text=if ($process.ExitCode -eq 0) {'설치와 계정 확인을 마쳤습니다. PIN 승인에는 이 버튼으로 Windows의 준비를 먼저 마치고 창을 열어 둔 뒤 Mac에서 PC 확인 → PIN으로 연결을 시작하세요. 화면 전송 성공은 Mac에서 확인하세요.'} elseif ($process.ExitCode -eq 1602) {'간편 연결을 취소했습니다. 이미 완료된 설치·설정은 유지됩니다. 연결 준비로 다시 시작하세요.'} else {'간편 연결을 완료하지 못했습니다. 표시된 안내나 다른 기능 및 도움 → 연결 문제 해결을 확인하세요. 이미 완료된 단계와 기존 인증서는 유지됩니다.'}
             return
         }
         $result=Get-SunshineInstallResult -ExitCode $process.ExitCode -Broker:([bool]$LauncherPath)
@@ -305,31 +336,39 @@ $script:installAction={
 }
 $install=Add-Button 'Sunshine 설치 · 수동' $script:installAction
 $downloadCancel=Add-Button '다운로드 취소' { $script:cancelDownload=$true } -AllowDuringUpdate; $downloadCancel.Visible=$false
-$advancedPanel.Controls.Remove($downloadCancel); $flow.Controls.Add($downloadCancel)
-$null = Add-Text '2   이 Windows에서 Sunshine 초기 설정 · 처음 한 번' 30
+$manualPanel.Controls.Remove($downloadCancel); $flow.Controls.Add($downloadCancel)
+$null = Add-Text 'Sunshine 설정을 직접 관리할 때' 30
 $null = Add-Text "Sunshine은 별도 창 없이 백그라운드에서 실행됩니다. 아래 버튼으로 이 Windows의 브라우저를 여세요. 초기 계정을 만들고 로그인합니다. 이 계정은 Sunshine 설정용이며 Mac에서 로그인하지 않습니다.`r`n영상 암호화 설정 열기 → LAN Encryption Mode / WAN Encryption Mode를 둘 다 Required for all clients로 선택하세요. 한국어: LAN/WAN 암호화 모드 → 모든 사용자에게 필수. Save → Apply/재시작까지 완료하세요. Wi-Fi와 Tailscale도 LAN으로 분류될 수 있어 LAN 설정이 필요합니다. Desktop 앱도 확인하세요." 118
+$script:section=$advancedPanel
 $localPortStatus=Add-Text '로컬 설정 포트: 아직 확인하지 않았습니다. 포트 응답은 Sunshine 로그인이나 화면 연결 성공을 의미하지 않습니다.' 46
 $checkLocal=Add-Button '설정 상태 새로고침' { Invoke-SunshineLocalCheck }
 $localCheckCancel=Add-Button '설정 포트 확인 취소' { $script:cancelLocalCheck=$true } -AllowDuringUpdate; $localCheckCancel.Visible=$false
-$open = Add-Button '이 Windows에서 Sunshine 설정 열기' { Invoke-SunshineLocalCheck -Open Settings }
+$script:section=$manualPanel
+$open = Add-Button 'Sunshine 관리 화면 열기' { Invoke-SunshineLocalCheck -Open Settings }
 $encryption = Add-Button '영상 암호화 설정 열기' { Invoke-SunshineLocalCheck -Open Encryption }
 $null = Add-Text '직접 열기: 이 Windows의 Edge/Chrome → https://localhost:47990/ · localhost는 현재 브라우저를 연 컴퓨터를 뜻합니다. Mac에서는 열지 마세요.' 48
-$services=Add-Button 'Windows 서비스 상태 직접 확인…' {
+$script:section=$advancedPanel
+$services=Add-Button '프로그램이 실행 중인지 Windows에서 확인…' {
     try { Start-Process 'services.msc'; $status.Text='Windows 서비스 목록에서 Sunshine 상태를 직접 확인하세요. Knot은 서비스를 자동으로 시작하거나 설정을 바꾸지 않았습니다.' }
     catch { $status.Text='Windows 서비스 창을 열지 못했습니다. Windows 시작 메뉴에서 「서비스」를 검색한 뒤 Sunshine 상태를 직접 확인하세요.' }
 }
-$headless = Add-Button '모니터 없이 사용… (선택)' {
+$script:section=$optionsPanel
+$headlessPanel=Add-SetupDisclosure '모니터 없이 이 PC 사용하기' '화면이 연결되지 않은 PC에 가상 모니터를 추가할 때만 사용하세요. 모니터가 연결돼 있다면 필요 없습니다.'
+$script:section=$headlessPanel
+$headless = Add-Button '가상 모니터 설정 열기…' {
     Set-Busy $true
     try { & (Join-Path $PSScriptRoot 'Show-HeadlessSetup.ps1') -Owner $form -LauncherPath $LauncherPath }
     catch { Show-Failure $_ }
     finally { Set-Busy $false }
 }
-$null = Add-Text '3   Mac에서 PIN 만들기 → 이 Windows에서 승인' 30
+$script:section=$manualPanel
+$null = Add-Text '브라우저에서 PIN을 승인해야 할 때' 30
 $null = Add-Text 'Mac의 Windows 화면에서 근처 PC 선택 → 「PIN으로 연결」을 누르세요. Mac에 표시된 PIN을 아래 버튼으로 연 이 Windows의 Sunshine 페이지에 입력합니다. Windows에서 PIN 승인을 마친 뒤 Mac에서 「Windows 열기」를 누르세요.' 65
 $pin=Add-Button '이 Windows에서 PIN 입력 화면 열기' { Invoke-SunshineLocalCheck -Open PIN }
-$null = Add-Text 'Sunshine 로그인이 먼저 나오면 2단계에서 만든 계정으로 로그인한 뒤 PIN 메뉴를 여세요. 설정을 바꾼 뒤에도 기존 PIN 페어링은 지우지 마세요. PC가 목록에 없으면 아래 QR / 링크를 사용하세요.' 55
+$null = Add-Text 'Sunshine 로그인이 먼저 나오면 기존 Sunshine 계정으로 로그인한 뒤 PIN 메뉴를 여세요. 설정을 바꾼 뒤에도 기존 PIN 페어링은 지우지 마세요. PC가 목록에 없으면 아래 QR / 링크를 사용하세요.' 55
 $script:section=$flow
-$null = Add-Text 'Windows의 연결 준비 창을 열어 두세요. 이어서 Mac에서 근처 PC → PC 확인 → PIN으로 연결을 누르고, Windows 창에서 Mac의 요청과 PIN을 승인합니다. 검색되지 않으면 QR / 링크를 사용하세요.' 68
+$qrPanel=Add-SetupDisclosure 'Mac에서 이 PC가 보이지 않나요?' '두 컴퓨터를 같은 Wi-Fi 또는 Tailscale에 연결하세요. 그래도 목록에 없으면 아래 QR이나 연결 링크로 PC를 추가할 수 있습니다.'
+$script:section=$qrPanel
 $qrButton = Add-Button '연결 QR / 링크 보기…' {
     Set-Busy $true
     try {
@@ -363,8 +402,8 @@ function Update-WindowsAddresses {
     elseif ($addresses.Items.Count -gt 0) { $addresses.SelectedIndex=0 }
     $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count
 }
-$advancedPanel.Controls.Add($addresses)
-$script:section=$advancedPanel
+$qrPanel.Controls.Add($addresses)
+$script:section=$qrPanel
 $copy = Add-Button '선택한 Windows 주소 복사' {
     if ($addresses.SelectedItem) {
         try { [Windows.Forms.Clipboard]::SetText([string]$addresses.SelectedItem); $status.Text='주소를 복사했습니다. Mac의 원격 화면 탭에 입력하세요.' }
@@ -372,17 +411,8 @@ $copy = Add-Button '선택한 Windows 주소 복사' {
     } else { $status.Text='연결 가능한 주소가 없습니다. Wi-Fi 또는 Tailscale에 연결한 뒤 주소를 새로고침하세요.' }
 }
 $refresh = Add-Button '주소 새로고침' { try { Update-WindowsAddresses } catch { Show-Failure $_ } }
-$script:section=$flow
-$filesToggle = Add-Button '＋ 파일 전송도 설정하기 (선택)' {}
-$filePanel=New-Object Windows.Forms.FlowLayoutPanel
-$filePanel.FlowDirection='TopDown'; $filePanel.WrapContents=$false; $filePanel.AutoSize=$true
-$filePanel.AutoSizeMode='GrowAndShrink'; $filePanel.Width=710; $filePanel.Visible=$false
-$flow.Controls.Add($filePanel)
-$filesToggle.Add_Click({
-    $filePanel.Visible=-not $filePanel.Visible
-    $filesToggle.Text=if ($filePanel.Visible) {'－ 파일 전송 설정 접기'} else {'＋ 파일 전송도 설정하기 (선택)'}
-    if ($filePanel.Visible) { $flow.ScrollControlIntoView($filePanel) }
-})
+$script:section=$optionsPanel
+$filePanel=Add-SetupDisclosure '파일 주고받기' 'Mac과 Windows 사이에서 파일을 보내거나 가져올 때 한 번만 연결하세요. 화면 연결과 별도의 접근 승인이 필요합니다.'
 $script:section=$filePanel
 $null = Add-Text '파일 전송 · 필요할 때 한 번' 30
 $null = Add-Text '화면 연결에는 아래 설정이 필요 없습니다. 파일 기능은 Mac 전용 키와 별도의 Windows 파일 계정을 사용합니다.' 42
@@ -425,8 +455,9 @@ $enrollmentCancel=Add-Button '자동 파일 설정 연결 취소' {
     $enrollmentCancel.Enabled=$false
 } -AllowDuringUpdate
 $enrollmentCancel.Visible=$false
-$null=Add-Text '수동 복구: 자동 연결이 어려울 때만 Mac에서 설정 JSON을 저장해 아래에서 불러오세요.' 40
-$requestBox = New-Object Windows.Forms.TextBox; $requestBox.ReadOnly=$true; $requestBox.Width=710; $filePanel.Controls.Add($requestBox)
+$fileRecoveryPanel=Add-SetupDisclosure '파일 연결 복구' '자동 파일 연결이 어려울 때만 사용하세요. Mac에서 저장한 설정 파일을 불러온 뒤 연결을 허용하거나, 이미 설정한 연결 파일을 다시 저장할 수 있습니다.'
+$script:section=$fileRecoveryPanel
+$requestBox = New-Object Windows.Forms.TextBox; $requestBox.ReadOnly=$true; $requestBox.Width=710; $fileRecoveryPanel.Controls.Add($requestBox)
 $requestBox.AccessibleName='불러온 Mac 설정 파일'; $requestBox.AccessibleDescription='Mac 설정 파일 불러오기에서 선택한 JSON 파일의 위치입니다.'
 $load = Add-Button 'Mac 설정 파일 불러오기…' {
     try {
@@ -538,8 +569,13 @@ function Invoke-FileSetup([string] $Operation, $AutomaticRequest=$null, $Automat
 }
 $enable = Add-Button '파일 전송 설정 · 연결 파일 만들기…' { Invoke-FileSetup 'EnableFiles' }
 $export = Add-Button '이미 설정한 연결 파일 다시 저장…' { Invoke-FileSetup 'Export' }
-$disable = Add-Button '이 Windows의 파일 접속 해제…' { Invoke-FileSetup 'DisableFiles' }
 $null = Add-Text '저장한 Windows 연결 파일을 Mac에서 불러오고, 표시된 SSH 지문이 같은지 직접 비교하세요. 공유 폴더: Knot 공유 폴더 (기존 파일 경로 유지)' 50
+$script:section=$filePanel
+$fileAccessPanel=Add-SetupDisclosure '파일 접근 끄기' '허용했던 Mac의 파일 접근을 해제합니다. 공유 폴더 안의 파일은 유지됩니다.'
+$script:section=$fileAccessPanel
+$disable = Add-Button '이 Windows의 파일 접근 해제…' { Invoke-FileSetup 'DisableFiles' }
+$flow.Controls.SetChildIndex($qrPanel.Tag.Toggle,$flow.Controls.GetChildIndex($optionsPanel.Tag.Toggle))
+$flow.Controls.SetChildIndex($qrPanel,$flow.Controls.GetChildIndex($qrPanel.Tag.Toggle)+1)
 $script:setupContentWidth=-1; $script:setupContentDpi=0
 function Resize-SetupContent {
     $available=[Math]::Max(280,$flow.ClientSize.Width-$flow.Padding.Horizontal-[Windows.Forms.SystemInformation]::VerticalScrollBarWidth-12)
@@ -547,10 +583,10 @@ function Resize-SetupContent {
     $script:setupContentWidth=$available; $script:setupContentDpi=$form.DeviceDpi
     $flow.SuspendLayout(); $filePanel.SuspendLayout()
     try {
-        if ($filePanel.Width -ne $available) { $filePanel.Width=$available }
-        if ($advancedPanel.Width -ne $available) { $advancedPanel.Width=$available }
         foreach ($control in (Get-SetupControls $flow)) {
-            if ($control -is [Windows.Forms.Label]) {
+            if ($control -is [Windows.Forms.FlowLayoutPanel]) {
+                if ($control.Width -ne $available) { $control.Width=$available }
+            } elseif ($control -is [Windows.Forms.Label]) {
                 if ($control.MaximumSize.Width -ne $available) { $control.MaximumSize=New-Object Drawing.Size($available,0) }
             } elseif ($control -is [Windows.Forms.TextBox] -or $control -is [Windows.Forms.ComboBox]) {
                 if ($control.Width -ne $available) { $control.Width=$available }

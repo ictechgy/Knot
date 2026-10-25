@@ -17,6 +17,7 @@ function Join-Path {param($Path,$ChildPath) return '/synthetic/installed.exe'}
 function Test-Path {param($LiteralPath,$PathType) return $script:installed}
 function Start-Sleep {param($Milliseconds)}
 function Invoke-InertEvents {}
+function Show-SetupTroubleshooting { $advancedPanel.Visible=$true }
 function Show-Failure {param($ErrorRecord) $status.Text='Fixed synthetic failure';$script:failed=$true}
 function Get-Service {
     [CmdletBinding()]param($Name)
@@ -104,4 +105,57 @@ Expect $script:cancelDownload 'Cleanup action must update the original cancellat
 $form.UpdateCloseRequested=$false
 & $normal.Handler $normal ([EventArgs]::Empty)
 Expect ($script:buttonActions -eq 2) 'Failed update cancellation must restore action admission'
-@{status='passed';checks=$script:checks;actualPrimaryAction=$true;actualUpdateButtons=$true;freshSyntheticOnly=$true;network=$false;serviceAccess=$false;gui=$false} | ConvertTo-Json -Compress
+# Exercise the real disclosure handlers after their creating function returns.
+# Inert controls keep this independent of Forms, a desktop, accounts and services.
+function New-Object([string]$TypeName) {
+    switch ($TypeName) {
+        'Windows.Forms.Button' {
+            $value=[pscustomobject]@{Text='';Size=$null;Tag=$null;Handler=$null}
+            $value|Add-Member ScriptMethod Add_Click {param($Handler) $this.Handler=$Handler}
+            return $value
+        }
+        'Windows.Forms.FlowLayoutPanel' {
+            return [pscustomobject]@{Controls=[Collections.Generic.List[object]]::new();FlowDirection='';WrapContents=$true;AutoSize=$false;AutoSizeMode='';Width=0;Visible=$true;Tag=$null}
+        }
+        'Windows.Forms.Label' { return [pscustomobject]@{Text='';AutoSize=$false;MaximumSize=$null;Tag=$null} }
+        default {throw 'Unexpected synthetic disclosure constructor'}
+    }
+}
+foreach ($name in @('Set-SetupDisclosure','Add-SetupDisclosure','Show-SetupTroubleshooting')) {
+    $definition=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
+    Expect ($definition.Count -eq 1) ('Expected actual disclosure function: '+$name)
+    Invoke-Expression ($definition[0].Extent.Text.Replace('New-Object Drawing.Size(710,0)',"'synthetic-maximum'"))
+}
+$form=[pscustomobject]@{UpdateCloseRequested=$false;UseWaitCursor=$false}
+$flow=[pscustomobject]@{Controls=[Collections.Generic.List[object]]::new();Scrolled=$null}
+$flow|Add-Member ScriptMethod ScrollControlIntoView {param($Panel) $this.Scrolled=$Panel}
+$script:section=$flow
+$optionsPanel=Add-SetupDisclosure 'Other tasks' 'Synthetic task help'
+$discoveryPanel=Add-SetupDisclosure 'Discovery' 'Synthetic discovery help'
+$script:section=$optionsPanel
+$advancedPanel=Add-SetupDisclosure 'Troubleshooting' 'Synthetic troubleshooting help'
+$syntheticFiles=Add-SetupDisclosure 'Files' 'Synthetic file help'
+$retainedInput=[pscustomobject]@{Text='synthetic input retained'}
+$syntheticFiles.Controls.Add($retainedInput)
+Expect (-not $optionsPanel.Visible -and -not $advancedPanel.Visible -and -not $syntheticFiles.Visible) 'Optional tasks start collapsed'
+& $optionsPanel.Tag.Toggle.Handler $optionsPanel.Tag.Toggle ([EventArgs]::Empty)
+Expect ($optionsPanel.Visible -and $optionsPanel.Tag.Toggle.Text -ceq '－ Other tasks') 'Returned disclosure opens its own panel and updates its label'
+& $syntheticFiles.Tag.Toggle.Handler $syntheticFiles.Tag.Toggle ([EventArgs]::Empty)
+& $advancedPanel.Tag.Toggle.Handler $advancedPanel.Tag.Toggle ([EventArgs]::Empty)
+Expect ($advancedPanel.Visible -and -not $syntheticFiles.Visible -and $syntheticFiles.Tag.Toggle.Text -ceq '＋ Files') 'Opening a task closes only sibling tasks and synchronizes their labels'
+Expect ($retainedInput.Text -ceq 'synthetic input retained') 'Switching tasks does not clear input or perform file setup'
+Expect ($flow.Scrolled -eq $advancedPanel) 'Expanded task is scrolled into view'
+& $advancedPanel.Tag.Toggle.Handler $advancedPanel.Tag.Toggle ([EventArgs]::Empty)
+Expect (-not $advancedPanel.Visible) 'An open task can be collapsed'
+foreach ($mode in @('busy','update')) {
+    $form.UseWaitCursor=$mode -ceq 'busy';$form.UpdateCloseRequested=$mode -ceq 'update'
+    & $discoveryPanel.Tag.Toggle.Handler $discoveryPanel.Tag.Toggle ([EventArgs]::Empty)
+    Expect (-not $discoveryPanel.Visible -and $optionsPanel.Visible) ('Queued disclosure respects admission: '+$mode)
+}
+$form.UseWaitCursor=$false;$form.UpdateCloseRequested=$false
+& $discoveryPanel.Tag.Toggle.Handler $discoveryPanel.Tag.Toggle ([EventArgs]::Empty)
+Expect ($discoveryPanel.Visible -and -not $optionsPanel.Visible) 'Root disclosures also show one task at a time'
+Show-SetupTroubleshooting
+Expect ($optionsPanel.Visible -and $advancedPanel.Visible -and -not $discoveryPanel.Visible) 'Automatic fallback reveals both troubleshooting ancestors without a hidden recovery panel'
+Expect ($optionsPanel.Tag.Toggle.Text -ceq '－ Other tasks' -and $advancedPanel.Tag.Toggle.Text -ceq '－ Troubleshooting') 'Automatic fallback keeps disclosure labels synchronized'
+@{status='passed';checks=$script:checks;actualPrimaryAction=$true;actualUpdateButtons=$true;actualTaskDisclosures=$true;freshSyntheticOnly=$true;network=$false;serviceAccess=$false;gui=$false} | ConvertTo-Json -Compress
