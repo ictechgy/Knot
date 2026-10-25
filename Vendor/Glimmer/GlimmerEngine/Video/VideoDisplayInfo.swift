@@ -22,7 +22,8 @@ extension VideoDecoder {
     /// Use the same configuration as StreamConnection so source colour requests agree.
     public convenience init(configuration: StreamConnection.Configuration,
                             displayInfo: @escaping @MainActor () -> VideoDisplayInfo?) {
-        self.init(colorSpace: configuration.request.colorSpace, colorRange: configuration.request.colorRange)
+        self.init(colorSpace: configuration.request.colorSpace, colorRange: configuration.request.colorRange,
+                  sdrColorMode: configuration.request.sdrColorMode)
         self.displayInfo = displayInfo
     }
 }

@@ -3,6 +3,15 @@
 
 import Foundation
 
+/// How SDR desktop RGB code values are interpreted after YCbCr decoding.
+/// This does not change the negotiated matrix, range, pixel values or HDR handling.
+public enum SDRColorMode: Sendable {
+    case source
+    /// Sunshine's SDR desktop capture retains sRGB code values while tagging Rec.709 video.
+    /// Reinterpret only Rec.709 SDR without an explicit gamma as desktop sRGB.
+    case desktopSRGB
+}
+
 extension StreamConnection {
     public struct Configuration: Sendable {
         let request: StreamRequest
@@ -11,11 +20,13 @@ extension StreamConnection {
         /// Advertise only formats the supplied video sink can decode. Route observations are supplied by the shell.
         public init(width: Int, height: Int, fps: Int, bitrateKbps: Int,
                     videoFormats: VideoFormats, audio: AudioConfig = .stereo,
-                    remote: Bool = false, routeMTU: Int? = nil) {
+                    remote: Bool = false, routeMTU: Int? = nil,
+                    sdrColorMode: SDRColorMode = .source) {
             var request = StreamRequest(width: width, height: height, fps: fps,
                                         bitrateKbps: bitrateKbps, videoFormats: videoFormats)
             request.audio = audio
             request.remoteness = remote ? .remote : .local
+            request.sdrColorMode = sdrColorMode
             self.request = request
             self.routeMTU = routeMTU
         }

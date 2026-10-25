@@ -22,12 +22,14 @@ public final class VideoDecoder {
 
     // Tests pass a scripted clock, a factory that never reaches VideoToolbox, or both.
     init(now: @escaping @Sendable () -> UInt64, makeSession: @escaping SessionFactory,
-         colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full) {
+         colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full,
+         sdrColorMode: SDRColorMode = .source) {
         self.log = Logger(subsystem: "io.ugfugl.Glimmer", category: "Stream.VideoDecoder")
         self.now = now
         self.makeSession = makeSession
         self.requestedColorSpace = colorSpace
         self.requestedColorRange = colorRange
+        self.sdrColorMode = sdrColorMode
     }
 
     convenience init(now: @escaping @Sendable () -> UInt64) {
@@ -38,13 +40,15 @@ public final class VideoDecoder {
         self.init(now: { DispatchTime.now().uptimeNanoseconds }, makeSession: makeSession)
     }
 
-    package convenience init(colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full) {
+    package convenience init(colorSpace: ColorSpace = .rec709, colorRange: ColorRange = .full,
+                             sdrColorMode: SDRColorMode = .source) {
         self.init(now: { DispatchTime.now().uptimeNanoseconds }, makeSession: VideoDecoder.createSession,
-                  colorSpace: colorSpace, colorRange: colorRange)
+                  colorSpace: colorSpace, colorRange: colorRange, sdrColorMode: sdrColorMode)
     }
 
     nonisolated let requestedColorSpace: ColorSpace
     nonisolated let requestedColorRange: ColorRange
+    nonisolated let sdrColorMode: SDRColorMode
     nonisolated let resolvedColor = OSAllocatedUnfairLock<VideoColorDescription?>(initialState: nil)
     nonisolated let pixelFormatRanges = OSAllocatedUnfairLock(initialState: [OSType: String]())
     var colorDisplayProbeTask: Task<Void, Never>?

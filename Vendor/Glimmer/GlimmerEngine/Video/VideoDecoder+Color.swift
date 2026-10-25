@@ -79,14 +79,26 @@ extension VideoDecoder {
             ?? input.flatMap {
                 CMFormatDescriptionGetExtension($0, extensionKey: kCVImageBufferGammaLevelKey) as? Double
             }
+        let resolvedPrimaries = primaries ?? fallback.primaries
+        let resolvedMatrix = matrix ?? fallback.matrix
+        let sourceTransfer = transfer ?? fallback.transfer
+        // Desktop capture preserves the display's nonlinear RGB code values. Sunshine's
+        // SDR Rec.709 label describes its YCbCr encoding, but applying a second video
+        // transfer interpretation on macOS lifts desktop midtones (128 becomes ~139).
+        // Opt in only for known Rec.709 SDR; keep explicit gamma, other gamuts and HDR.
+        let desktopSDR = sdrColorMode == .desktopSRGB && !controlHDR && gamma == nil
+            && (transfer != nil || !tenBit)
+            && resolvedPrimaries == kCVImageBufferColorPrimaries_ITU_R_709_2 as String
+            && resolvedMatrix == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
+            && sourceTransfer == kCVImageBufferTransferFunction_ITU_R_709_2 as String
+        let resolvedTransfer = desktopSDR ? kCVImageBufferTransferFunction_sRGB as String : sourceTransfer
         if let cached = resolvedColor.withLock({ $0 }),
-           cached.primaries == primaries ?? fallback.primaries,
-           cached.transfer == transfer ?? fallback.transfer,
-           cached.matrix == matrix ?? fallback.matrix, cached.range == range, cached.gamma == gamma {
+           cached.primaries == resolvedPrimaries, cached.transfer == resolvedTransfer,
+           cached.matrix == resolvedMatrix, cached.range == range, cached.gamma == gamma {
             return cached
         }
-        return VideoColorDescription(primaries: primaries ?? fallback.primaries,
-                                     transfer: transfer ?? fallback.transfer, matrix: matrix ?? fallback.matrix,
+        return VideoColorDescription(primaries: resolvedPrimaries,
+                                     transfer: resolvedTransfer, matrix: resolvedMatrix,
                                      range: range, gamma: gamma)
     }
 
