@@ -87,9 +87,9 @@ internal static class SunshineSetupResourceFactory
 
 internal sealed class SunshinePendingLoad
 {
-    internal readonly List<SunshinePendingPair> Items; internal readonly string Failure;
+    internal readonly List<SunshinePendingPair> Items; internal readonly string Failure; internal readonly bool SecurityFailure;
     internal bool Succeeded { get { return Failure == null; } }
-    internal SunshinePendingLoad(List<SunshinePendingPair> items, string failure = null) { Items = items; Failure = failure; }
+    internal SunshinePendingLoad(List<SunshinePendingPair> items, string failure = null, bool securityFailure = false) { Items = items; Failure = failure; SecurityFailure = securityFailure; }
 }
 
 internal static class SunshineSetupPolicy
@@ -160,6 +160,8 @@ internal static class SunshineSetupPolicy
             : "요청 목록을 불러오지 못했습니다. 준비 완료 상태는 유지됩니다. '요청 새로고침'으로 다시 확인하세요.";
     }
     internal static string PendingStatus(bool configured, string failure) { return ReadyMessage(configured) + Environment.NewLine + failure; }
+    internal static bool SamePending(SunshinePendingPair a, SunshinePendingPair b)
+    { return a != null && b != null && a.ID == b.ID && a.Name == b.Name && a.Address == b.Address; }
     internal static bool CanPair(bool busy, bool pairingReady, bool selected) { return !busy && pairingReady && selected; }
     internal static bool IsWelcome(SunshineApiReply reply) { return reply.Status == 307 && reply.Location == "/welcome"; }
     internal static void ValidateCredentials(string username, string password, bool create)
@@ -457,7 +459,7 @@ internal sealed class SunshineSetupSession
         SunshineSetupPolicy.Require(PairingReady && authorization != null);
         try { return new SunshinePendingLoad(await PendingAsync(cancel).ConfigureAwait(false)); }
         catch (OperationCanceledException) { throw; }
-        catch (SunshineSetupFailure) { return new SunshinePendingLoad(new List<SunshinePendingPair>(), SunshineSetupPolicy.PendingFailure(true)); }
+        catch (SunshineSetupFailure) { return new SunshinePendingLoad(new List<SunshinePendingPair>(), SunshineSetupPolicy.PendingFailure(true), true); }
         catch (Exception) { cancel.ThrowIfCancellationRequested(); return new SunshinePendingLoad(new List<SunshinePendingPair>(), SunshineSetupPolicy.PendingFailure(false)); }
     }
     internal async Task PairAsync(SunshinePendingPair selected, string pin, CancellationToken cancel)
@@ -519,6 +521,8 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
                     SunshineSetupPolicy.Require((File.GetAttributes(configFile) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0);
                     AssertProtectedFile(configFile);
                 }
+            string existingKey = Path.Combine(install, @"config\credentials\cakey.pem");
+            if (File.Exists(existingKey)) AssertConfidentialKeyMetadata(existingKey);
             SunshineServiceStartup.EnsureStarted(serviceBinary);
 
             if (!Directory.Exists(Path.GetDirectoryName(certificate))) throw new IOException();
@@ -780,17 +784,18 @@ internal sealed class SunshineProcessWitness : ISunshineRestartWitness
 internal sealed class SunshineQuickSetupForm : Form
 {
     private readonly TextBox username = new TextBox(), password = new TextBox(), pin = new TextBox();
-    private readonly Button prepare = new Button(), refresh = new Button(), pair = new Button(), reapply = new Button();
+    private readonly Button prepare = new Button(), refresh = new Button(), pair = new Button(), reapply = new Button(), invitation = new Button();
     private readonly ComboBox pending = new ComboBox(); private readonly TextBox status = new TextBox();
     private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
     private readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 2000 };
     private readonly CancellationToken cancellation;
     private SunshinePinnedApi api; private SunshineSetupSession session; private SunshineProtectedAccountStore accountStore; private SunshineAccountController accounts;
-    private readonly FlowLayoutPanel accountFields = new FlowLayoutPanel(); private bool manualAccount; private bool closing, busy; private int cleanupStarted;
+    private readonly FlowLayoutPanel accountFields = new FlowLayoutPanel(); private readonly string payloadDirectory; private bool manualAccount; private bool closing, busy, polling, pendingWarning; private int cleanupStarted;
     internal bool Completed { get; private set; }
     internal bool HadFailure { get; private set; }
-    internal SunshineQuickSetupForm()
+    internal SunshineQuickSetupForm(string payloadDirectory)
     {
+        this.payloadDirectory = payloadDirectory;
         cancellation = lifetime.Token;
         var applicationIcon = Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location); Icon = applicationIcon;
         Disposed += delegate { if (applicationIcon != null) applicationIcon.Dispose(); };
@@ -816,9 +821,17 @@ internal sealed class SunshineQuickSetupForm : Form
         layout.Controls.Add(new Label { Text = "연결할 Mac에서 Knot의 이 PC를 선택하세요. 요청한 Mac의 이름과 주소를 직접 확인한 뒤 PIN을 입력하세요.", AutoSize = true, MaximumSize = new Size(530, 0) });
         var requests = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pending.DropDownStyle = ComboBoxStyle.DropDownList; pending.Width = 380; refresh.Text = "요청 새로고침"; refresh.AutoSize = true; refresh.Enabled = false; requests.Controls.Add(pending); requests.Controls.Add(refresh); layout.Controls.Add(requests);
         var pairing = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "선택한 Mac 연결"; pair.AutoSize = true; pair.Enabled = false; pairing.Controls.Add(new Label { Text = "Mac의 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); layout.Controls.Add(pairing);
+        invitation.Text = "이 PC의 QR / 연결 링크"; invitation.AutoSize = true; invitation.Enabled = false;
+        invitation.Click += async delegate { await WorkAsync(ShowInvitationAsync); }; layout.Controls.Add(invitation);
         reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; layout.Controls.Add(reapply);
         var close = new Button { Text = "닫기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
-        poll.Tick += async delegate { if (!busy && !closing && session != null && session.PairingReady && pending.Items.Count == 0) await WorkAsync(async delegate { if (!await RefreshPendingAsync()) poll.Stop(); }); };
+        poll.Tick += async delegate {
+            if (busy || polling || closing || session == null || !session.PairingReady) return;
+            polling = true;
+            try { await RefreshPendingAsync(true, true); } catch (OperationCanceledException) { }
+            catch (Exception) { if (!closing) { poll.Interval = 5000; } }
+            finally { polling = false; }
+        };
         pending.SelectedIndexChanged += delegate { UpdatePairAvailability(); };
         Shown += async delegate { ClampToWorkingArea(); await WorkAsync(InitializeAsync); };
         prepare.Click += async delegate { await WorkAsync(PrepareAccountAsync); };
@@ -849,6 +862,45 @@ internal sealed class SunshineQuickSetupForm : Form
         }
         base.WndProc(ref message);
     }
+    private async Task ShowInvitationAsync()
+    {
+        string link = await Task.Run(delegate {
+            var addresses = new List<string>();
+            foreach (var adapter in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (adapter.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                foreach (var address in adapter.GetIPProperties().UnicastAddresses)
+                {
+                    if (address.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                    string value = address.Address.ToString(); if (value.StartsWith("169.254.", StringComparison.Ordinal)) continue;
+                    try { value = DeskBridge.Reverse.ConnectionPolicy.Address(value); } catch (FormatException) { continue; }
+                    if (!addresses.Contains(value) && addresses.Count < 8) addresses.Add(value);
+                }
+            }
+            string name = Environment.MachineName;
+            if (!DeskBridge.Reverse.ConnectionPolicy.ValidName(name) || addresses.Count == 0) throw new SunshineSetupFailure("Wi-Fi 또는 Tailscale 연결 후 다시 시도하세요.");
+            var result = new StringBuilder("deskbridge://connect?v=2&platform=windows&name=" + Uri.EscapeDataString(name));
+            foreach (string address in addresses) result.Append("&address=").Append(Uri.EscapeDataString(address));
+            DeskBridge.Reverse.ConnectionPolicy.Parse(result.ToString()); return result.ToString();
+        });
+        if (closing) return;
+        var assembly = System.Reflection.Assembly.LoadFrom(Path.Combine(payloadDirectory, "DeskBridge-QR.dll"));
+        Type type = assembly.GetType("Net.Codecrete.QrCodeGenerator.QrCode", true), ecc = assembly.GetType("Net.Codecrete.QrCodeGenerator.QrCode+Ecc", true);
+        object qr = type.GetMethod("EncodeText").Invoke(null, new object[] { link, ecc.GetField("Medium").GetValue(null) });
+        byte[] bitmap = (byte[])type.GetMethod("ToBmpBitmap", new Type[] { typeof(int), typeof(int) }).Invoke(qr, new object[] { 4, 6 });
+        using (var bytes = new MemoryStream(bitmap))
+        using (var image = new Bitmap(bytes))
+        using (var dialog = new Form { Text = "Knot · 이 PC 연결 QR", Icon = Icon, StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(560, 600), AutoScroll = true })
+        {
+            var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(20) };
+            layout.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(510, 0), Text = "Mac에서 QR 이미지 또는 연결 링크를 가져오세요. 이 QR에는 PC 이름과 주소만 있으며 PIN 승인은 별도로 필요합니다." });
+            layout.Controls.Add(new PictureBox { Image = image, Width = 300, Height = 300, SizeMode = PictureBoxSizeMode.Zoom, AccessibleName = "이 PC의 공개 연결 QR" });
+            layout.Controls.Add(new TextBox { ReadOnly = true, Multiline = true, Width = 510, Height = 84, Text = link, AccessibleName = "이 PC 연결 링크" });
+            var save = new Button { Text = "QR 이미지 저장…", AutoSize = true };
+            save.Click += delegate { using (var picker = new SaveFileDialog { Filter = "PNG image|*.png", FileName = "Knot-Connection-QR.png" }) if (picker.ShowDialog(dialog) == DialogResult.OK) try { image.Save(picker.FileName, System.Drawing.Imaging.ImageFormat.Png); } catch (Exception) { MessageBox.Show(dialog, "QR 이미지를 저장하지 못했습니다.", "Knot"); } };
+            layout.Controls.Add(save); dialog.Controls.Add(layout); dialog.ShowDialog(this);
+        }
+    }
     private void ShowAccountLogin()
     {
         manualAccount = true; accountFields.Visible = true; prepare.Text = "한 번 로그인하고 기억하기";
@@ -869,14 +921,29 @@ internal sealed class SunshineQuickSetupForm : Form
         Completed = session.PairingReady; status.Text = SunshineSetupPolicy.ReadyMessage(session.Configured);
         if (await RefreshPendingAsync()) poll.Start();
     }
-    private async Task<bool> RefreshPendingAsync()
+    private async Task<bool> RefreshPendingAsync(bool preserveSelection = false, bool background = false)
     {
         SunshineSetupSession active = session;
-        pending.Items.Clear(); pending.SelectedIndex = -1;
         SunshinePendingLoad result = await Task.Run(delegate { return active.LoadPendingAsync(cancellation); });
-        if (closing) return false;
-        if (!result.Succeeded) { status.Text = SunshineSetupPolicy.PendingStatus(active.Configured, result.Failure); return false; }
-        foreach (var item in result.Items) pending.Items.Add(item); pending.SelectedIndex = -1; return true;
+        if (closing || (background && busy)) return false;
+        var selected = preserveSelection ? pending.SelectedItem as SunshinePendingPair : null;
+        if (!result.Succeeded)
+        {
+            pendingWarning = true; status.Text = SunshineSetupPolicy.PendingStatus(active.Configured, result.Failure);
+            if (result.SecurityFailure) poll.Stop(); else { poll.Interval = 5000; poll.Start(); }
+            return false;
+        }
+        pending.BeginUpdate();
+        try {
+            pending.Items.Clear(); pending.SelectedIndex = -1;
+            foreach (var item in result.Items) {
+                int index = pending.Items.Add(item);
+                if (SunshineSetupPolicy.SamePending(selected, item)) pending.SelectedIndex = index;
+            }
+        } finally { pending.EndUpdate(); }
+        if (selected != null && pending.SelectedIndex < 0) pin.Clear();
+        if (pendingWarning) { pendingWarning = false; status.Text = SunshineSetupPolicy.ReadyMessage(active.Configured); }
+        poll.Interval = 2000; poll.Start(); UpdatePairAvailability(); return true;
     }
     private void UpdatePairAvailability()
     {
@@ -943,7 +1010,7 @@ internal sealed class SunshineQuickSetupForm : Form
     private async Task WorkAsync(Func<Task> action)
     {
         if (busy || closing) return; busy = true;
-        prepare.Enabled = false; refresh.Enabled = false; pair.Enabled = false; reapply.Enabled = false;
+        prepare.Enabled = false; refresh.Enabled = false; pair.Enabled = false; reapply.Enabled = false; invitation.Enabled = false;
         username.Enabled = false; password.Enabled = false; pending.Enabled = false; pin.Enabled = false;
         try { await action(); }
         catch (OperationCanceledException) { }
@@ -959,7 +1026,7 @@ internal sealed class SunshineQuickSetupForm : Form
                 bool ready = session != null && session.PairingReady;
                 username.Enabled = session != null && !ready; password.Enabled = username.Enabled;
                 pending.Enabled = ready; pin.Enabled = ready;
-                prepare.Enabled = session != null && !ready; refresh.Enabled = ready; UpdatePairAvailability();
+                prepare.Enabled = session != null && !ready; refresh.Enabled = ready; invitation.Enabled = session != null; UpdatePairAvailability();
                 reapply.Visible = session != null && session.CanReapply && !session.Configured; reapply.Enabled = reapply.Visible;
             }
         }
@@ -977,13 +1044,13 @@ internal sealed class SunshineQuickSetupForm : Form
 }
 internal static class SunshineQuickSetup
 {
-    internal static int Run()
+    internal static int Run(string payloadDirectory)
     {
         // This helper runs in its own elevated broker process. Framework 4.8
         // offers no per-request protocol selector; certificate pinning remains
         // strictly per request and no global trust callback is installed.
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-        using (var form = new SunshineQuickSetupForm()) { Application.Run(form); return form.Completed ? 0 : (form.HadFailure ? 2 : 1602); }
+        using (var form = new SunshineQuickSetupForm(payloadDirectory)) { Application.Run(form); return form.Completed ? 0 : (form.HadFailure ? 2 : 1602); }
     }
 }
 #endif

@@ -110,13 +110,14 @@ internal static class KnotCloseForUpdate
     }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessageW(string message);
     private static readonly uint SafeCloseMessage = RegisterWindowMessageW("Knot.SafeCloseForUpdate.v1");
-    private static void CloseWindows(List<KnotCloseProcess> targets)
+    private static void CloseWindows(List<KnotCloseProcess> targets, Stopwatch budget)
     {
         // Handle retention prevents PID reuse; match live windows to held identities.
         EnumWindows(delegate(IntPtr window, IntPtr ignored) {
+            if (budget.ElapsedMilliseconds >= 15000) return false;
             int pid; GetWindowThreadProcessId(window, out pid);
             foreach (var process in targets) if (process.Pid == pid && WaitForSingleObject(process.Handle, 0) == Timeout) {
-                IntPtr result; SendMessageTimeoutW(window, process.Elevated ? SafeCloseMessage : 0x10, IntPtr.Zero, IntPtr.Zero, 2, 500, out result); break;
+                IntPtr result; SendMessageTimeoutW(window, process.Elevated ? SafeCloseMessage : 0x10, IntPtr.Zero, IntPtr.Zero, 2, (uint)Math.Max(1, Math.Min(500, 15000 - budget.ElapsedMilliseconds)), out result); break;
             }
             return true;
         }, IntPtr.Zero);
@@ -135,7 +136,7 @@ internal static class KnotCloseForUpdate
                 List<KnotCloseProcess> targets = Targets(args[0]);
                 try {
                     if (targets.Count == 0) return 0;
-                    CloseWindows(targets);
+                    CloseWindows(targets, timer);
                     bool exited = true;
                     foreach (var process in targets) if (WaitForSingleObject(process.Handle, 0) == Timeout) exited = false;
                     if (!exited) Thread.Sleep(250);

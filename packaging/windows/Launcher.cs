@@ -209,7 +209,7 @@ internal static class Launcher
     {
         if (request.Operation == "InstallVirtualDisplay" || request.Operation == "RemoveVirtualDisplay")
             return RunHeadlessOperation(request, directory, written);
-        if (request.Operation == "QuickSetupSunshine") return SunshineQuickSetup.Run();
+        if (request.Operation == "QuickSetupSunshine") return SunshineQuickSetup.Run(directory);
         if (request.Operation == "InstallSunshine" || request.Operation == "InstallSunshineAndSetup")
         {
             SunshinePin pin = ParseSunshinePin(File.ReadAllText(Path.Combine(directory, "SunshineDependency.json")));
@@ -234,7 +234,7 @@ internal static class Launcher
                 install.UseShellExecute = false;
                 install.WorkingDirectory = directory;
                 int result = InterpretSunshineInstallerResult(RunAndWait(install));
-                return result == 0 && request.Operation == "InstallSunshineAndSetup" ? SunshineQuickSetup.Run() : result;
+                return result == 0 && request.Operation == "InstallSunshineAndSetup" ? SunshineQuickSetup.Run(directory) : result;
             }
         }
         if (request.Operation != "EnableFiles" && request.Operation != "Export" && request.Operation != "DisableFiles")

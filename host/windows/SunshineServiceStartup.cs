@@ -28,9 +28,7 @@ internal static class SunshineServiceStartup
             SunshineSetupPolicy.Require(QueryServiceConfigW(service, memory, needed, out needed));
             var config = (ServiceConfig)Marshal.PtrToStructure(memory, typeof(ServiceConfig));
             string binary = Marshal.PtrToStringUni(config.Binary), account = Marshal.PtrToStringUni(config.Account);
-            SunshineSetupPolicy.Require(config.Type == 16 && config.Start != 4 &&
-                String.Equals(account, "LocalSystem", StringComparison.OrdinalIgnoreCase) &&
-                (String.Equals(binary, expectedBinary, StringComparison.OrdinalIgnoreCase) || String.Equals(binary, "\"" + expectedBinary + "\"", StringComparison.OrdinalIgnoreCase)));
+            SunshineSetupPolicy.Require(SunshineServicePolicy.Trusted(config.Type, config.Start, binary, account, expectedBinary));
             if (!StartServiceW(service, 0, IntPtr.Zero) && Marshal.GetLastWin32Error() != 1056)
                 throw new IOException(); // The existing bounded startup UI retries; never report ready here.
         } finally {

@@ -72,6 +72,15 @@ internal sealed class SunshineAccountController
     internal void Clear() { account = null; }
 }
 
+internal static class SunshineServicePolicy
+{
+    internal static bool Trusted(uint type, uint start, string binary, string account, string expectedBinary)
+    {
+        return type == 16 && start != 4 && String.Equals(account, "LocalSystem", StringComparison.OrdinalIgnoreCase) &&
+            String.Equals(binary, "\"" + expectedBinary + "\"", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
 internal static class SunshineAccountCodec
 {
     internal static byte[] Encode(SunshineAccountRecord account, string certificate)

@@ -255,6 +255,17 @@ public static class SunshineQuickSetupChecks
     { controller.PrepareAsync(session, manual, "old-user", "old-synthetic-password", verified, System.Threading.CancellationToken.None).GetAwaiter().GetResult(); }
     private static void CheckAccountAutomation()
     {
+        var selected = new SunshinePendingPair { ID = "same", Name = "Mac", Address = "192.168.1.2" };
+        Check(SunshineSetupPolicy.SamePending(selected, new SunshinePendingPair { ID = "same", Name = "Mac", Address = "192.168.1.2" }));
+        Check(!SunshineSetupPolicy.SamePending(selected, new SunshinePendingPair { ID = "same", Name = "Other", Address = "192.168.1.2" }));
+        Check(!SunshineSetupPolicy.SamePending(selected, null));
+        string service = @"C:\Program Files\Sunshine\tools\sunshinesvc.exe";
+        Check(SunshineServicePolicy.Trusted(16, 3, "\"" + service + "\"", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 3, service, "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 3, "\"" + service + "\" --extra", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 4, "\"" + service + "\"", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(272, 3, "\"" + service + "\"", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 3, "\"" + service + "\"", "untrusted-user", service));
         var welcome = new SunshineApiReply(307, "", "/welcome"); var denied = new SunshineApiReply(401, "");
         var store = new AccountStore(); int generated = 0;
         var controller = new SunshineAccountController(store, delegate { generated++; return Generated(); });
