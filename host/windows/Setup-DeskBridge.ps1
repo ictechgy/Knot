@@ -50,7 +50,12 @@ function Add-Text([string] $Text,[int] $Height=40) {
 }
 function Add-Button([string] $Text,[scriptblock] $Action,[switch] $AllowDuringUpdate) {
     $button=New-Object Windows.Forms.Button; $button.Text=$Text; $button.Size=New-Object Drawing.Size(330,34)
-    $button.Add_Click({ if (-not $form.UpdateCloseRequested -or $AllowDuringUpdate) { & $Action } }.GetNewClosure())
+    # Keep the original script scope (including cancellation flags), rather than
+    # copying actions into a dynamic module via GetNewClosure.
+    $button.Tag=[pscustomobject]@{Action=$Action;AllowDuringUpdate=[bool]$AllowDuringUpdate}
+    $button.Add_Click({ param($sender,$eventArgs)
+        if (-not $form.UpdateCloseRequested -or $sender.Tag.AllowDuringUpdate) { & $sender.Tag.Action }
+    })
     $script:section.Controls.Add($button); return $button
 }
 $title = Add-Text 'Windows를 Mac의 한 화면으로' 38

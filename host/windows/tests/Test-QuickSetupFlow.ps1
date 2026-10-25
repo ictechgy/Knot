@@ -77,4 +77,31 @@ foreach ($case in @('source','installed-ok','installed-cancel','installed-fail',
     if ($case -ceq 'installed-ok') {Expect ($status.Text.IndexOf('준비를 먼저') -ge 0 -and $status.Text.IndexOf('준비를 먼저') -lt $status.Text.IndexOf('Mac에서 PC 확인')) 'Windows preparation must precede creating the Mac pending PIN'}
     if ($case -ceq 'service-denied' -or $case -ceq 'fresh-fail' -or $case -ceq 'installed-missing') {Expect $script:failed 'Failure must be sanitized and stop automatic installation'}
 }
-@{status='passed';checks=$script:checks;actualPrimaryAction=$true;freshSyntheticOnly=$true;network=$false;serviceAccess=$false;gui=$false} | ConvertTo-Json -Compress
+# Execute the actual button wrapper after its creating function has returned.
+# Only the two GUI object constructors are replaced with inert leaves.
+$buttonFunction=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Add-Button'},$true))
+if ($buttonFunction.Count -ne 1) {throw 'Expected actual button admission function'}
+Invoke-Expression ($buttonFunction[0].Extent.Text.Replace('New-Object Drawing.Size(330,34)',"'synthetic-size'"))
+function New-Object([string]$TypeName) {
+    if ($TypeName -cne 'Windows.Forms.Button') {throw 'Unexpected synthetic constructor'}
+    $value=[pscustomobject]@{Text='';Size=$null;Tag=$null;Handler=$null}
+    $value|Add-Member ScriptMethod Add_Click {param($Handler) $this.Handler=$Handler}
+    return $value
+}
+$script:section=[pscustomobject]@{Controls=[Collections.Generic.List[object]]::new()}
+$form=[pscustomobject]@{UpdateCloseRequested=$false}
+$script:buttonActions=0;$script:cancelDownload=$false
+function Invoke-SyntheticButtonAction {$script:buttonActions++}
+$normal=Add-Button 'synthetic action' {Invoke-SyntheticButtonAction}
+$cancel=Add-Button 'synthetic cancel' {$script:cancelDownload=$true} -AllowDuringUpdate
+& $normal.Handler $normal ([EventArgs]::Empty)
+Expect ($script:buttonActions -eq 1) 'Returned action must resolve its original function/script scope'
+$form.UpdateCloseRequested=$true
+& $normal.Handler $normal ([EventArgs]::Empty)
+Expect ($script:buttonActions -eq 1) 'Queued new action must be refused after update admission'
+& $cancel.Handler $cancel ([EventArgs]::Empty)
+Expect $script:cancelDownload 'Cleanup action must update the original cancellation flag'
+$form.UpdateCloseRequested=$false
+& $normal.Handler $normal ([EventArgs]::Empty)
+Expect ($script:buttonActions -eq 2) 'Failed update cancellation must restore action admission'
+@{status='passed';checks=$script:checks;actualPrimaryAction=$true;actualUpdateButtons=$true;freshSyntheticOnly=$true;network=$false;serviceAccess=$false;gui=$false} | ConvertTo-Json -Compress
