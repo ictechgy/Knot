@@ -74,25 +74,39 @@ extension VideoDepacketizer {
 
     /// Share the three- and four-byte Annex-B boundaries with IDR detection.
     private static func annexBStartCodeOffsets(_ bytes: UnsafeRawBufferPointer) -> [Int] {
-        guard let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return [] }
+        guard bytes.count >= 3, let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return [] }
         var starts: [Int] = []
         var offset = 0
-        // A direct pointer scan avoids a whole-frame Array and repeated libc calls
-        // for dense emulation-prevention sequences. Each load is bounded below.
-        while bytes.count - offset > 2 {
-            if base[offset] == 0, base[offset + 1] == 0 {
-                if base[offset + 2] == 1 {
-                    starts.append(offset)
-                    offset += 3
-                    continue
-                }
-                if bytes.count - offset > 3, base[offset + 2] == 0, base[offset + 3] == 1 {
-                    starts.append(offset)
-                    offset += 4
-                    continue
-                }
+        let limit = bytes.count - 2
+        // Skip long nonzero spans, then scan a bounded neighborhood directly.
+        // Dense escaped payloads incur at most one libc search per neighborhood,
+        // rather than a call for every zero. Small access units stay scalar.
+        let skipSparseRuns = bytes.count >= 16 * 1024
+        while offset < limit {
+            let scanEnd: Int
+            if skipSparseRuns {
+                guard let zero = memchr(base + offset, 0, bytes.count - offset) else { break }
+                offset = UnsafeRawPointer(base).distance(to: UnsafeRawPointer(zero))
+                guard offset < limit else { break }
+                scanEnd = offset + min(256, limit - offset)
+            } else {
+                scanEnd = limit
             }
-            offset += 1
+            while offset < scanEnd {
+                if base[offset] == 0, base[offset + 1] == 0 {
+                    if base[offset + 2] == 1 {
+                        starts.append(offset)
+                        offset += 3
+                        continue
+                    }
+                    if bytes.count - offset > 3, base[offset + 2] == 0, base[offset + 3] == 1 {
+                        starts.append(offset)
+                        offset += 4
+                        continue
+                    }
+                }
+                offset += 1
+            }
         }
         return starts
     }
