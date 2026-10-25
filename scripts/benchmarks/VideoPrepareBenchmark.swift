@@ -285,6 +285,7 @@ private enum Operation: String { case sample, split }
         if CommandLine.arguments.contains("--benchmark") {
             var rows: [[String: Any]] = []
             var checksum: UInt64 = 0
+            let checksBeforeBenchmark = checks
             for bytes in [512, 32 * 1024, 256 * 1024, 2 * 1024 * 1024] {
                 for slices in [1, 4, 32] {
                     for dense in [false, true] {
@@ -293,6 +294,19 @@ private enum Operation: String { case sample, split }
                                                 slices: slices, dense: dense, keyframe: operation == .split)
                             let oldSplit = BaselineVideoDepacketizer(isHEVC: false)
                             let newSplit = CandidateVideoDepacketizer(isHEVC: false)
+                            // Verify every measured workload against its independent
+                            // oracle before entering any timed or calibration region.
+                            if operation == .sample {
+                                try expect(try contents(baselineSample(baseline, value.input, 1)) == value.expectedAVCC,
+                                           "measured baseline sample oracle")
+                                try expect(try contents(candidateSample(candidate, value.input, 1)) == value.expectedAVCC,
+                                           "measured candidate sample oracle")
+                            } else {
+                                try expect(same(bufferPairs(oldSplit.splitAnnexBParamSets(value.input)), value.expectedBuffers),
+                                           "measured baseline split oracle")
+                                try expect(same(bufferPairs(newSplit.splitAnnexBParamSets(value.input)), value.expectedBuffers),
+                                           "measured candidate split oracle")
+                            }
                             func run(_ path: Path, _ count: Int) throws -> (ns: UInt64, checksum: UInt64) {
                                 try timed(path, operation: operation, input: value.input, baseline: baseline,
                                           candidate: candidate, baselineSplit: oldSplit,
@@ -320,6 +334,8 @@ private enum Operation: String { case sample, split }
                                     pair[path.rawValue + "_ns_per_op"] = Double(result.ns) / Double(iterations)
                                     pair[path.rawValue + "_checksum"] = result.checksum
                                 }
+                                try expect(pair["baseline_checksum"] as? UInt64 == pair["candidate_checksum"] as? UInt64,
+                                           "paired timed checksum equality")
                                 pairs.append(pair)
                             }
                             let old = pairs.map { $0["baseline_ns_per_op"] as! Double }.sorted()
@@ -336,6 +352,7 @@ private enum Operation: String { case sample, split }
                 }
             }
             output["benchmark"] = rows; output["checksum"] = checksum
+            output["benchmark_checks"] = checks - checksBeforeBenchmark
             output["measurement"] = ["paired_repetitions": 7, "warmup_pairs": 2,
                 "target_batch_ns": 12_000_000, "maximum_batch_iterations": 100_000,
                 "percentiles": "No p95/p99 estimated from seven repetitions.",
