@@ -867,7 +867,8 @@ internal sealed class SunshineQuickSetupForm : Form
         if (SafeUpdateClose != 0 && message.Msg == SafeUpdateClose)
         {
             bool accept = !busy && !closing; message.Result = accept ? new IntPtr(1) : IntPtr.Zero;
-            if (accept) BeginInvoke(new Action(Close)); return;
+            if (accept) { closing = true; poll.Stop(); lifetime.Cancel(); BeginInvoke(new Action(Close)); }
+            return;
         }
         base.WndProc(ref message);
     }
