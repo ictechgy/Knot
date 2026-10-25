@@ -93,8 +93,8 @@ class SystemDependencyTests(unittest.TestCase):
     def test_actual_build_and_package_call_sites_apply_the_same_parser(self):
         # Evaluate only the actual parser call AST with inert run(), never import
         # either top-level build/packaging script or invoke external programs.
-        expected = {"build.py": {"inspect-host-supervisor-dependencies", "inspect-dependencies"},
-                    "package_release.py": {"inspect-staged-host-supervisor-dependencies"}}
+        expected = {"build.py": {"inspect-host-supervisor-dependencies", "inspect-dependencies", "inspect-mac-installer-dependencies"},
+                    "package_release.py": {"inspect-staged-host-supervisor-dependencies", "inspect-staged-local-installer-dependencies"}}
         for filename, labels in expected.items():
             source = ast.parse((SCRIPTS / filename).read_text())
             calls = [node for node in ast.walk(source) if isinstance(node, ast.Call)
@@ -113,6 +113,8 @@ class SystemDependencyTests(unittest.TestCase):
                     namespace = {"__builtins__": {}, "str": str, "run": run, "update_publisher": None,
                                  "supervisor": Path("/synthetic/Contents/Helpers/KnotHostSupervisor"),
                                  "macos": Path("/synthetic/Contents/MacOS"),
+                                 "installer": Path("/synthetic/Install Knot.app"),
+                                 "installer_binary": Path("/synthetic/Install Knot.app/Contents/MacOS/KnotInstaller"),
                                  "parse_system_dependencies": parse_system_dependencies}
                     if accepted:
                         self.assertEqual(eval(expression, namespace), (path,))
