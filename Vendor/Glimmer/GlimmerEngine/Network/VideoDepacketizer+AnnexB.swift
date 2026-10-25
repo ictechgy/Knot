@@ -74,23 +74,27 @@ extension VideoDepacketizer {
 
     /// Share the three- and four-byte Annex-B boundaries with IDR detection.
     private static func annexBStartCodeOffsets(_ bytes: UnsafeRawBufferPointer) -> [Int] {
-        guard let base = bytes.baseAddress else { return [] }
-        // Search the complete 00 00 01 delimiter, rather than calling memchr
-        // again for every zero in dense, escaped NAL payloads. Include a preceding
-        // zero for four-byte delimiters, matching the original scanner's boundary.
-        let delimiter: [UInt8] = [0, 0, 1]
-        return delimiter.withUnsafeBytes { pattern in
-            guard let patternBase = pattern.baseAddress else { return [] }
-            var starts: [Int] = []
-            var offset = 0
-            while bytes.count - offset >= 3 {
-                guard let hit = memmem(base + offset, bytes.count - offset, patternBase, 3) else { break }
-                let index = base.distance(to: UnsafeRawPointer(hit))
-                starts.append(index > offset && bytes[index - 1] == 0 ? index - 1 : index)
-                offset = index + 3
+        guard let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return [] }
+        var starts: [Int] = []
+        var offset = 0
+        // A direct pointer scan avoids a whole-frame Array and repeated libc calls
+        // for dense emulation-prevention sequences. Each load is bounded below.
+        while bytes.count - offset > 2 {
+            if base[offset] == 0, base[offset + 1] == 0 {
+                if base[offset + 2] == 1 {
+                    starts.append(offset)
+                    offset += 3
+                    continue
+                }
+                if bytes.count - offset > 3, base[offset + 2] == 0, base[offset + 3] == 1 {
+                    starts.append(offset)
+                    offset += 4
+                    continue
+                }
             }
-            return starts
+            offset += 1
         }
+        return starts
     }
 
     private static func annexBStartCodeLength<Bytes: RandomAccessCollection>(_ bytes: Bytes, at offset: Int) -> Int
