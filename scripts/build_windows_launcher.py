@@ -19,6 +19,7 @@ PAYLOAD_NAMES = (
     "Enable-DeskBridgeSFTP.ps1", "Resume-DeskBridgeSFTP.ps1", "Disable-DeskBridgeSFTP.ps1",
     "SunshineDependency.json", "README.md", "EnrollmentClient.cs", "Enrollment.psm1",
     "ConnectionInvitation.psm1", "Show-ConnectionQR.ps1",
+    "KnotUpdateForm.cs",
     "HeadlessSetup.psm1", "HeadlessStatus.psm1", "HeadlessNative.cs", "Invoke-DeskBridgeHeadless.ps1", "Show-HeadlessSetup.ps1",
     "VirtualDisplayDependency.json", "VirtualDisplayFiles.json", "VirtualDisplayDeployments.json", "Knot-vdd_settings.xml", "VirtualDisplay-NOTICE.txt",
 )

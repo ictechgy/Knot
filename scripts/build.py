@@ -71,6 +71,7 @@ if not args.skip_checks:
     run("connection-qr-checks", [sys.executable, str(ROOT / "scripts/tests/test_connection_qr.py")])
     run("enrollment-protocol-checks", [sys.executable, str(ROOT / "scripts/tests/test_enrollment.py")])
     run("update-policy-checks", [sys.executable, str(ROOT / "scripts/tests/test_update_policy.py")])
+    run("mac-installer-checks", [sys.executable, str(ROOT / "scripts/tests/test_mac_installer.py")])
     run("build-contract-checks", [sys.executable, str(ROOT / "scripts/tests/test_build_snapshot.py")])
     run("system-dependency-policy-checks", [sys.executable, str(ROOT / "scripts/tests/test_system_dependencies.py")])
     run("input-batching-checks", [sys.executable, str(ROOT / "scripts/tests/test_input_batching.py")])
@@ -194,10 +195,39 @@ except SystemDependencyError as error:
     raise SystemExit(str(error))
 if source_snapshot(ROOT) != snapshot:
     raise SystemExit("Source changed during build; rebuild this snapshot before delivery.")
+installer = ROOT / "dist/Install Knot.app"
+if installer.exists(): shutil.rmtree(installer)
+installer_binary = installer / "Contents/MacOS/KnotInstaller"
+installer_resources = installer / "Contents/Resources"
+installer_binary.parent.mkdir(parents=True); installer_resources.mkdir()
+run("compile-mac-installer", ["/usr/bin/swiftc", "-parse-as-library", "-module-name", "KnotInstaller", *common,
+    str(ROOT / "packaging/macos/KnotInstallerCore.swift"), str(ROOT / "packaging/macos/KnotInstaller.swift"), "-o", str(installer_binary)])
+installer_info = {"CFBundleExecutable": "KnotInstaller", "CFBundleIdentifier": "org.deskbridge.installer",
+    "CFBundleName": "Install Knot", "CFBundleDisplayName": "Knot 설치", "CFBundlePackageType": "APPL",
+    "CFBundleIconFile": "AppIcon", "CFBundleVersion": info["CFBundleVersion"],
+    "CFBundleShortVersionString": info["CFBundleShortVersionString"], "LSMinimumSystemVersion": "26.0",
+    "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication"}
+with (installer / "Contents/Info.plist").open("wb") as handle: plistlib.dump(installer_info, handle)
+shutil.copy2(ROOT / "Assets/Brand/AppIcon.icns", installer_resources / "AppIcon.icns")
+shutil.copy2(ROOT / "LICENSE", installer_resources / "LICENSE")
+installer_payload = installer / "Contents/Helpers/Knot.app"
+installer_payload.parent.mkdir()
+shutil.copytree(app, installer_payload, symlinks=True)
+if tree_snapshot(installer_payload) != tree_snapshot(app):
+    raise SystemExit("Embedded installer payload differs from the tested app.")
+run("sign-mac-installer", ["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime", str(installer)])
+run("verify-mac-installer", ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(installer)])
+installer_entitlements = run("inspect-mac-installer-entitlements", ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(installer)])
+if installer_entitlements.strip() and plistlib.loads(installer_entitlements) != {}:
+    raise SystemExit("The local installer must have no entitlements.")
+parse_system_dependencies(run("inspect-mac-installer-dependencies", ["/usr/bin/otool", "-L", str(installer_binary)]), installer_binary)
+if source_snapshot(ROOT) != snapshot:
+    raise SystemExit("Source changed during installer build; rebuild before delivery.")
 (EVIDENCE / "completed-build.json").write_text(json.dumps({
     "schema": 1, "configuration": args.configuration, "checksPassed": not args.skip_checks,
     "appManifest": tree_snapshot(app),
     "hostSupervisor": host_supervisor_snapshot(app),
+    "installerManifest": tree_snapshot(installer),
 }, indent=2))
 print("Built " + str(app), flush=True)
 print("GUI/capture host not launched. Windows, Mac host permissions, IME, Space and network acceptance remain manual.", flush=True)

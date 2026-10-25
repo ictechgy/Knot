@@ -417,13 +417,13 @@ final class DesktopModel: ObservableObject {
             status = "화면 연결을 끊었습니다. \(platformName) 앱은 계속 실행됩니다."
         }
     }
-    /// Only an already authenticated, idle target can be restored after an actual
+    /// Only an already authenticated target can be restored after an actual
     /// newer build starts. The normal connect path still verifies its saved pin.
     func prepareUpdateReconnect(build: String, now: Date = Date()) throws {
         guard settingsReadable else { return }
         let receipt = UpdateReconnectStore(directory: store.directory)
         try receipt.clear()
-        guard paired, !busy, !stream.isEngaged, let host = settings.host,
+        guard paired, !busy, let host = settings.host,
               host.address == address, let digest = CertFingerprint.sha256(forPEM: host.certificatePEM),
               let intent = UpdateReconnectIntent(endpoint: address, hostUniqueID: host.uniqueID,
                   certificateSHA256: digest.replacingOccurrences(of: ":", with: ""), now: now) else { return }

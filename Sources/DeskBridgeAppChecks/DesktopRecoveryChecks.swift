@@ -116,6 +116,12 @@ func runDesktopRecoveryChecks() throws -> Int {
     return count
 }
 
+@MainActor private final class TerminationDrainCheckState {
+    var busy = true
+    var ready = 0
+    var refused = 0
+}
+
 @MainActor func runDesktopTerminationChecks() async throws -> Int {
     var count = 0
     for delayed in [false, true] {
@@ -151,5 +157,25 @@ func runDesktopRecoveryChecks() throws -> Int {
     release?.resume(); await cleanup.value
     guard completed == [0, 1, 2, 3] else { throw ModelCheckFailure(message: "parallel owner cleanup was skipped") }
     count += 2
+    let drain = DesktopTerminationDrain()
+    let state = TerminationDrainCheckState()
+    drain.begin(timeout: .seconds(1), poll: .milliseconds(1), protectedWork: { state.busy }, ready: { state.ready += 1 }, refused: { state.refused += 1 })
+    drain.begin(protectedWork: { false }, ready: { state.ready += 100 }, refused: { state.refused += 100 })
+    try await Task.sleep(for: .milliseconds(10))
+    guard drain.waiting && state.ready == 0 && state.refused == 0 else { throw ModelCheckFailure(message: "update interrupted protected work") }
+    state.busy = false
+    for _ in 0..<1000 where drain.waiting { try await Task.sleep(for: .milliseconds(1)) }
+    guard !drain.waiting && state.ready == 1 && state.refused == 0 else { throw ModelCheckFailure(message: "update did not drain exactly once") }
+    state.busy = true
+    drain.begin(timeout: .milliseconds(5), poll: .milliseconds(1), protectedWork: { state.busy }, ready: { state.ready += 1 }, refused: { state.refused += 1 })
+    for _ in 0..<1000 where drain.waiting { try await Task.sleep(for: .milliseconds(1)) }
+    guard !drain.waiting && state.ready == 1 && state.refused == 1 else { throw ModelCheckFailure(message: "busy update did not refuse at its deadline") }
+    state.busy = false
+    try await Task.sleep(for: .milliseconds(5))
+    guard state.ready == 1 else { throw ModelCheckFailure(message: "timed-out update quit later") }
+    drain.begin(poll: .milliseconds(1), protectedWork: { false }, ready: { state.ready += 1 }, refused: { state.refused += 1 })
+    for _ in 0..<1000 where drain.waiting { try await Task.sleep(for: .milliseconds(1)) }
+    guard state.ready == 2 && state.refused == 1 else { throw ModelCheckFailure(message: "update cannot retry after timeout") }
+    count += 5
     return count
 }

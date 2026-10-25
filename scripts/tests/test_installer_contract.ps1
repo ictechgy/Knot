@@ -34,7 +34,21 @@ foreach ($shortcut in @('Knot','Knot 제거')) {
 }
 Expect ($innoSource.Contains('Source: "..\..\build\windows\Knot-Windows.exe"; DestDir: "{app}"; DestName: "Knot.exe";')) 'The installed public executable must use the Knot name.'
 Expect ($innoSource.Contains('Type: files; Name: "{app}\DeskBridge-Windows.exe"') -and $innoSource.Contains("CloseInstalledKnot('DeskBridge-Windows.exe')")) 'Legacy broker must close before exact-file migration cleanup.'
-Expect ($innoSource.Contains('Filename: "{app}\Knot.exe"; Description: ')) 'Installed launch path must use the replaced broker.'
+$runSection=[regex]::Match($innoSource,'(?ms)^\[Run\]\r?\n(?<body>.*?)^\[')
+Expect $runSection.Success 'Actual installer run section must be present.'
+$runEntries=@($runSection.Groups['body'].Value -split '\r?\n' | Where-Object { $_.StartsWith('Filename:') })
+Expect ($runEntries.Count -eq 1 -and $runEntries[0] -ceq 'Filename: "{app}\Knot.exe"; Flags: nowait runasoriginaluser; Check: RestartFromThisInstaller') 'Manual installation must automatically reopen the replaced broker once as the original user, without a finish-page checkbox.'
+# Evaluate only the actual allowlisted constant/comparison in the Pascal restart
+# predicate. Never execute the installer or arbitrary translated source.
+$restart=[regex]::Match($innoSource,"(?s)function RestartFromThisInstaller\(\): Boolean;\s*begin\s*\{[^}]*\}\s*Result := ExpandConstant\('\{param:(?<name>[A-Z]+)\|(?<default>[01])\}'\) <> '(?<suppressed>[01])';\s*end;")
+Expect ($restart.Success -and $restart.Groups['name'].Value -ceq 'KNOTUPDATERHANDOFF') 'Restart ownership must be guarded by the exact handoff parameter.'
+$comparison=[scriptblock]::Create('$value -cne '+"'"+$restart.Groups['suppressed'].Value+"'")
+foreach ($case in @(@($null,$true),@('0',$true),@('1',$false),@('other',$true))) {
+ $value=if ($null -eq $case[0]) {$restart.Groups['default'].Value} else {$case[0]}
+ Expect ((& $comparison) -eq $case[1]) 'Only the signed handoff flag may suppress the manual installer restart.'
+}
+$handoff=[IO.File]::ReadAllText((Join-Path $sourceRoot 'packaging/windows/KnotUpdateHandoff.cs'))
+Expect ([regex]::Matches($handoff,'/KNOTUPDATERHANDOFF=1').Count -eq 1) 'The verified handoff must suppress Inno restart so its existing non-elevated relaunch remains the single owner.'
 $uninstallStart=$innoSource.IndexOf('function InitializeUninstall(): Boolean;',[StringComparison]::Ordinal)
 Expect ($uninstallStart -ge 0) 'Actual uninstall callback must be present.'
 $uninstall=$innoSource.Substring($uninstallStart)

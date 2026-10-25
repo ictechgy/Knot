@@ -67,7 +67,7 @@ def generate_engine_pin(root, output):
 
 
 def client_sources(root):
-    return sorted(p for p in (Path(root) / "client/windows").glob("*.cs") if p.name != "Tests.cs")
+    return sorted(p for p in (Path(root) / "client/windows").glob("*.cs") if p.name != "Tests.cs") + [Path(root) / "host/windows/KnotUpdateForm.cs"]
 
 
 def generate_qr_loader(digest, output):

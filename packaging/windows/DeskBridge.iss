@@ -23,7 +23,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.22000
 PrivilegesRequired=admin
 WizardStyle=modern
-AppComments=실행 중인 Knot 창을 정상 종료하고 업데이트합니다. 진행 중인 원격 접속은 먼저 마쳐 주세요.
+AppComments=진행 중인 설정을 기다리고 Knot을 자동 종료·업데이트·재실행합니다.
 Compression=lzma2
 SolidCompression=yes
 LicenseFile=..\..\LICENSE
@@ -52,8 +52,14 @@ Type: dirifempty; Name: "{commonprograms}\DeskBridge"
 Name: "{group}\Knot"; Filename: "{app}\Knot.exe"; IconFilename: "{app}\AppIcon.ico"
 Name: "{group}\Knot 제거"; Filename: "{uninstallexe}"; IconFilename: "{app}\AppIcon.ico"
 [Run]
-Filename: "{app}\Knot.exe"; Description: "Knot 열기 · 자동 연결 준비"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\Knot.exe"; Flags: nowait runasoriginaluser; Check: RestartFromThisInstaller
 [Code]
+function RestartFromThisInstaller(): Boolean;
+begin
+  { The non-elevated signed-update handoff owns its own single restart. }
+  Result := ExpandConstant('{param:KNOTUPDATERHANDOFF|0}') <> '1';
+end;
+
 function CloseInstalledKnot(const Name: String): Boolean;
 var
   CloseResult: Integer;
@@ -71,7 +77,7 @@ begin
   Result := '';
   ExtractTemporaryFile('KnotCloseForUpdate.exe');
   if (not CloseInstalledKnot('DeskBridge-Windows.exe')) or (not CloseInstalledKnot('Knot.exe')) then
-    Result := 'Knot 설정 작업이나 원격 연결을 먼저 마쳐 주세요. 관리자 준비 창도 닫은 뒤 다시 시도하면 설치가 계속됩니다. Sunshine 화면 공유와 파일 설정은 유지됩니다.';
+    Result := '진행 중인 설정이 아직 끝나지 않았거나 Knot의 정상 종료를 확인하지 못했습니다. 설정이 끝나면 다시 시도하세요. 강제 종료하지 않았으며 기존 앱·Sunshine·파일 설정은 보존됩니다.';
 end;
 
 function InitializeSetup(): Boolean;

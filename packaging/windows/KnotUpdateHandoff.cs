@@ -344,7 +344,7 @@ namespace Knot.Updates
                         ulong minimum = Math.Max(UInt64.Parse(KnotUpdateConfiguration.BuildNumber, CultureInfo.InvariantCulture), UpdateSecurity.VersionBuild(installed.ProductVersion));
                         UpdateSecurity.VerifyInstaller(file, installer, args[6], minimum.ToString(CultureInfo.InvariantCulture));
                     }
-                    var start = new ProcessStartInfo(installer, "/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART")
+                    var start = new ProcessStartInfo(installer, "/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /KNOTUPDATERHANDOFF=1")
                     { UseShellExecute = true, Verb = "runas", WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System) };
                     using (Process setup = Process.Start(start))
                     {

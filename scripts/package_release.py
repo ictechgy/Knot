@@ -73,7 +73,7 @@ if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
 head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 latest = json.loads((ROOT / "evidence/latest-build.json").read_text())
 build = ROOT / latest["directory"]
-if latest["lastStage"] != "inspect-dependencies":
+if latest["lastStage"] != "inspect-mac-installer-dependencies":
     raise SystemExit("A complete successful build with checks is required.")
 try:
     completed, checks = validate_completed_build(ROOT, build, require_release=args.mode == "release")
@@ -130,7 +130,11 @@ generated = []
 with tempfile.TemporaryDirectory(prefix="deskbridge-package-") as temporary:
     stage = Path(temporary) / "Knot"; stage.mkdir()
     app = stage / "Knot.app"
+    installer = stage / "Install Knot.app"
     shutil.copytree(ROOT / "dist/Knot.app", app, symlinks=True)
+    shutil.copytree(ROOT / "dist/Install Knot.app", installer, symlinks=True)
+    if tree_snapshot(installer) != completed["installerManifest"]:
+        raise SystemExit("Local installer changed while staging; rebuild before packaging")
     # Recheck the copied payload before signing to bind this package to the successful build.
     if tree_snapshot(app) != completed["appManifest"]:
         raise SystemExit("App changed while staging; rebuild before packaging")
@@ -147,6 +151,22 @@ with tempfile.TemporaryDirectory(prefix="deskbridge-package-") as temporary:
         run("notarize-app", ["/usr/bin/xcrun", "notarytool", "submit", str(notarize_zip), "--keychain-profile", args.notary_profile, "--wait"])
         run("staple-app", ["/usr/bin/xcrun", "stapler", "staple", str(app)])
         run("validate-app-ticket", ["/usr/bin/xcrun", "stapler", "validate", str(app)])
+        embedded_payload = installer / "Contents/Helpers/Knot.app"
+        shutil.rmtree(embedded_payload)
+        shutil.copytree(app, embedded_payload, symlinks=True)
+        run("sign-local-installer-release", ["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", args.identity, str(installer)])
+        installer_zip = Path(temporary) / "notarize-installer.zip"
+        run("notary-installer-zip", ["/usr/bin/ditto", "-c", "-k", "--keepParent", str(installer), str(installer_zip)])
+        run("notarize-local-installer", ["/usr/bin/xcrun", "notarytool", "submit", str(installer_zip), "--keychain-profile", args.notary_profile, "--wait"])
+        run("staple-local-installer", ["/usr/bin/xcrun", "stapler", "staple", str(installer)])
+        run("validate-local-installer-ticket", ["/usr/bin/xcrun", "stapler", "validate", str(installer)])
+    run("verify-staged-local-installer", ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(installer)])
+    if tree_snapshot(installer / "Contents/Helpers/Knot.app") != tree_snapshot(app):
+        raise SystemExit("Packaged installer payload differs from the checked/re-signed app.")
+    installer_entitlements = run("inspect-staged-local-installer-entitlements", ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(installer)])
+    if installer_entitlements.strip() and plistlib.loads(installer_entitlements) != {}:
+        raise SystemExit("The packaged local installer must have no entitlements.")
+    parse_system_dependencies(run("inspect-staged-local-installer-dependencies", ["/usr/bin/otool", "-L", str(installer / "Contents/MacOS/KnotInstaller")]), installer / "Contents/MacOS/KnotInstaller")
     run("verify-staged-host-supervisor", ["/usr/bin/codesign", "--verify", "--strict", str(supervisor)])
     helper_entitlements = run("inspect-staged-host-supervisor-entitlements", ["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", str(supervisor)])
     if helper_entitlements.strip() and plistlib.loads(helper_entitlements) != {}:
@@ -171,8 +191,9 @@ with tempfile.TemporaryDirectory(prefix="deskbridge-package-") as temporary:
     except ValueError as error:
         raise SystemExit(str(error))
     (stage / "INSTALLATION.md").write_text(installation, encoding="utf-8")
-    (stage / "INSTALL.txt").write_text("Knot.app을 Applications 폴더로 드래그하세요.\nApple Silicon / macOS 26+\n" +
-        "업데이트: 기존 앱을 종료하고 이전 DeskBridge.app 번들만 제거하세요. 같은 번들 ID의 두 앱을 함께 두지 마세요.\n" +
+    (stage / "INSTALL.txt").write_text("Install Knot.app을 열고 설치 및 다시 시작을 누르세요. 기존 Knot은 자동으로 정상 종료·교체·재실행됩니다.\nApple Silicon / macOS 26+\n" +
+        "preview.22 이하에서 처음 업데이트할 때만 파일 전송·설정 작업을 먼저 마쳐 주세요. 이후 버전은 진행 중인 작업을 기다립니다.\n" +
+        "설치 위치가 보호돼 있으면 종료 전에 중단합니다. 관리자가 기존 앱을 교체해야 합니다. 새 앱을 다른 위치에 중복 설치하지 마세요.\n" +
         "Application Support·설정·인증서는 보존하세요. macOS 권한을 다시 요청할 수 있습니다.\n" +
         ("Developer ID 서명 및 Apple 공증 패키지입니다.\n" if args.mode == "release" else "개발 프리뷰: 로컬 ad-hoc 서명이며 Apple 공증이 없습니다.\n") +
         "설정 안내는 이 패키지의 INSTALLATION.md를 확인하세요. 대응 소스는 같은 릴리스의 별도 파일 " + name + "-source.tar.gz 입니다.\n", encoding="utf-8")

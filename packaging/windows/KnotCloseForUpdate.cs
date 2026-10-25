@@ -15,6 +15,8 @@ internal sealed class KnotCloseProcess : IDisposable
     internal int Pid, Parent, Session; internal bool Elevated;
     internal long Created;
     internal string Image;
+    internal string RootIdentity;
+    internal bool CanSignal;
     internal IntPtr Handle;
     public void Dispose() { if (Handle != IntPtr.Zero) { KnotCloseForUpdate.CloseHandle(Handle); Handle = IntPtr.Zero; } }
 }
@@ -43,7 +45,7 @@ internal static class KnotCloseForUpdate
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32FirstW(IntPtr snapshot, ref Entry entry);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32NextW(IntPtr snapshot, ref Entry entry);
-    [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint rights, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint rights, bool inherit, int pid);
     [DllImport("kernel32.dll")] internal static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr process, uint milliseconds);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder image, ref int size);
@@ -59,13 +61,20 @@ internal static class KnotCloseForUpdate
     private static KnotCloseProcess Open(int pid, int parent)
     {
         IntPtr handle = OpenProcess(Query | Synchronize, false, pid);
-        if (handle == IntPtr.Zero) return null;
+        if (handle == IntPtr.Zero) {
+            if (Marshal.GetLastWin32Error() == 87) return null; // Exited after the snapshot.
+            throw new IOException(); // An unqueryable live process is not proof of exit.
+        }
         var result = new KnotCloseProcess { Pid = pid, Parent = parent, Handle = handle };
         try {
             Times created, exited, kernel, user; int size = 32768, session;
             var image = new StringBuilder(size);
+            if (WaitForSingleObject(handle, 0) == 0) { result.Dispose(); return null; }
             if (!QueryFullProcessImageNameW(handle, 0, image, ref size) || !GetProcessTimes(handle, out created, out exited, out kernel, out user) ||
-                !ProcessIdToSessionId(pid, out session) || WaitForSingleObject(handle, 0) != Timeout) { result.Dispose(); return null; }
+                !ProcessIdToSessionId(pid, out session)) {
+                if (WaitForSingleObject(handle, 0) == 0) { result.Dispose(); return null; }
+                throw new IOException();
+            }
             result.Created = created.Value; result.Session = session; result.Image = image.ToString(); return result;
         } catch { result.Dispose(); throw; }
     }
@@ -76,7 +85,7 @@ internal static class KnotCloseForUpdate
         try { int elevation, returned; if (!GetTokenInformation(token, 20, out elevation, 4, out returned) || returned != 4) throw new IOException(); return elevation != 0; }
         finally { CloseHandle(token); }
     }
-    private static List<KnotCloseProcess> Targets(string installed)
+    private static void RefreshTargets(string installed, List<KnotCloseProcess> owned)
     {
         var entries = new List<Entry>(); IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
         if (snapshot == new IntPtr(-1)) throw new IOException();
@@ -84,46 +93,64 @@ internal static class KnotCloseForUpdate
             if (!Process32FirstW(snapshot, ref entry)) throw new IOException();
             do { entries.Add(entry); if (entries.Count > 65536) throw new IOException(); } while (Process32NextW(snapshot, ref entry));
         } finally { CloseHandle(snapshot); }
-        var owned = new List<KnotCloseProcess>(); int currentSession = Process.GetCurrentProcess().SessionId;
-        try {
+        int currentSession = Process.GetCurrentProcess().SessionId;
             foreach (var entry in entries) {
                 if (!String.Equals(entry.Name, Path.GetFileName(installed), StringComparison.OrdinalIgnoreCase)) continue;
+                if (owned.Exists(delegate(KnotCloseProcess item) { return item.Pid == (int)entry.Pid; })) continue;
                 var candidate = Open((int)entry.Pid, (int)entry.Parent);
-                if (candidate == null) throw new IOException();
+                if (candidate == null) continue;
                 if (!String.Equals(candidate.Image, installed, StringComparison.OrdinalIgnoreCase)) { candidate.Dispose(); continue; }
                 if (candidate.Session != currentSession) { candidate.Dispose(); throw new IOException(); }
-                candidate.Elevated = Elevated(candidate); owned.Add(candidate);
+                if (owned.Count >= 64) { candidate.Dispose(); throw new IOException(); }
+                owned.Add(candidate);
+                candidate.Elevated = Elevated(candidate); candidate.CanSignal = true;
+                candidate.RootIdentity = candidate.Pid.ToString() + ":" + candidate.Created.ToString();
             }
             string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"System32\WindowsPowerShell\v1.0\powershell.exe");
             for (int at = 0; at < owned.Count; at++) {
                 if (owned.Count > 64) throw new IOException(); var parent = owned[at];
                 foreach (var entry in entries) {
                     if (entry.Parent != parent.Pid) continue;
-                    var child = Open((int)entry.Pid, (int)entry.Parent); if (child == null) throw new IOException();
-                    if (!KnotClosePolicy.Child(parent.Pid, parent.Created, parent.Session, child.Parent, child.Created, child.Session) ||
-                        !KnotClosePolicy.AllowedChild(parent.Image, child.Image, powershell)) { child.Dispose(); throw new IOException(); }
-                    child.Elevated = Elevated(child); owned.Add(child);
+                    if (owned.Exists(delegate(KnotCloseProcess item) { return item.Pid == (int)entry.Pid; })) continue;
+                    var child = Open((int)entry.Pid, (int)entry.Parent); if (child == null) continue;
+                    if (!KnotClosePolicy.Child(parent.Pid, parent.Created, parent.Session, child.Parent, child.Created, child.Session)) { child.Dispose(); throw new IOException(); }
+                    // Unknown descendants are retained only as exit observers. Ask
+                    // the verified owner to clean up its own contained engine; never
+                    // send a window message to Moonlight or an unsupported process.
+                    child.CanSignal = parent.CanSignal && KnotClosePolicy.AllowedChild(parent.Image, child.Image, powershell);
+                    child.RootIdentity = parent.RootIdentity;
+                    if (owned.Count >= 64) { child.Dispose(); throw new IOException(); }
+                    owned.Add(child);
+                    if (child.CanSignal) child.Elevated = Elevated(child);
                 }
             }
-            return owned;
-        } catch { foreach (var process in owned) process.Dispose(); throw; }
     }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessageW(string message);
     private static readonly uint SafeCloseMessage = RegisterWindowMessageW("Knot.SafeCloseForUpdate.v1");
-    private static void CloseWindows(List<KnotCloseProcess> targets, Stopwatch budget)
+    private static readonly uint CoordinatedCloseMessage = RegisterWindowMessageW("Knot.SafeCloseForUpdate.v2");
+    private static void CloseWindows(List<KnotCloseProcess> targets, Stopwatch budget, IntPtr owner, HashSet<string> coordinated, bool cancel)
     {
         // Handle retention prevents PID reuse; match live windows to held identities.
         EnumWindows(delegate(IntPtr window, IntPtr ignored) {
-            if (budget.ElapsedMilliseconds >= 15000) return false;
+            if (!cancel && budget.ElapsedMilliseconds >= 180000) return false;
             int pid; GetWindowThreadProcessId(window, out pid);
-            foreach (var process in targets) if (process.Pid == pid && WaitForSingleObject(process.Handle, 0) == Timeout) {
-                IntPtr result; SendMessageTimeoutW(window, process.Elevated ? SafeCloseMessage : 0x10, IntPtr.Zero, IntPtr.Zero, 2, (uint)Math.Max(1, Math.Min(500, 15000 - budget.ElapsedMilliseconds)), out result); break;
+            foreach (var process in targets) if (process.CanSignal && process.Pid == pid && WaitForSingleObject(process.Handle, 0) == Timeout) {
+                IntPtr result;
+                SendMessageTimeoutW(window, CoordinatedCloseMessage, new IntPtr(cancel ? 2 : 1), owner, 2, 250, out result);
+                if (cancel) break;
+                if (result == new IntPtr(2)) coordinated.Add(process.RootIdentity);
+                else SendMessageTimeoutW(window, process.Elevated ? SafeCloseMessage : 0x10, IntPtr.Zero, IntPtr.Zero, 2, 250, out result);
+                break;
             }
             return true;
         }, IntPtr.Zero);
     }
     [STAThread] private static int Main(string[] args)
     {
+        var targets = new List<KnotCloseProcess>(); var timer = Stopwatch.StartNew();
+        var coordinated = new HashSet<string>();
+        var owner = new IntPtr((Guid.NewGuid().GetHashCode() & Int32.MaxValue) + 1L);
+        bool completed = false;
         // The installer supplies only its exact target. Refuse redirected paths.
         try {
             if (args.Length != 1 || !Path.IsPathRooted(args[0]) || args[0].StartsWith(@"\\", StringComparison.Ordinal) ||
@@ -131,18 +158,23 @@ internal static class KnotCloseForUpdate
                 !KnotClosePolicy.RootName(Path.GetFileName(args[0]))) return 2;
             for (var directory = new DirectoryInfo(Path.GetDirectoryName(args[0])); directory != null; directory = directory.Parent)
                 if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) return 2;
-            var timer = Stopwatch.StartNew();
-            while (timer.ElapsedMilliseconds < 15000) {
-                List<KnotCloseProcess> targets = Targets(args[0]);
-                try {
-                    if (targets.Count == 0) return 0;
-                    CloseWindows(targets, timer);
+            while (timer.ElapsedMilliseconds < 180000) {
+                    RefreshTargets(args[0], targets);
+                    if (targets.Count > 64) throw new IOException();
+                    CloseWindows(targets, timer, owner, coordinated, false);
                     bool exited = true;
-                    foreach (var process in targets) if (WaitForSingleObject(process.Handle, 0) == Timeout) exited = false;
-                    if (!exited) Thread.Sleep(250);
-                } finally { foreach (var process in targets) process.Dispose(); }
+                    foreach (var process in targets) if (WaitForSingleObject(process.Handle, 0) == Timeout) {
+                        exited = false;
+                        if (!coordinated.Contains(process.RootIdentity) && timer.ElapsedMilliseconds >= 15000) return 1;
+                    }
+                    if (exited) { completed = true; return 0; }
+                    Thread.Sleep(100);
             }
         } catch { return 2; }
+        finally {
+            try { if (!completed) CloseWindows(targets, timer, owner, coordinated, true); }
+            finally { foreach (var process in targets) process.Dispose(); }
+        }
         return 1; // Busy or an unsupported child. Never fall back to killing it.
     }
 }

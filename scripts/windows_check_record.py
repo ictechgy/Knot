@@ -93,7 +93,7 @@ def validate_windows_check_record(checks, build):
         raise ValueError(message)
     source_hashes = reverse.get('sourceSha256', {})
     expected_sources = {path for path in source if path.startswith('client/windows/') and path.endswith('.cs')} | {
-        'scripts/tests/ReverseDiscoveryChecks.cs'}
+        'scripts/tests/ReverseDiscoveryChecks.cs', 'host/windows/KnotUpdateForm.cs'}
     if (not isinstance(source_hashes, dict) or not source_hashes or
             any(not _digest(digest) or source.get(path) != digest for path, digest in source_hashes.items()) or
             set(source_hashes) != expected_sources or 'client/windows/Tests.cs' not in source_hashes):

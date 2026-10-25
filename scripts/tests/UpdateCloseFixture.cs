@@ -19,9 +19,18 @@ internal sealed class UpdateFixtureForm : Form
 internal static class UpdateCloseFixture
 {
     [STAThread] private static void Main(string[] args) {
-        if (args.Length == 1 && args[0] == "child") {
-            using (var child = Process.Start(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DeskBridge-Managed.exe"), "ready")) child.WaitForExit(); return;
+        if (args.Length != 2) throw new ArgumentException();
+        string mode = args[0], receipt = args[1];
+        if (mode == "child") {
+            using (var child = Process.Start(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DeskBridge-Managed.exe"), "ready \"" + receipt + "\"")) {
+                File.WriteAllText(receipt + ".child", child.Id.ToString()); child.WaitForExit();
+            }
+            return;
         }
-        Application.Run(new UpdateFixtureForm(args.Length == 1 && args[0] == "busy"));
+        if (mode == "engine") { CoordinatedUpdateFixture.RunEngine(receipt); return; }
+        if (mode != "ready" && mode != "busy") { Application.Run(new CoordinatedUpdateFixture(mode, receipt)); return; }
+        var form = new UpdateFixtureForm(mode == "busy");
+        form.Shown += delegate { File.WriteAllText(receipt + ".ready", "ready"); };
+        Application.Run(form);
     }
 }

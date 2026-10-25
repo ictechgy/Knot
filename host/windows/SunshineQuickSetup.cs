@@ -790,7 +790,7 @@ internal sealed class SunshineProcessWitness : ISunshineRestartWitness
     public void Dispose() { process.Dispose(); }
 }
 
-internal sealed class SunshineQuickSetupForm : Form
+internal sealed class SunshineQuickSetupForm : KnotUpdateForm
 {
     private readonly TextBox username = new TextBox(), password = new TextBox(), pin = new TextBox();
     private readonly Button prepare = new Button(), refresh = new Button(), pair = new Button(), reapply = new Button(), invitation = new Button();
@@ -805,6 +805,18 @@ internal sealed class SunshineQuickSetupForm : Form
     internal SunshineQuickSetupForm(string payloadDirectory)
     {
         this.payloadDirectory = payloadDirectory;
+        UpdateProtectedWork = delegate { return busy || polling; };
+        UpdateCloseStateChanged += delegate {
+            if (UpdateCloseRequested) {
+                poll.Stop();
+                foreach (Control control in Controls) control.Enabled = false;
+                status.Text = "진행 중인 설정을 마친 뒤 Knot을 자동으로 업데이트합니다.";
+                foreach (Form owned in OwnedForms) owned.Close();
+            } else if (!closing) {
+                foreach (Control control in Controls) control.Enabled = true;
+                poll.Start();
+            }
+        };
         cancellation = lifetime.Token;
         var applicationIcon = Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location); Icon = applicationIcon;
         Disposed += delegate { if (applicationIcon != null) applicationIcon.Dispose(); };
@@ -835,11 +847,11 @@ internal sealed class SunshineQuickSetupForm : Form
         reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; layout.Controls.Add(reapply);
         var close = new Button { Text = "닫기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
         poll.Tick += async delegate {
-            if (busy || polling || closing || session == null || !session.PairingReady) return;
+            if (busy || polling || closing || UpdateCloseRequested || session == null || !session.PairingReady) return;
             polling = true;
             try { await RefreshPendingAsync(true, true); } catch (OperationCanceledException) { }
             catch (Exception) { if (!closing) { poll.Stop(); pendingWarning = true; status.Text = "요청 자동 갱신을 중단했습니다. 요청 새로고침으로 다시 시도하세요. 연결 권한과 인증서는 변경하지 않습니다."; } }
-            finally { polling = false; }
+            finally { polling = false; UpdateWorkDidFinish(); }
         };
         pending.SelectedIndexChanged += delegate { UpdatePairAvailability(); };
         Shown += async delegate { ClampToWorkingArea(); await WorkAsync(InitializeAsync); };
@@ -1019,7 +1031,7 @@ internal sealed class SunshineQuickSetupForm : Form
     }
     private async Task WorkAsync(Func<Task> action)
     {
-        if (busy || closing) return; busy = true;
+        if (busy || closing || UpdateCloseRequested) return; busy = true;
         prepare.Enabled = false; refresh.Enabled = false; pair.Enabled = false; reapply.Enabled = false; invitation.Enabled = false;
         username.Enabled = false; password.Enabled = false; pending.Enabled = false; pin.Enabled = false;
         try { await action(); }
@@ -1032,13 +1044,14 @@ internal sealed class SunshineQuickSetupForm : Form
         }
         finally {
             busy = false;
-            if (!closing) {
+            if (!closing && !UpdateCloseRequested) {
                 bool ready = session != null && session.PairingReady;
                 username.Enabled = session != null && !ready; password.Enabled = username.Enabled;
                 pending.Enabled = ready; pin.Enabled = ready;
                 prepare.Enabled = session != null && !ready; refresh.Enabled = ready; invitation.Enabled = session != null; UpdatePairAvailability();
                 reapply.Visible = session != null && session.CanReapply && !session.Configured; reapply.Enabled = reapply.Visible;
             }
+            UpdateWorkDidFinish();
         }
     }
     protected override void Dispose(bool disposing)

@@ -12,6 +12,9 @@ Import-Module (Join-Path $PSScriptRoot 'SetupReadiness.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Enrollment.psm1') -Force
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+if (-not ('KnotUpdateForm' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'KnotUpdateForm.cs') -ReferencedAssemblies System.dll,System.Windows.Forms.dll,System.Drawing.dll
+}
 [Windows.Forms.Application]::EnableVisualStyles()
 try { Assert-DesktopSetupToken } catch {
     [Windows.Forms.MessageBox]::Show((Get-SetupFailureText $_ -Context 'ElevatedToken'),'Knot','OK','Error') | Out-Null
@@ -21,7 +24,7 @@ if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -
     [Windows.Forms.MessageBox]::Show('이 프리뷰는 Windows 11 x64에서 사용할 수 있습니다. PC의 Windows 버전과 시스템 종류를 확인하세요.','Knot','OK','Error') | Out-Null
     exit 3
 }
-$form = New-Object Windows.Forms.Form
+$form = New-Object KnotUpdateForm
 $form.Text = 'Knot · Windows 연결'; $form.Size = New-Object Drawing.Size(780,760)
 $form.MinimumSize = New-Object Drawing.Size(640,480); $form.StartPosition = 'CenterScreen'
 $form.AutoScaleDimensions=New-Object Drawing.SizeF(96,96); $form.AutoScaleMode='Dpi'
@@ -45,9 +48,15 @@ function Add-Text([string] $Text,[int] $Height=40) {
     $label.MinimumSize=New-Object Drawing.Size(0,$Height); $label.MaximumSize=New-Object Drawing.Size(710,0)
     $script:section.Controls.Add($label); return $label
 }
-function Add-Button([string] $Text,[scriptblock] $Action) {
+function Add-Button([string] $Text,[scriptblock] $Action,[switch] $AllowDuringUpdate) {
     $button=New-Object Windows.Forms.Button; $button.Text=$Text; $button.Size=New-Object Drawing.Size(330,34)
-    $button.Add_Click($Action); $script:section.Controls.Add($button); return $button
+    # Keep the original script scope (including cancellation flags), rather than
+    # copying actions into a dynamic module via GetNewClosure.
+    $button.Tag=[pscustomobject]@{Action=$Action;AllowDuringUpdate=[bool]$AllowDuringUpdate}
+    $button.Add_Click({ param($sender,$eventArgs)
+        if (-not $form.UpdateCloseRequested -or $sender.Tag.AllowDuringUpdate) { & $sender.Tag.Action }
+    })
+    $script:section.Controls.Add($button); return $button
 }
 $title = Add-Text 'Windows를 Mac의 한 화면으로' 38
 $title.Font = New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold)
@@ -81,16 +90,29 @@ function Get-SetupControls($Root) {
     foreach ($control in $Root.Controls) { $control; Get-SetupControls $control }
 }
 $script:setupBusyDepth=0
+function Update-BusyControls {
+    $effectiveBusy=$script:setupBusyDepth -gt 0
+    foreach ($control in (Get-SetupControls $flow)) {
+        # Keep an already enabled cancellation button usable while draining.
+        # Its original action can only cancel owned work; never enable a dormant one.
+        if ($form.UpdateCloseRequested -and $control.Tag -and
+            $control.Tag.PSObject.Properties['AllowDuringUpdate'] -and $control.Tag.AllowDuringUpdate) { continue }
+        if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.ComboBox]) { $control.Enabled = -not ($effectiveBusy -or $form.UpdateCloseRequested) }
+    }
+    $form.UseWaitCursor=$effectiveBusy
+    $form.UpdateWorkDidFinish()
+}
+$form.UpdateProtectedWork=[Func[bool]]{ $script:setupBusyDepth -gt 0 }
+$form.Add_UpdateCloseStateChanged({
+    if ($form.UpdateCloseRequested) { $status.Text='진행 중인 설정을 마치면 Knot을 자동으로 업데이트하고 다시 엽니다.' }
+    Update-BusyControls
+})
 function Set-Busy([bool] $Busy) {
     # Installation can run its bounded local check before download cleanup.
     # Keep the outer operation's controls locked until its own finally exits.
     if ($Busy) { $script:setupBusyDepth++ }
     else { $script:setupBusyDepth=[Math]::Max(0,$script:setupBusyDepth-1) }
-    $effectiveBusy=$script:setupBusyDepth -gt 0
-    foreach ($control in (Get-SetupControls $flow)) {
-        if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.ComboBox]) { $control.Enabled = -not $effectiveBusy }
-    }
-    $form.UseWaitCursor=$effectiveBusy
+    Update-BusyControls
 }
 function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('Status','Settings','PIN','Encryption')][string] $Open='Status') {
     Set-Busy $true; $probe=$null; $script:quickSetupPortResponded=$null
@@ -282,13 +304,13 @@ $script:installAction={
     }
 }
 $install=Add-Button 'Sunshine 설치 · 수동' $script:installAction
-$downloadCancel=Add-Button '다운로드 취소' { $script:cancelDownload=$true }; $downloadCancel.Visible=$false
+$downloadCancel=Add-Button '다운로드 취소' { $script:cancelDownload=$true } -AllowDuringUpdate; $downloadCancel.Visible=$false
 $advancedPanel.Controls.Remove($downloadCancel); $flow.Controls.Add($downloadCancel)
 $null = Add-Text '2   이 Windows에서 Sunshine 초기 설정 · 처음 한 번' 30
 $null = Add-Text "Sunshine은 별도 창 없이 백그라운드에서 실행됩니다. 아래 버튼으로 이 Windows의 브라우저를 여세요. 초기 계정을 만들고 로그인합니다. 이 계정은 Sunshine 설정용이며 Mac에서 로그인하지 않습니다.`r`n영상 암호화 설정 열기 → LAN Encryption Mode / WAN Encryption Mode를 둘 다 Required for all clients로 선택하세요. 한국어: LAN/WAN 암호화 모드 → 모든 사용자에게 필수. Save → Apply/재시작까지 완료하세요. Wi-Fi와 Tailscale도 LAN으로 분류될 수 있어 LAN 설정이 필요합니다. Desktop 앱도 확인하세요." 118
 $localPortStatus=Add-Text '로컬 설정 포트: 아직 확인하지 않았습니다. 포트 응답은 Sunshine 로그인이나 화면 연결 성공을 의미하지 않습니다.' 46
 $checkLocal=Add-Button '설정 상태 새로고침' { Invoke-SunshineLocalCheck }
-$localCheckCancel=Add-Button '설정 포트 확인 취소' { $script:cancelLocalCheck=$true }; $localCheckCancel.Visible=$false
+$localCheckCancel=Add-Button '설정 포트 확인 취소' { $script:cancelLocalCheck=$true } -AllowDuringUpdate; $localCheckCancel.Visible=$false
 $open = Add-Button '이 Windows에서 Sunshine 설정 열기' { Invoke-SunshineLocalCheck -Open Settings }
 $encryption = Add-Button '영상 암호화 설정 열기' { Invoke-SunshineLocalCheck -Open Encryption }
 $null = Add-Text '직접 열기: 이 Windows의 Edge/Chrome → https://localhost:47990/ · localhost는 현재 브라우저를 연 컴퓨터를 뜻합니다. Mac에서는 열지 마세요.' 48
@@ -401,7 +423,7 @@ $automatic=Add-Button '자동 파일 설정 · Mac 연결 받기…' {
 $enrollmentCancel=Add-Button '자동 파일 설정 연결 취소' {
     if ($script:enrollmentClient) { $script:enrollmentClient.Cancel() }
     $enrollmentCancel.Enabled=$false
-}
+} -AllowDuringUpdate
 $enrollmentCancel.Visible=$false
 $null=Add-Text '수동 복구: 자동 연결이 어려울 때만 Mac에서 설정 JSON을 저장해 아래에서 불러오세요.' 40
 $requestBox = New-Object Windows.Forms.TextBox; $requestBox.ReadOnly=$true; $requestBox.Width=710; $filePanel.Controls.Add($requestBox)
