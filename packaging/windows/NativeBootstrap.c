@@ -231,7 +231,7 @@ static int db_make_stage(int elevated,HANDLE token,wchar_t *stage) {
         if (!bytes || bytes>65536 || !(user=(PTOKEN_USER)db_alloc(bytes)) || !GetTokenInformation(token,TokenUser,user,bytes,&bytes) || !ConvertSidToStringSidW(user->User.Sid,&user_sid)) goto done;
     }
     if (db_crypto.random(NULL,random,sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0 ||
-        !db_copy(suffix,80,elevated?L"DeskBridgeBootstrapAdmin-":L"DeskBridgeBootstrap-")) goto done;
+        !db_copy(suffix,80,elevated?L"KnotBootstrapAdmin-":L"KnotBootstrap-")) goto done;
     {
         size_t at=db_length(suffix); const wchar_t *hex=L"0123456789abcdef";
         for (i=0;i<16;++i) { suffix[at++]=hex[random[i]>>4]; suffix[at++]=hex[random[i]&15]; } suffix[at]=0;
@@ -254,7 +254,7 @@ done:
 }
 static HANDLE db_extract(const wchar_t *stage,const BYTE *bytes,DWORD size,wchar_t *helper) {
     HANDLE file=INVALID_HANDLE_VALUE; DWORD wrote=0,read=0; db_hash hash={0}; BYTE buffer[65536]; int ok=0; LARGE_INTEGER zero;
-    if (!db_join(helper,DB_PATH_CAP,stage,L"DeskBridge-Managed.exe")) return INVALID_HANDLE_VALUE;
+    if (!db_join(helper,DB_PATH_CAP,stage,L"Knot-Managed.exe")) return INVALID_HANDLE_VALUE;
     file=CreateFileW(helper,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
     if (file==INVALID_HANDLE_VALUE) return file;
     if (!WriteFile(file,bytes,size,&wrote,NULL) || wrote!=size || !FlushFileBuffers(file)) goto done;
@@ -418,8 +418,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,PWSTR command_line,int
     // Static dependencies are system KnownDLLs/UCRT API sets; later loads search only System32.
     hardened=SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) && SetDllDirectoryW(L"");
     argv=CommandLineToArgvW(GetCommandLineW(),&argc); if (!argv || argc<1) goto done;
-    operation=db_dispatch(argc-1,(const wchar_t *const *)(argv+1)); if (operation==DB_INVALID) goto done;
+#ifdef KNOT_CLOSE_UPDATE_BOOTSTRAP
+    silent=1;
+    operation=db_close_update_dispatch(argc-1,(const wchar_t *const *)(argv+1));
+#else
+    operation=db_dispatch(argc-1,(const wchar_t *const *)(argv+1));
     silent=db_silent_disable(argc-1,(const wchar_t *const *)(argv+1));
+#endif
+    if (operation==DB_INVALID) goto done;
     if (silent) SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
     if (!hardened || !db_load_crypto()) goto done;
     ZeroMemory(&version,sizeof(version)); version.dwOSVersionInfoSize=sizeof(version);

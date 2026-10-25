@@ -225,6 +225,7 @@ public static class SunshineQuickSetupChecks
         internal readonly System.Collections.Generic.List<string> Paths = new System.Collections.Generic.List<string>();
         internal readonly System.Collections.Generic.List<string> Bodies = new System.Collections.Generic.List<string>();
         internal readonly System.Collections.Generic.List<string> Auth = new System.Collections.Generic.List<string>();
+        internal System.Action<string> OnSend;
         internal Witness Witness = new Witness(); internal bool Captured, BlockReadback;
         private async System.Threading.Tasks.Task<SunshineApiReply> BlockAsync(System.Threading.CancellationToken cancel)
         { await System.Threading.Tasks.Task.Delay(System.Threading.Timeout.Infinite, cancel); throw new System.Exception("Unreachable fixture path."); }
@@ -232,7 +233,7 @@ public static class SunshineQuickSetupChecks
         public ISunshineRestartWitness CaptureRestart(System.Threading.CancellationToken cancel)
         { cancel.ThrowIfCancellationRequested(); Captured = true; return Witness; }
         public System.Threading.Tasks.Task<SunshineApiReply> SendAsync(string path, string body, string auth, System.Threading.CancellationToken cancel)
-        { cancel.ThrowIfCancellationRequested(); Paths.Add(path); Bodies.Add(body); Auth.Add(auth); if (Captured && Witness.Waited && path == "/api/config" && BlockReadback) return BlockAsync(cancel); if (path == "/api/restart") Check(Captured && !Witness.Waited); var reply = Replies.Dequeue(); if (reply == null) throw new System.IO.IOException(); return System.Threading.Tasks.Task.FromResult(reply); }
+        { cancel.ThrowIfCancellationRequested(); if (OnSend != null) OnSend(path); Paths.Add(path); Bodies.Add(body); Auth.Add(auth); if (Captured && Witness.Waited && path == "/api/config" && BlockReadback) return BlockAsync(cancel); if (path == "/api/restart") Check(Captured && !Witness.Waited); var reply = Replies.Dequeue(); if (reply == null) throw new System.IO.IOException(); return System.Threading.Tasks.Task.FromResult(reply); }
     }
     private static SunshineSetupSession Session(Fake fake)
     { return new SunshineSetupSession(fake, delegate(int ignored, System.Threading.CancellationToken cancel) { cancel.ThrowIfCancellationRequested(); return System.Threading.Tasks.Task.FromResult(0); }); }
@@ -240,10 +241,98 @@ public static class SunshineQuickSetupChecks
     { session.PrepareAsync("fixture", "synthetic-password-1234", first, System.Threading.CancellationToken.None).GetAwaiter().GetResult(); }
     private static void PrepareForced(SunshineSetupSession session)
     { Prepare(session); if (!session.Configured) session.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); }
+    private sealed class AccountStore : ISunshineAccountStore
+    {
+        internal SunshineAccountRecord Value; internal int Saves, FailAt;
+        public SunshineAccountRecord Read() { return Value == null ? null : SunshineAccountCodec.Decode(SunshineAccountCodec.Encode(Value, "synthetic-cert"), "synthetic-cert"); }
+        public void Save(SunshineAccountRecord value) {
+            Saves++; if (FailAt == Saves) throw new SunshineSetupFailure("Synthetic storage failure");
+            Value = SunshineAccountCodec.Decode(SunshineAccountCodec.Encode(value, "synthetic-cert"), "synthetic-cert");
+        }
+    }
+    private static SunshineAccountRecord Generated() { return new SunshineAccountRecord { Username = "knot", Password = "synthetic-generated-password-1234567890", Recovery = true }; }
+    private static void AccountPrepare(SunshineAccountController controller, SunshineSetupSession session, bool manual = false, bool verified = true)
+    { controller.PrepareAsync(session, manual, "old-user", "old-synthetic-password", verified, System.Threading.CancellationToken.None).GetAwaiter().GetResult(); }
+    private static void CheckAccountAutomation()
+    {
+        Check(!SunshineSetupPolicy.ExistingPath(delegate { throw new System.IO.FileNotFoundException(); }, false));
+        Check(!SunshineSetupPolicy.ExistingPath(delegate { throw new System.IO.DirectoryNotFoundException(); }, true));
+        Check(SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.Directory; }, true));
+        Check(SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.Normal; }, false));
+        Reject(delegate { SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.ReparsePoint; }, false); });
+        Reject(delegate { SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.Normal; }, true); });
+        bool accessRefused = false; try { SunshineSetupPolicy.ExistingPath(delegate { throw new System.UnauthorizedAccessException(); }, true); } catch (System.UnauthorizedAccessException) { accessRefused = true; } Check(accessRefused);
+        bool ioRefused = false; try { SunshineSetupPolicy.ExistingPath(delegate { throw new System.IO.IOException(); }, false); } catch (System.IO.IOException) { ioRefused = true; } Check(ioRefused);
+        var selected = new SunshinePendingPair { ID = "same", Name = "Mac", Address = "192.168.1.2" };
+        Check(SunshineSetupPolicy.SamePending(selected, new SunshinePendingPair { ID = "same", Name = "Mac", Address = "192.168.1.2" }));
+        Check(!SunshineSetupPolicy.SamePending(selected, new SunshinePendingPair { ID = "same", Name = "Other", Address = "192.168.1.2" }));
+        Check(!SunshineSetupPolicy.SamePending(selected, null));
+        string service = @"C:\Program Files\Sunshine\tools\sunshinesvc.exe";
+        Check(SunshineServicePolicy.Trusted(16, 3, "\"" + service + "\"", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 3, service, "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 3, "\"" + service + "\" --extra", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 4, "\"" + service + "\"", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(272, 3, "\"" + service + "\"", "LocalSystem", service));
+        Check(!SunshineServicePolicy.Trusted(16, 3, "\"" + service + "\"", "untrusted-user", service));
+        var welcome = new SunshineApiReply(307, "", "/welcome"); var denied = new SunshineApiReply(401, "");
+        var store = new AccountStore(); int generated = 0;
+        var controller = new SunshineAccountController(store, delegate { generated++; return Generated(); });
+        var api = new Fake(welcome, welcome, Reply(Success), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        api.OnSend = delegate(string path) { if (path == "/api/password") Check(store.Value != null && store.Value.Recovery && store.Saves >= 1); };
+        var session = Session(api); AccountPrepare(controller, session);
+        Check(session.PairingReady && session.Configured && !store.Value.Recovery && generated == 1);
+        Check(api.Paths.Count == 6 && api.Paths[2] == "/api/password");
+        Check((string)SunshineSetupJson.Object(api.Bodies[2])["newPassword"] == Generated().Password);
+        // First write failure must happen before the account creation request.
+        store = new AccountStore { FailAt = 1 }; api = new Fake(welcome);
+        Reject(delegate { AccountPrepare(new SunshineAccountController(store, Generated), Session(api)); }); Check(api.Paths.Count == 1 && store.Value == null);
+        // Lost POST response keeps the original random credential and recovery flag.
+        store = new AccountStore(); controller = new SunshineAccountController(store, Generated); api = new Fake(welcome, welcome, null);
+        bool lost = false; try { AccountPrepare(controller, Session(api)); } catch (System.IO.IOException) { lost = true; }
+        Check(lost && store.Value != null && store.Value.Recovery);
+        string retained = store.Value.Password;
+        api = new Fake(denied, Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); session = Session(api);
+        AccountPrepare(new SunshineAccountController(store, delegate { throw new System.Exception("Must reuse journal"); }), session);
+        Check(session.Configured && !store.Value.Recovery && store.Value.Password == retained && !api.Paths.Contains("/api/password"));
+        // A request that never committed retries creation using that same journal.
+        store.Value.Recovery = true; api = new Fake(welcome, Reply(Success), Reply(SecureConfig), Reply("{}"), Reply(SecureConfig));
+        AccountPrepare(new SunshineAccountController(store, delegate { throw new System.Exception("Must not regenerate"); }), Session(api));
+        Check((string)SunshineSetupJson.Object(api.Bodies[1])["newPassword"] == retained);
+        // Existing unknown account is never reset and incorrect input is never saved.
+        store = new AccountStore(); api = new Fake(denied);
+        bool login = false; try { AccountPrepare(new SunshineAccountController(store, Generated), Session(api)); } catch (SunshineLoginRequired) { login = true; }
+        Check(login && store.Saves == 0 && api.Paths.Count == 1);
+        api = new Fake(denied, denied); Reject(delegate { AccountPrepare(new SunshineAccountController(store, Generated), Session(api), true); });
+        Check(store.Saves == 0 && !api.Paths.Contains("/api/password"));
+        api = new Fake(denied, Reply(SecureConfig)); session = Session(api);
+        AccountPrepare(new SunshineAccountController(store, Generated), session, true);
+        Check(store.Saves == 1 && store.Value.Username == "old-user" && !store.Value.Recovery && session.PairingReady && !session.Configured);
+        api = new Fake(denied, Reply(SecureConfig)); AccountPrepare(new SunshineAccountController(store), Session(api));
+        Check(api.Auth[1] == SunshineSetupPolicy.Authorization("old-user", "old-synthetic-password") && !api.Paths.Contains("/api/restart"));
+        // Persisted incomplete security application requires an observed restart after reopening.
+        store.Value.Recovery = true; store.FailAt = store.Saves + 3;
+        api = new Fake(denied, Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); session = Session(api);
+        Reject(delegate { AccountPrepare(new SunshineAccountController(store), session); });
+        Check(store.Value.Recovery && !session.PairingReady && !session.Configured && session.NeedsSecurityReapply);
+        store.FailAt = 0; api = new Fake(denied, Reply(SecureConfig), Reply("{}"), Reply(SecureConfig)); session = Session(api);
+        AccountPrepare(new SunshineAccountController(store), session); Check(session.Configured && !store.Value.Recovery);
+        store = new AccountStore(); api = new Fake(welcome);
+        Reject(delegate { AccountPrepare(new SunshineAccountController(store, Generated), Session(api), false, false); }); Check(store.Saves == 0);
+        byte[] encoded = SunshineAccountCodec.Encode(Generated(), "synthetic-cert");
+        Check(SunshineAccountCodec.Decode(encoded, "synthetic-cert").Password == Generated().Password);
+        Reject(delegate { SunshineAccountCodec.Decode(encoded, "changed-cert"); });
+        Reject(delegate { SunshineAccountCodec.Decode(System.Text.Encoding.UTF8.GetBytes("{}"), "synthetic-cert"); });
+        Reject(delegate { SunshineAccountCodec.Decode(System.Text.Encoding.UTF8.GetBytes(System.Text.Encoding.UTF8.GetString(encoded).Replace("\"schema\":\"1\"", "\"schema\":\"2\"")), "synthetic-cert"); });
+        using (var cancellation = new System.Threading.CancellationTokenSource()) {
+            cancellation.Cancel(); bool canceled = false; controller = new SunshineAccountController(store, Generated);
+            try { controller.PrepareAsync(Session(new Fake()), false, null, null, true, cancellation.Token).GetAwaiter().GetResult(); } catch (System.OperationCanceledException) { canceled = true; }
+            Check(canceled && store.Saves == 0);
+        }
+    }
     public static void Main() { System.Console.WriteLine(Run()); }
     public static string Run()
     {
-        count = 0; windowsAclChecks = 0; CheckAncestorTrustBoundary(); CheckWindowsAclProjection(); CheckDispatch(); CheckOwnedFactory(); CheckIdempotentCleanup();
+        count = 0; windowsAclChecks = 0; CheckAncestorTrustBoundary(); CheckWindowsAclProjection(); CheckDispatch(); CheckOwnedFactory(); CheckIdempotentCleanup(); CheckAccountAutomation();
         Check(SunshineSetupPolicy.TrustedProcessSid("S-1-5-18"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-32-544"));
         Check(!SunshineSetupPolicy.TrustedProcessSid("S-1-5-21-1-2-3-1001"));
@@ -400,7 +489,7 @@ public static class SunshineQuickSetupChecks
         var firstAuthSession = Session(firstAuthFailure); Reject(delegate { Prepare(firstAuthSession, true); });
         Check(firstAuthSession.NeedsSecurityReapply && !firstAuthSession.CanReapply && !firstAuthSession.PairingReady && !firstAuthSession.Configured);
         string loginRecovery = SunshineSetupPolicy.RecoveryGuidance(firstAuthSession.NeedsSecurityReapply, firstAuthSession.CanReapply);
-        Check(loginRecovery.Contains("로그인하고 연결 준비") && loginRecovery.Contains("다시 로그인") && !loginRecovery.Contains("보안 설정 다시 적용 · 재시작"));
+        Check(loginRecovery.Contains("연결 준비를 다시 시도") && loginRecovery.Contains("자동으로 재사용") && !loginRecovery.Contains("보안 설정 다시 적용 · 재시작"));
         Reject(delegate { firstAuthSession.ReapplySecurityAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); });
         Check(firstAuthFailure.Paths.Count == 3);
         var passwordFailure = new Fake(new SunshineApiReply(307, "", "/welcome"), new SunshineApiReply(500, "{}"),

@@ -51,7 +51,7 @@ namespace Knot.Updates
             try
             {
                 if (!String.Equals(Path.GetFullPath(directory), directory, StringComparison.OrdinalIgnoreCase)) return null;
-                return Path.Combine(directory, "DeskBridge-Windows.exe");
+                return Path.Combine(directory, "Knot.exe");
             }
             catch (ArgumentException) { return null; } catch (NotSupportedException) { return null; } catch (PathTooLongException) { return null; }
         }

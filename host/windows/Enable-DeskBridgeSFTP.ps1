@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'SetupContract.psm1') -Force
 if (-not $Apply) {
     Write-Output 'Review mode: no changes. With -Apply this installs OpenSSH Server if needed, creates a dedicated standard user and NEW local share, restricts SSH to that key/user and the supplied client IPs, and starts sshd.'
-    Write-Output 'Existing sshd configuration/running service, existing account, existing share or existing DeskBridge state cause refusal. No router ports or Tailscale policy are changed.'
+    Write-Output 'Existing sshd configuration/running service, existing account, existing share or existing Knot state cause refusal. No router ports or Tailscale policy are changed.'
     return
 }
 if (-not $PSCmdlet.ShouldProcess('Windows OpenSSH Server, dedicated account, NTFS share ACLs and firewall', 'Configure key-only DeskBridge SFTP')) { return }
@@ -178,7 +178,7 @@ try {
     try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     $password = ConvertTo-SecureString ([Convert]::ToBase64String($bytes)) -AsPlainText -Force
     [Array]::Clear($bytes, 0, $bytes.Length)
-    $user = New-LocalUser -Name $UserName -Password $password -Disabled -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -Description 'DeskBridge key-only restricted SFTP transfer account'
+    $user = New-LocalUser -Name $UserName -Password $password -Disabled -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -Description 'Knot key-only restricted SFTP transfer account'
     $createdUser = $true
     $usersGroup = Get-LocalGroup -SID 'S-1-5-32-545'
     $alreadyInUsers = Get-LocalGroupMember -Group $usersGroup.Name | Where-Object { $_.SID -eq $user.SID }
@@ -241,13 +241,13 @@ Match User $UserName
     Write-ManagedRecoveryRecord $state $rollback
     Assert-ProtectedDirectory $sshDirectory
     Assert-ManagedConfig $config $rollback.ConfigSha256
-    New-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -DisplayName 'DeskBridge SFTP from approved Mac addresses' -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress $AllowedClientAddress -Action Allow -Profile Any | Out-Null
+    New-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -DisplayName 'Knot SFTP from approved Mac addresses' -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress $AllowedClientAddress -Action Allow -Profile Any | Out-Null
     $createdFirewall = $true
     Assert-NoOpenSSHWorkers
     Set-Service -Name sshd -StartupType Automatic
     Enable-LocalUser -SID $user.SID
     Start-Service sshd; $startedService = $true
-    Write-Output 'DeskBridge SFTP is configured. Share /files is the only writable SFTP tree. Keep the account out of Administrators.'
+    Write-Output 'Knot SFTP is configured. Share /files is the only writable SFTP tree. Keep the account out of Administrators.'
     Write-Output 'Verify this SERVER host key fingerprint on the Mac using the separately supplied public key:'
     $hostKey = Join-Path $sshDirectory 'ssh_host_ed25519_key.pub'
     & $keygen -l -E sha256 -f $hostKey

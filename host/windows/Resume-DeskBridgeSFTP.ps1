@@ -74,7 +74,7 @@ try {
  $defaultRule=Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
  if ($defaultRule) {Disable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'}
  if ($rule) {Remove-NetFirewallRule -InputObject $rule}
- $resumeCreatedFirewall=@(New-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -DisplayName 'DeskBridge SFTP from approved Mac addresses' -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress $addresses -Action Allow -Profile Any)
+ $resumeCreatedFirewall=@(New-NetFirewallRule -Name 'DeskBridge-SFTP-In-TCP' -DisplayName 'Knot SFTP from approved Mac addresses' -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress $addresses -Action Allow -Profile Any)
  if ($resumeCreatedFirewall.Count -ne 1) {throw 'The new managed firewall rule could not be identified. Manual review is required.'}
  # A stopped service may retain Disabled startup. Permit this start without
  # leaving an automatic service behind if account enable/start fails.

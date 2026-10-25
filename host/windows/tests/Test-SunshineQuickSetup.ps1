@@ -4,6 +4,7 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 $source = Join-Path $root 'host/windows/SunshineQuickSetup.cs'
+$accountSource = Join-Path $root 'host/windows/SunshineAccount.cs'
 $fixture = Join-Path $root 'scripts/tests/SunshineQuickSetupChecks.cs'
 $windowsFolder = [Environment]::GetFolderPath('Windows')
 $compiler = $null
@@ -13,7 +14,7 @@ if ($compiler -and (Test-Path -LiteralPath $compiler -PathType Leaf)) {
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     try {
         $executable = Join-Path $directory 'SyntheticQuickSetupChecks.exe'
-        & $compiler /nologo /noconfig /reference:System.dll /reference:System.Core.dll /target:exe /platform:x64 /langversion:5 /warnaserror+ /define:KNOT_QUICKSETUP_POLICY_ONLY "/out:$executable" $source $fixture
+        & $compiler /nologo /noconfig /reference:System.dll /reference:System.Core.dll /target:exe /platform:x64 /langversion:5 /warnaserror+ /define:KNOT_QUICKSETUP_POLICY_ONLY "/out:$executable" $source $accountSource $fixture
         if ($LASTEXITCODE -ne 0) { throw 'Quick setup policy failed Framework C# 5 compilation.' }
         $output = @(& $executable)
         if ($LASTEXITCODE -ne 0 -or $output.Count -eq 0) { throw 'Quick setup synthetic checks failed.' }
@@ -21,15 +22,14 @@ if ($compiler -and (Test-Path -LiteralPath $compiler -PathType Leaf)) {
         $framework = $true
     } finally { [IO.Directory]::Delete($directory, $true) }
 } elseif ($PSVersionTable.PSEdition -eq 'Core') {
-    $definition = "#define KNOT_QUICKSETUP_POLICY_ONLY`n" + [IO.File]::ReadAllText($source) + "`n" + [IO.File]::ReadAllText($fixture)
-    Add-Type -TypeDefinition $definition -CompilerOptions '/langversion:5'
+    Add-Type -Path @($source, $accountSource, $fixture) -CompilerOptions @('/langversion:5', '/define:KNOT_QUICKSETUP_POLICY_ONLY')
     $result = [SunshineQuickSetupChecks]::Run() | ConvertFrom-Json
     $framework = $false
 } else { throw 'The protected Framework C# compiler or PowerShell Core is required.' }
-if ($result.status -cne 'passed' -or $result.checks -lt 208 -or -not $result.freshSyntheticOnly -or $result.nativeApisInvoked) { throw 'Incomplete quick setup fixture result.' }
+if ($result.status -cne 'passed' -or $result.checks -lt 254 -or -not $result.freshSyntheticOnly -or $result.nativeApisInvoked) { throw 'Incomplete quick setup fixture result.' }
 $expectedWindowsAcl = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 if ($expectedWindowsAcl) {
-    if (-not $framework -or $result.syntheticWindowsAclProjection -ne $true -or $result.syntheticWindowsAclChecks -lt 46 -or $result.checks -lt 254) { throw 'Actual Framework synthetic ACL projection checks are required on Windows.' }
+    if (-not $framework -or $result.syntheticWindowsAclProjection -ne $true -or $result.syntheticWindowsAclChecks -lt 46 -or $result.checks -lt 300) { throw 'Actual Framework synthetic ACL projection checks are required on Windows.' }
 } elseif ($result.syntheticWindowsAclProjection -ne $false -or $result.syntheticWindowsAclChecks -ne 0) { throw 'Windows ACL execution must be explicitly skipped on this platform.' }
 $result | Add-Member -NotePropertyName frameworkCompiler -NotePropertyValue $framework
 $result | ConvertTo-Json -Compress

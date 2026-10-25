@@ -8,6 +8,18 @@ namespace DeskBridge.Reverse
     internal enum WindowsRole { Cancel, ShareWindows, OpenMac, OpenLinux }
     internal static class WindowsRoleChooser
     {
+        internal static void ShowUpdates()
+        {
+            using (var icon = Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location))
+            using (var form = new Form { Text = "Knot · 업데이트", Icon = icon, StartPosition = FormStartPosition.CenterScreen, ClientSize = new Size(620, 260), AutoScroll = true })
+            {
+                var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, Padding = new Padding(24) };
+                layout.Controls.Add(new Label { AutoSize = true, Text = "Knot " + Knot.Updates.KnotUpdateConfiguration.DisplayVersion });
+                KnotUpdates.AttachControls(layout);
+                var close = new Button { AutoSize = true, Text = "닫기" }; close.Click += delegate { form.Close(); }; layout.Controls.Add(close);
+                form.Controls.Add(layout); form.ShowDialog();
+            }
+        }
         internal static WindowsRole Choose()
         {
             using (var applicationIcon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location))

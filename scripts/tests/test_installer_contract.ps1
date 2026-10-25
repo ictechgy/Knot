@@ -28,12 +28,13 @@ Expect ($innoSource.Contains('AppId={{7BB82A17-E531-4D04-A1FA-E8912E9E8E99}') -a
         $innoSource.Contains('UsePreviousAppDir=yes')) 'Installer identity and previous installation directory must remain stable on upgrades.'
 Expect ($innoSource.Contains('DefaultDirName={autopf}\Knot')) 'Fresh installations must use the public Knot folder name.'
 Expect ($innoSource.Contains('UninstallDisplayIcon={app}\AppIcon.ico')) 'Installed Apps must show the Knot icon.'
-foreach ($shortcut in @('Knot 설정','Knot 제거')) {
+foreach ($shortcut in @('Knot','Knot 제거')) {
  $line=@($innoSource -split '\r?\n' | Where-Object { $_.StartsWith('Name: "{group}\'+$shortcut+'";') })
  Expect ($line.Count -eq 1 -and $line[0].Contains('IconFilename: "{app}\AppIcon.ico"')) 'Every public shortcut must use the same Knot icon.'
 }
-Expect ($innoSource.Contains('Source: "..\..\build\windows\Knot-Windows.exe"; DestDir: "{app}"; DestName: "DeskBridge-Windows.exe";')) 'Publicly renamed helper must replace the existing installed broker.'
-Expect ($innoSource.Contains('Filename: "{app}\DeskBridge-Windows.exe"; Description: ')) 'Installed launch path must use the replaced broker.'
+Expect ($innoSource.Contains('Source: "..\..\build\windows\Knot-Windows.exe"; DestDir: "{app}"; DestName: "Knot.exe";')) 'The installed public executable must use the Knot name.'
+Expect ($innoSource.Contains('Type: files; Name: "{app}\DeskBridge-Windows.exe"') -and $innoSource.Contains("CloseInstalledKnot('DeskBridge-Windows.exe')")) 'Legacy broker must close before exact-file migration cleanup.'
+Expect ($innoSource.Contains('Filename: "{app}\Knot.exe"; Description: ')) 'Installed launch path must use the replaced broker.'
 $uninstallStart=$innoSource.IndexOf('function InitializeUninstall(): Boolean;',[StringComparison]::Ordinal)
 Expect ($uninstallStart -ge 0) 'Actual uninstall callback must be present.'
 $uninstall=$innoSource.Substring($uninstallStart)

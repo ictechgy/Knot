@@ -75,6 +75,17 @@ if __name__ == '__main__':
         native_bytes = native.read_bytes()
         if hashlib.sha256(native_bytes).hexdigest() != record['sha256']:
             raise ValueError('Native bootstrap differs from build manifest')
+        close_helper = native.with_name('KnotCloseForUpdate.exe')
+        close_record = record.get('closeForUpdate', {})
+        if (close_record.get('compilerExitCode') != 0 or close_record.get('nativeCompilerExitCode') != 0 or
+                close_record.get('hardenedNativeBootstrap') is not True or
+                hashlib.sha256(close_helper.read_bytes()).hexdigest() != close_record.get('sha256')):
+            raise ValueError('Graceful-close helper differs from the exact build')
+        close_payload = NativePE(close_helper.read_bytes()).resource(10, 101)
+        validate_bootstrap(close_helper.read_bytes(), close_payload, record['version'])
+        if hashlib.sha256(close_payload).hexdigest() != close_record.get('managedSHA256'):
+            raise ValueError('Graceful-close embedded policy differs from its exact build')
+
         managed_bytes = NativePE(native_bytes).resource(10, 101)
         validate_bootstrap(native_bytes, managed_bytes, record['version'])
         if hashlib.sha256(managed_bytes).hexdigest() != record['managedSha256']:

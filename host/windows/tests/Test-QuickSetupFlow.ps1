@@ -42,6 +42,10 @@ function Start-Process {
 }
 foreach ($case in @('source','installed-ok','installed-cancel','installed-fail','installed-missing','custom-service','service-denied','custom-port','probe-unknown','fresh','fresh-fail')) {
     $LauncherPath=if ($case -ceq 'source') {''} else {'/synthetic/Knot.exe'}
+    $form=[pscustomobject]@{IsDisposed=$false;Visible=$true}
+    $form|Add-Member ScriptMethod Hide {$this.Visible=$false}
+    $form|Add-Member ScriptMethod Show {$this.Visible=$true}
+    $form|Add-Member ScriptMethod Activate {}
     $status=[pscustomobject]@{Text=''};$advancedPanel=[pscustomobject]@{Visible=$false}
     $script:busy=@();$script:starts=0;$script:installs=0;$script:failed=$false;$script:quickInstall=$false
     $script:installed=$case.StartsWith('installed')
@@ -54,6 +58,7 @@ foreach ($case in @('source','installed-ok','installed-cancel','installed-fail',
         if ($case -ceq 'fresh-fail') {throw 'synthetic installation failure'}
     }
     Invoke-QuickSetup
+    Expect $form.Visible 'The single visible setup window must be restored after child exit or failure'
     Expect (-not $script:quickInstall) ('Combined-install admission must unwind: '+$case)
     if ($case -ceq 'source') {
         Expect ($script:busy.Count -eq 0 -and $advancedPanel.Visible) 'Developer source must show manual fallback without UAC'

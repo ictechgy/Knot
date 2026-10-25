@@ -1,6 +1,6 @@
 ﻿; SPDX-License-Identifier: GPL-3.0-only
 #ifndef AppVersion
-  #define AppVersion "0.2.0-preview.19"
+  #define AppVersion "0.2.0-preview.20"
 #endif
 [Setup]
 AppId={{7BB82A17-E531-4D04-A1FA-E8912E9E8E99}
@@ -15,6 +15,7 @@ DefaultDirName={autopf}\Knot
 UsePreviousAppDir=yes
 DefaultGroupName=Knot
 UsePreviousGroup=no
+SetupMutex=KnotInstaller-7BB82A17-E531-4D04-A1FA-E8912E9E8E99,Global\KnotInstaller-7BB82A17-E531-4D04-A1FA-E8912E9E8E99
 OutputDir=..\..\dist\release
 OutputBaseFilename=Knot-{#AppVersion}-windows-x64-setup
 ArchitecturesAllowed=x64compatible
@@ -22,6 +23,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.22000
 PrivilegesRequired=admin
 WizardStyle=modern
+AppComments=실행 중인 Knot 창을 정상 종료하고 업데이트합니다. 진행 중인 원격 접속은 먼저 마쳐 주세요.
 Compression=lzma2
 SolidCompression=yes
 LicenseFile=..\..\LICENSE
@@ -31,7 +33,8 @@ UninstallDisplayIcon={app}\AppIcon.ico
 DisableProgramGroupPage=yes
 CloseApplications=no
 [Files]
-Source: "..\..\build\windows\Knot-Windows.exe"; DestDir: "{app}"; DestName: "DeskBridge-Windows.exe"; Flags: ignoreversion
+Source: "..\..\build\windows\KnotCloseForUpdate.exe"; Flags: dontcopy
+Source: "..\..\build\windows\Knot-Windows.exe"; DestDir: "{app}"; DestName: "Knot.exe"; Flags: ignoreversion
 Source: "..\..\Vendor\QRCodegen\NOTICE"; DestDir: "{app}"; DestName: "QRCodegen-LICENSE"; Flags: ignoreversion
 Source: "..\..\Vendor\WindowsRuntime\NOTICE"; DestDir: "{app}"; DestName: "WindowsRuntime-NOTICE"; Flags: ignoreversion
 Source: "..\..\host\windows\README.md"; DestDir: "{app}"; Flags: ignoreversion
@@ -39,16 +42,38 @@ Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\INSTALLATION.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\Assets\Brand\AppIcon.ico"; DestDir: "{app}"; Flags: ignoreversion
 [InstallDelete]
+Type: files; Name: "{app}\DeskBridge-Windows.exe"
+Type: files; Name: "{group}\Knot 설정.lnk"
 ; Remove only the two default shortcuts owned by the former installer.
 Type: files; Name: "{commonprograms}\DeskBridge\DeskBridge 설정.lnk"
 Type: files; Name: "{commonprograms}\DeskBridge\DeskBridge 제거.lnk"
 Type: dirifempty; Name: "{commonprograms}\DeskBridge"
 [Icons]
-Name: "{group}\Knot 설정"; Filename: "{app}\DeskBridge-Windows.exe"; IconFilename: "{app}\AppIcon.ico"
+Name: "{group}\Knot"; Filename: "{app}\Knot.exe"; IconFilename: "{app}\AppIcon.ico"
 Name: "{group}\Knot 제거"; Filename: "{uninstallexe}"; IconFilename: "{app}\AppIcon.ico"
 [Run]
-Filename: "{app}\DeskBridge-Windows.exe"; Description: "Knot 설정 열기"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\Knot.exe"; Description: "Knot 열기 · 자동 연결 준비"; Flags: postinstall nowait skipifsilent runasoriginaluser
 [Code]
+function CloseInstalledKnot(const Name: String): Boolean;
+var
+  CloseResult: Integer;
+begin
+  Result := True;
+  if not FileExists(ExpandConstant('{app}\' + Name)) then exit;
+  Result := Exec(ExpandConstant('{tmp}\KnotCloseForUpdate.exe'),
+      '"' + ExpandConstant('{app}\' + Name) + '"', ExpandConstant('{tmp}'),
+      SW_HIDE, ewWaitUntilTerminated, CloseResult);
+  Result := Result and (CloseResult = 0);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  ExtractTemporaryFile('KnotCloseForUpdate.exe');
+  if (not CloseInstalledKnot('DeskBridge-Windows.exe')) or (not CloseInstalledKnot('Knot.exe')) then
+    Result := 'Knot 설정 작업이나 원격 연결을 먼저 마쳐 주세요. 관리자 준비 창도 닫은 뒤 다시 시도하면 설치가 계속됩니다. Sunshine 화면 공유와 파일 설정은 유지됩니다.';
+end;
+
 function InitializeSetup(): Boolean;
 begin
   Result := not IsARM64;
@@ -72,7 +97,7 @@ begin
   BrokerArguments := '--elevated-operation DisableFiles';
   if UninstallSilent then
     BrokerArguments := BrokerArguments + ' --silent';
-  Launched := Exec(ExpandConstant('{app}\DeskBridge-Windows.exe'), BrokerArguments,
+  Launched := Exec(ExpandConstant('{app}\Knot.exe'), BrokerArguments,
     ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode);
   Result := Launched and (ExitCode = 0);
   if not Result then begin

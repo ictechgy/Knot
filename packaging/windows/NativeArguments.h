@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <wchar.h>
 
-typedef enum { DB_INVALID = -1, DB_NORMAL = 0, DB_ENABLE, DB_EXPORT, DB_DISABLE, DB_INSTALL, DB_INSTALL_DISPLAY, DB_REMOVE_DISPLAY, DB_QUICK_SETUP } db_operation;
+typedef enum { DB_INVALID = -1, DB_NORMAL = 0, DB_ENABLE, DB_EXPORT, DB_DISABLE, DB_INSTALL, DB_INSTALL_DISPLAY, DB_REMOVE_DISPLAY, DB_QUICK_SETUP, DB_CLOSE_UPDATE } db_operation;
 static size_t db_length(const wchar_t *s) { size_t n=0; if (s) while (s[n]) ++n; return n; }
 static int db_equal(const wchar_t *a,const wchar_t *b) { return a && b && wcscmp(a,b)==0; }
 static int db_digit(wchar_t c) { return c>=L'0' && c<=L'9'; }
@@ -87,6 +87,12 @@ static int db_local_file(const wchar_t *path,const wchar_t *extension) {
         if (c!=extension[i]) return 0;
     }
     return 1;
+}
+static db_operation db_close_update_dispatch(int argc,const wchar_t *const *argv) {
+    const wchar_t *name,*p;
+    if (argc!=1 || !argv || !db_local_file(argv[0],L".exe")) return DB_INVALID;
+    name=argv[0]; for (p=name;*p;++p) if (*p==L'\\') name=p+1;
+    return db_equal(name,L"Knot.exe") || db_equal(name,L"DeskBridge-Windows.exe")?DB_CLOSE_UPDATE:DB_INVALID;
 }
 static int db_silent_disable(int argc,const wchar_t *const *argv) {
     return argc==3 && argv && db_equal(argv[0],L"--elevated-operation") && db_equal(argv[1],L"DisableFiles") && db_equal(argv[2],L"--silent");

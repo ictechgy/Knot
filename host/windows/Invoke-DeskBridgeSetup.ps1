@@ -24,7 +24,7 @@ try {
     $lifecycleLease=Enter-DeskBridgeLifecycleLease
     if ($Operation -eq 'DisableFiles') {
         if (Test-FileAccessInactive (Get-FileAccessInactivityProjection)) {
-            Write-Output 'DeskBridge file access is already inactive. No configuration, accounts, services, firewall rules, metadata or shared files were changed.'
+            Write-Output 'Knot file access is already inactive. No configuration, accounts, services, firewall rules, metadata or shared files were changed.'
             Write-SetupSuccessReceipt
             exit 0
         }
@@ -58,7 +58,7 @@ try {
     $record=$deployment.Record; $keyPath=$deployment.KeyPath
     $authorized = Get-CanonicalPublicKey ([IO.File]::ReadAllText($keyPath).Trim())
     if ($authorized -cne $request.clientPublicKey) { throw 'A different Mac key is already configured. Revoke that deployment before configuring another key.' }
-    if ($deployment.Service.State -ne 'Running' -or -not $deployment.User.Enabled) { throw 'DeskBridge SFTP is not active.' }
+    if ($deployment.Service.State -ne 'Running' -or -not $deployment.User.Enabled) { throw 'Knot SFTP is not active.' }
     if (-not (Test-ManagedFirewallPolicy (Get-ManagedFirewallPolicy) $request.allowedClientAddresses)) {
         throw 'The managed firewall rule changed or is disabled. Revoke file access and configure it again; no connection file was exported.'
     }

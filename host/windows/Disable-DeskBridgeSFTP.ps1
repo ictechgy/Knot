@@ -25,13 +25,13 @@ Stop-ManagedSessionWorkers -BeforeStop {
 Remove-ManagedFirewallAccess
 if (-not $deployment.ConfigExists) {
     Set-Service -Name sshd -StartupType $record.StartupBefore
-    Write-Output ('DeskBridge access is already disabled. Verified retained metadata/account and confirmed no remaining OpenSSH workers. OpenSSH service is currently stopped; restored startup type: ' + $record.StartupBefore + '. The default OpenSSH firewall rule was not changed during this call.')
+    Write-Output ('Knot access is already disabled. Verified retained metadata/account and confirmed no remaining OpenSSH workers. OpenSSH service is currently stopped; restored startup type: ' + $record.StartupBefore + '. The default OpenSSH firewall rule was not changed during this call.')
     return
 }
 Move-Item -LiteralPath $config -Destination (Join-Path $state ('sshd_config.disabled-' + (Get-Date -Format 'yyyyMMddTHHmmss'))) 
 Set-Service -Name sshd -StartupType $record.StartupBefore
 if ($record.DefaultRuleEnabled -eq 'True') { Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' }
 $defaultRuleNotice=if ($record.DefaultRuleEnabled -eq 'True') {'The previously enabled default OpenSSH firewall rule was re-enabled.'} else {'The default OpenSSH firewall rule was not re-enabled.'}
-Write-Output ('DeskBridge access disabled. Files, disabled account, host keys and archived configuration remain for review. OpenSSH optional feature remains installed. The service is currently stopped; restored startup type: ' + $record.StartupBefore + '. ' + $defaultRuleNotice + ' Review the retained service and firewall settings if OpenSSH is no longer needed.')
+Write-Output ('Knot access disabled. Files, disabled account, host keys and archived configuration remain for review. OpenSSH optional feature remains installed. The service is currently stopped; restored startup type: ' + $record.StartupBefore + '. ' + $defaultRuleNotice + ' Review the retained service and firewall settings if OpenSSH is no longer needed.')
 
 } finally {$lifecycleLease.Dispose()}

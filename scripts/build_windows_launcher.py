@@ -149,13 +149,24 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
     manifest.unlink(missing_ok=True)
     managed = output.with_name('DeskBridge-Managed.exe')
     managed.unlink(missing_ok=True)
-    refs = [Path(references) / (name + ".dll") for name in ("mscorlib", "System", "System.Core", "System.Windows.Forms", "System.Drawing", "System.IO.Compression", "System.IO.Compression.FileSystem")]
+    refs = [Path(references) / (name + ".dll") for name in ("mscorlib", "System", "System.Core", "System.Windows.Forms", "System.Drawing", "System.IO.Compression", "System.IO.Compression.FileSystem", "System.Security")]
     if any(not p.is_file() for p in refs):
         raise ValueError("Supply the .NET Framework 4.8 reference assemblies directory")
     compiler = Path(shutil.which(str(compiler)) or compiler).resolve(strict=True)
     managed_compiler_sha = hashlib.sha256(compiler.read_bytes()).hexdigest()
     reference_hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in refs}
     compiler_prefix = [str(dotnet), str(compiler)] if dotnet else [str(compiler)]
+    close_helper = output.with_name('KnotCloseForUpdate.exe')
+    close_helper.unlink(missing_ok=True)
+    close_managed = output.with_name('KnotCloseForUpdate-Managed.exe')
+    close_argv = compiler_prefix + ['-nologo', '-target:winexe', '-platform:x64', '-langversion:5', '-optimize+', '-deterministic+',
+        '-nostdlib+', '-out:' + str(close_managed), '-win32icon:' + str(ROOT / 'Assets/Brand/AppIcon.ico'),
+        *['-r:' + str(p) for p in refs[:3]], str(ROOT / 'packaging/windows/KnotCloseForUpdate.cs')]
+    close_result = subprocess.run(close_argv, capture_output=True)
+    if close_result.returncode:
+        close_managed.unlink(missing_ok=True)
+        raise RuntimeError(close_result.stdout.decode(errors='replace') + close_result.stderr.decode(errors='replace'))
+
     vendor = ROOT / 'Vendor/QRCodegen'
     provenance = json.loads((vendor / 'UPSTREAM.json').read_text())
     if {p.name for p in vendor.glob('*.cs')} != {name for name in provenance['files'] if name.endswith('.cs')}:
@@ -202,7 +213,7 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
             "-resource:" + str(decoder) + "," + decoder_record['resourceName'],
             *["-resource:" + str(path) + ",DeskBridge.Payload." + name for name, path in entries],
             str(ROOT / "packaging/windows/Launcher.cs"), str(ROOT / "packaging/windows/RoleChooser.cs"),
-            str(ROOT / "host/windows/SunshineQuickSetup.cs"), str(generated),
+            str(ROOT / "host/windows/SunshineQuickSetup.cs"), str(ROOT / "host/windows/SunshineAccount.cs"), str(ROOT / "host/windows/SunshineServiceStartup.cs"), str(generated),
             str(engine_pin), str(qr_loader), str(update['configurationSource']),
             str(ROOT / 'packaging/windows/KnotUpdateHandoff.cs'), *map(str, client_sources(ROOT)),
         ]
@@ -233,6 +244,20 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
             output.unlink(missing_ok=True)
             raise RuntimeError(native_result.stdout.decode(errors='replace') + native_result.stderr.decode(errors='replace'))
         native_imports = validate_bootstrap(output.read_bytes(), managed_bytes, version)
+        close_bytes = close_managed.read_bytes()
+        (Path(temporary) / 'NativePayload.h').write_text(
+            '#define DB_MANAGED_RESOURCE_ID 101\n#define DB_MANAGED_SHA256 "' + hashlib.sha256(close_bytes).hexdigest() + '"\n')
+        resources.write_bytes(resource_file(close_bytes, (ROOT / 'packaging/windows/Launcher.manifest').read_bytes(),
+                                            (ROOT / 'Assets/Brand/AppIcon.ico').read_bytes(), version))
+        close_native_argv = native_argv.copy()
+        close_native_argv[close_native_argv.index(str(output))] = str(close_helper)
+        close_native_argv.insert(2, '-DKNOT_CLOSE_UPDATE_BOOTSTRAP')
+        close_native_result = subprocess.run(close_native_argv, cwd=temporary, env=native_env, capture_output=True)
+        if close_native_result.returncode:
+            close_helper.unlink(missing_ok=True)
+            raise RuntimeError(close_native_result.stdout.decode(errors='replace') + close_native_result.stderr.decode(errors='replace'))
+        validate_bootstrap(close_helper.read_bytes(), close_bytes, version)
+
     if source_snapshot(ROOT) != snapshot:
         output.unlink(missing_ok=True)
         raise RuntimeError("Source changed during launcher build; rebuild")
@@ -263,6 +288,7 @@ def build(compiler, references, output, dotnet=None, native_compiler=None):
               "extraResources": {decoder_record['resourceName']: decoder_record['sha256']},
               "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
               "virtualDisplay": virtual_display, "updates": update['record'],
+              "closeForUpdate": {"sha256": hashlib.sha256(close_helper.read_bytes()).hexdigest(), "managedSHA256": hashlib.sha256(close_bytes).hexdigest(), "compilerArgv": close_argv, "compilerExitCode": close_result.returncode, "nativeCompilerArgv": close_native_argv, "nativeCompilerExitCode": close_native_result.returncode, "hardenedNativeBootstrap": True},
               "windowsRuntimeTested": False, "authenticodeSigned": False}
     manifest.write_text(json.dumps(record, indent=2))
     return record
