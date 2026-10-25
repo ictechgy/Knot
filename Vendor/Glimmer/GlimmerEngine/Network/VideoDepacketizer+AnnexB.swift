@@ -7,6 +7,7 @@
 // Transport ported from moonlight-common-c (GPLv3); see CREDITS.md.
 
 import Foundation
+import Darwin
 
 extension VideoDepacketizer {
 
@@ -36,46 +37,49 @@ extension VideoDepacketizer {
     /// Split an Annex-B access unit into typed DecodeBuffers: VPS/SPS/PPS
     /// NALs (H.264: 7/8; HEVC: 32/33/34) each become their own buffer -
     /// start code kept; the decoder strips it - and every other NAL (SEI,
-    /// slices) stays in ONE picData buffer in arrival order. Runs only on
-    /// IDR frames, so the per-byte scan is off the steady-state path.
+    /// slices) stays in ONE picData buffer in arrival order. Scan the original
+    /// access unit without a whole-frame array or temporary picture-NAL copies.
     func splitAnnexBParamSets(_ au: Data) -> [DecodeBuffer] {
-        let bytes = [UInt8](au)
-        var vps: Data?, sps: Data?, pps: Data?
-        var picData = Data()
-        picData.reserveCapacity(bytes.count)
-
-        let starts = Self.annexBStartCodeOffsets(bytes)
-        guard !starts.isEmpty else {
-            return [DecodeBuffer(kind: .picData, data: au)]
-        }
-
-        for (idx, start) in starts.enumerated() {
-            let end = idx + 1 < starts.count ? starts[idx + 1] : bytes.count
-            let scLen = bytes[start + 2] == 1 ? 3 : 4
-            let headerIndex = start + scLen
-            guard headerIndex < end else { continue }
-            let nal = au.subdata(in: start..<end)
-            switch bufferKind(nalHeaderByte: bytes[headerIndex]) {
-            case .vps: vps = nal
-            case .sps: sps = nal
-            case .pps: pps = nal
-            case .picData: picData.append(nal)
+        au.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            let starts = Self.annexBStartCodeOffsets(bytes)
+            guard !starts.isEmpty, let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return [DecodeBuffer(kind: .picData, data: au)]
             }
-        }
+            var vps: Data?, sps: Data?, pps: Data?
+            var picData = Data()
+            picData.reserveCapacity(bytes.count)
+            for (idx, start) in starts.enumerated() {
+                let end = idx + 1 < starts.count ? starts[idx + 1] : bytes.count
+                let scLen = bytes[start + 2] == 1 ? 3 : 4
+                let headerIndex = start + scLen
+                guard headerIndex < end else { continue }
+                let count = end - start
+                switch bufferKind(nalHeaderByte: bytes[headerIndex]) {
+                case .vps: vps = Data(bytes: base + start, count: count)
+                case .sps: sps = Data(bytes: base + start, count: count)
+                case .pps: pps = Data(bytes: base + start, count: count)
+                case .picData: picData.append(base + start, count: count)
+                }
+            }
 
-        var out: [DecodeBuffer] = []
-        if let vps { out.append(DecodeBuffer(kind: .vps, data: vps)) }
-        if let sps { out.append(DecodeBuffer(kind: .sps, data: sps)) }
-        if let pps { out.append(DecodeBuffer(kind: .pps, data: pps)) }
-        out.append(DecodeBuffer(kind: .picData, data: picData))
-        return out
+            var out: [DecodeBuffer] = []
+            out.reserveCapacity(4)
+            if let vps { out.append(DecodeBuffer(kind: .vps, data: vps)) }
+            if let sps { out.append(DecodeBuffer(kind: .sps, data: sps)) }
+            if let pps { out.append(DecodeBuffer(kind: .pps, data: pps)) }
+            out.append(DecodeBuffer(kind: .picData, data: picData))
+            return out
+        }
     }
 
     /// Share the three- and four-byte Annex-B boundaries with IDR detection.
-    private static func annexBStartCodeOffsets(_ bytes: [UInt8]) -> [Int] {
+    private static func annexBStartCodeOffsets(_ bytes: UnsafeRawBufferPointer) -> [Int] {
+        guard let base = bytes.baseAddress else { return [] }
         var starts: [Int] = []
         var offset = 0
         while offset < bytes.count {
+            guard let zero = memchr(base + offset, 0, bytes.count - offset) else { break }
+            offset = base.distance(to: UnsafeRawPointer(zero))
             let length = annexBStartCodeLength(bytes, at: offset)
             if length > 0 { starts.append(offset) }
             offset += max(1, length)

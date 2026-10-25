@@ -181,13 +181,12 @@ extension VideoDecoder {
         return data
     }
 
-    /// Replace each Annex-B start code with a 4-byte big-endian length prefix
-    /// (AVCC / HVCC, the form VideoToolbox consumes). Scan-then-write over
-    /// `withUnsafeBytes` avoids a `Data -> [UInt8] -> Data` copy per frame.
-    nonisolated func convertAnnexBToAVCC(_ data: Data) -> Data {
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Data in
+    /// Write AVCC/HVCC directly into CoreMedia-owned memory. The source pointer
+    /// stays inside withUnsafeBytes; asynchronous VT retention owns only the block.
+    private nonisolated func makeAnnexBBlockBuffer(_ data: Data) -> CMBlockBuffer? {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> CMBlockBuffer? in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return Data()
+                return nil
             }
             let count = raw.count
 
@@ -202,8 +201,10 @@ extension VideoDecoder {
                 let scLen = startCodeLength(at: i, base: base, count: count)
                 if scLen > 0 {
                     if nalStart >= 0, i > nalStart {
-                        nals.append((nalStart, i - nalStart))
-                        outSize += 4 + (i - nalStart)
+                        let length = i - nalStart
+                        guard length <= Int(UInt32.max), outSize <= Int.max - 4 - length else { return nil }
+                        nals.append((nalStart, length))
+                        outSize += 4 + length
                     }
                     i += scLen
                     nalStart = i
@@ -212,13 +213,14 @@ extension VideoDecoder {
                 }
             }
             if nalStart >= 0, count > nalStart {
-                nals.append((nalStart, count - nalStart))
-                outSize += 4 + (count - nalStart)
+                let length = count - nalStart
+                guard length <= Int(UInt32.max), outSize <= Int.max - 4 - length else { return nil }
+                nals.append((nalStart, length))
+                outSize += 4 + length
             }
 
-            // Second pass: one pre-sized write of len32-BE || NAL per unit.
-            var out = Data(count: outSize)
-            out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) in
+            // One allocation/write; no intermediate AVCC Data copied into a second buffer.
+            return makeOwnedBlockBuffer(byteCount: outSize) { dst in
                 guard let dstBase = dst.baseAddress else { return }
                 var offset = 0
                 for nal in nals {
@@ -235,7 +237,6 @@ extension VideoDecoder {
                     offset += nal.length
                 }
             }
-            return out
         }
     }
 
@@ -253,46 +254,53 @@ extension VideoDecoder {
         return 0
     }
 
-    // MARK: - Sample buffer construction (for VT input)
-
-    nonisolated func makeSampleBuffer(
-        rawData: Data, rtpTimestamp: UInt32 = 0
-    ) -> CMSampleBuffer? {
-        guard let formatDesc = formatDescription else { return nil }
-
-        // VideoToolbox may retain the sample beyond this call, so its block
-        // memory must own a copy of the frame bytes.
-        var blockBuffer: CMBlockBuffer?
-        var status = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: nil,
-            blockLength: rawData.count,
-            blockAllocator: kCFAllocatorDefault,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: rawData.count,
-            flags: 0,
-            blockBufferOut: &blockBuffer)
-        guard status == kCMBlockBufferNoErr, let bb = blockBuffer else {
+    /// Allocate one contiguous block owned by CoreMedia and fill it before publication.
+    /// Never expose a borrowed Data pointer to VideoToolbox's asynchronous lifetime.
+    private nonisolated func makeOwnedBlockBuffer(
+        byteCount: Int, fill: (UnsafeMutableRawBufferPointer) -> Void
+    ) -> CMBlockBuffer? {
+        guard byteCount > 0 else { return nil }
+        var block: CMBlockBuffer?
+        let status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
+            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+            dataLength: byteCount, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
+        guard status == kCMBlockBufferNoErr, let block else {
             log.error("CMBlockBufferCreateWithMemoryBlock failed: \(status)")
             return nil
         }
-
-        status = CMBlockBufferAssureBlockMemory(bb)
-        guard status == kCMBlockBufferNoErr else {
-            log.error("CMBlockBufferAssureBlockMemory failed: \(status)")
+        var contiguousLength = 0
+        var totalLength = 0
+        var pointer: UnsafeMutablePointer<Int8>?
+        let access = CMBlockBufferGetDataPointer(block, atOffset: 0,
+            lengthAtOffsetOut: &contiguousLength, totalLengthOut: &totalLength, dataPointerOut: &pointer)
+        guard access == kCMBlockBufferNoErr, contiguousLength >= byteCount,
+              totalLength == byteCount, let pointer else {
+            log.error("CMBlockBufferGetDataPointer failed or noncontiguous: \(access)")
             return nil
         }
+        fill(UnsafeMutableRawBufferPointer(start: pointer, count: byteCount))
+        return block
+    }
 
-        status = rawData.withUnsafeBytes { rawBuf -> OSStatus in
-            guard let base = rawBuf.baseAddress else { return kCMBlockBufferBadPointerParameterErr }
-            return CMBlockBufferReplaceDataBytes(
-                with: base, blockBuffer: bb, offsetIntoDestination: 0, dataLength: rawData.count)
+    // MARK: - Sample buffer construction (for VT input)
+
+    nonisolated func makeSampleBuffer(
+        rawData: Data, rtpTimestamp: UInt32 = 0, annexB: Bool = false
+    ) -> CMSampleBuffer? {
+        guard let formatDesc = formatDescription else { return nil }
+        let block: CMBlockBuffer?
+        if annexB {
+            block = makeAnnexBBlockBuffer(rawData)
+        } else {
+            // AV1 OBUs already have the framing VT consumes.
+            block = rawData.withUnsafeBytes { raw in
+                makeOwnedBlockBuffer(byteCount: raw.count) { destination in
+                    destination.copyMemory(from: raw)
+                }
+            }
         }
-        guard status == kCMBlockBufferNoErr else {
-            log.error("CMBlockBufferReplaceDataBytes failed: \(status)")
-            return nil
-        }
+        guard let bb = block else { return nil }
 
         // Attach the host's rtpTimestamp (90kHz units, per H.264/HEVC/AV1
         // RTP standard - see DECODE_UNIT.rtpTimestamp in Limelight.h, and
@@ -322,8 +330,8 @@ extension VideoDecoder {
         }
 
         var sampleBuffer: CMSampleBuffer?
-        let sampleSize = rawData.count
-        status = withUnsafePointer(to: timingInfo) { timingPtr in
+        let sampleSize = CMBlockBufferGetDataLength(bb)
+        let status = withUnsafePointer(to: timingInfo) { timingPtr in
             var sampleSizeLocal = sampleSize
             return CMSampleBufferCreateReady(
                 allocator: kCFAllocatorDefault,

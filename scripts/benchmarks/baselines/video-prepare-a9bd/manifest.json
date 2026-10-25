@@ -1,0 +1,25 @@
+{
+  "baseline_commit": "a9bd368f9281ac0c6c0d9cf140604b16ebb1d462",
+  "origin": "https://github.com/ictechgy/Knot.git",
+  "purpose": "Exact unmodified public production sources for offline shallow-checkout A/B regression; preserve original GPL headers.",
+  "files": [
+    {
+      "source_path": "Vendor/Glimmer/GlimmerEngine/Video/VideoDecoder+Bitstream.swift",
+      "snapshot_file": "VideoDecoder+Bitstream.swift",
+      "git_blob": "d221e177380fd15db7f20a83a9451c5b99f6bb9d",
+      "sha256": "0634d0e51da232d397aa718a1a1a073183f58ced10a2f71c5b9311b2b7847a56"
+    },
+    {
+      "source_path": "Vendor/Glimmer/GlimmerEngine/Network/VideoDepacketizer+AnnexB.swift",
+      "snapshot_file": "VideoDepacketizer+AnnexB.swift",
+      "git_blob": "2df26e9aa4cc22bc92e24b625971ce52871e129c",
+      "sha256": "2d8987162087a05c662c393b0018ed2218ac80d10d71c8066e8b53eaad1b5082"
+    },
+    {
+      "source_path": "Vendor/Glimmer/GlimmerEngine/Protocol/StreamingBackend.swift",
+      "snapshot_file": "StreamingBackend.swift",
+      "git_blob": "c8b2b3a08a2ec4c936ebe85da4ebf271c0bded7f",
+      "sha256": "e7a4a4928b89880bc8d8f8ce5b86c4ba223a70fff17309287cbb81c48d910d7c"
+    }
+  ]
+}

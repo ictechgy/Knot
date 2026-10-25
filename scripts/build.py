@@ -78,6 +78,7 @@ if not args.skip_checks:
     run("desktop-input-backpressure-checks", [sys.executable, str(ROOT / "scripts/tests/test_desktop_input_backpressure.py")])
     run("video-frame-lifecycle-checks", [sys.executable, str(ROOT / "scripts/tests/test_video_frame_lifecycle.py")])
     run("video-color-checks", [sys.executable, str(ROOT / "scripts/tests/test_video_color.py")])
+    run("video-prepare-checks", [sys.executable, str(ROOT / "scripts/benchmarks/video_prepare.py"), "--checks-only"])
     run("media-receive-lifecycle-checks", [sys.executable, str(ROOT / "scripts/tests/test_media_lifecycle.py")])
     run("audio-notice-power-checks", [sys.executable, str(ROOT / "scripts/tests/test_audio_notice_power.py")])
     run("stream-launch-lifecycle-checks", [sys.executable, str(ROOT / "scripts/tests/test_stream_launch_lifecycle.py")])
