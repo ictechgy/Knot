@@ -75,16 +75,22 @@ extension VideoDepacketizer {
     /// Share the three- and four-byte Annex-B boundaries with IDR detection.
     private static func annexBStartCodeOffsets(_ bytes: UnsafeRawBufferPointer) -> [Int] {
         guard let base = bytes.baseAddress else { return [] }
-        var starts: [Int] = []
-        var offset = 0
-        while offset < bytes.count {
-            guard let zero = memchr(base + offset, 0, bytes.count - offset) else { break }
-            offset = base.distance(to: UnsafeRawPointer(zero))
-            let length = annexBStartCodeLength(bytes, at: offset)
-            if length > 0 { starts.append(offset) }
-            offset += max(1, length)
+        // Search the complete 00 00 01 delimiter, rather than calling memchr
+        // again for every zero in dense, escaped NAL payloads. Include a preceding
+        // zero for four-byte delimiters, matching the original scanner's boundary.
+        let delimiter: [UInt8] = [0, 0, 1]
+        return delimiter.withUnsafeBytes { pattern in
+            guard let patternBase = pattern.baseAddress else { return [] }
+            var starts: [Int] = []
+            var offset = 0
+            while bytes.count - offset >= 3 {
+                guard let hit = memmem(base + offset, bytes.count - offset, patternBase, 3) else { break }
+                let index = base.distance(to: UnsafeRawPointer(hit))
+                starts.append(index > offset && bytes[index - 1] == 0 ? index - 1 : index)
+                offset = index + 3
+            }
+            return starts
         }
-        return starts
     }
 
     private static func annexBStartCodeLength<Bytes: RandomAccessCollection>(_ bytes: Bytes, at offset: Int) -> Int

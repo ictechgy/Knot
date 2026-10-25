@@ -16,7 +16,7 @@ Two existing copies were removed:
 
 | Path | Previous work | Current work |
 | --- | --- | --- |
-| IDR parameter splitting on the receive thread | Whole access unit copied to an array, scalar boundary scan, temporary `subdata` for each NAL, then picture-NAL concatenation | Borrow bytes only during `withUnsafeBytes`, search zero candidates with `memchr`, copy parameter sets and append picture spans directly into one reserved output |
+| IDR parameter splitting on the receive thread | Whole access unit copied to an array, scalar boundary scan, temporary `subdata` for each NAL, then picture-NAL concatenation | Borrow bytes only during `withUnsafeBytes`, search complete start-code delimiters with `memmem`, copy parameter sets and append picture spans directly into one reserved output |
 | H.264/HEVC sample preparation on the decode queue | Build AVCC/HVCC `Data`, allocate a CoreMedia block, copy the converted frame into that block | Determine NAL spans/output size and write length prefixes and payloads directly into one CoreMedia-owned block |
 
 The block is allocated and checked for contiguous writable memory before it is
