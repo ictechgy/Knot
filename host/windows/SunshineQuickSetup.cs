@@ -161,7 +161,7 @@ internal static class SunshineSetupPolicy
     }
     internal static string ReadyMessage(bool configured)
     {
-        return configured ? "보안 설정 저장과 재시작을 확인했습니다. 이제 Mac에서 새 연결 요청을 시작하고 아래에서 PIN을 확인하세요."
+        return configured ? "보안 설정 저장과 재시작을 확인했습니다. 이제 Mac에서 새 연결 요청을 시작하고 이 창에서 PIN을 확인하세요."
             : "계정 인증과 저장된 보안 설정을 확인했습니다. Sunshine을 재시작하지 않았으며 현재 적용 상태는 다시 확인하지 않았습니다. 요청한 Mac과 PIN을 확인하세요. 이전 준비가 실패했거나 중단되었다면 연결 정보 · 문제 해결의 '보안 설정 다시 적용 · 재시작'을 먼저 사용하세요.";
     }
     internal static string PendingFailure(bool security)
@@ -799,6 +799,7 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
     private readonly FlowLayoutPanel requestFields = new FlowLayoutPanel(), connectionDetails = new FlowLayoutPanel();
     private readonly Button detailsToggle = new Button();
     private readonly Label waiting = new Label();
+    private bool connectionDetailsExpanded, discoveryExpanded;
     private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
     private readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 2000 };
     private readonly CancellationToken cancellation;
@@ -857,12 +858,12 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
         invitation.Text = "이 PC의 QR / 연결 링크 보기"; invitation.AutoSize = true; invitation.Enabled = false;
         invitation.Click += async delegate { await WorkAsync(ShowInvitationAsync); }; discoveryHelp.Controls.Add(invitation);
         var help = new Button { Text = "Mac에서 이 PC가 보이지 않나요?", AutoSize = true };
-        help.Click += delegate { if (busy || closing || UpdateCloseRequested) return; discoveryHelp.Visible = !discoveryHelp.Visible; help.Text = discoveryHelp.Visible ? "PC 찾기 도움 접기" : "Mac에서 이 PC가 보이지 않나요?"; };
+        help.Click += delegate { if (busy || closing || UpdateCloseRequested) return; discoveryExpanded = !discoveryExpanded; discoveryHelp.Visible = discoveryExpanded; help.Text = discoveryExpanded ? "PC 찾기 도움 접기" : "Mac에서 이 PC가 보이지 않나요?"; };
         layout.Controls.Add(help); layout.Controls.Add(discoveryHelp);
         var details = new Label { Text = "Knot은 Sunshine 계정과 화면 암호화 설정을 준비합니다. 계정은 이 PC에서 암호화해 보관하며, 기존 계정이 있으면 한 번만 로그인합니다.\n처음 설정하거나 보안 설정을 바꿀 때 Sunshine이 재시작되어 화면 연결이 잠시 끊길 수 있습니다. 다른 Sunshine 설정 창은 닫아 주세요.", AutoSize = true, MaximumSize = new Size(530, 0) };
         connectionDetails.AutoSize = true; connectionDetails.FlowDirection = FlowDirection.TopDown; connectionDetails.WrapContents = false; connectionDetails.Visible = false; connectionDetails.Controls.Add(details);
         detailsToggle.Text = "연결 정보 · 문제 해결"; detailsToggle.AutoSize = true;
-        detailsToggle.Click += delegate { if (busy || closing || UpdateCloseRequested) return; connectionDetails.Visible = !connectionDetails.Visible; detailsToggle.Text = connectionDetails.Visible ? "연결 정보 접기" : "연결 정보 · 문제 해결"; };
+        detailsToggle.Click += delegate { if (busy || closing || UpdateCloseRequested) return; SetConnectionDetails(!connectionDetailsExpanded); };
         layout.Controls.Add(detailsToggle); layout.Controls.Add(connectionDetails);
         reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; connectionDetails.Controls.Add(reapply);
         var close = new Button { Text = "다른 기능으로 돌아가기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
@@ -995,6 +996,11 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
             && Regex.IsMatch(pin.Text, @"\A[0-9]{4}\z");
         pin.Enabled = !busy && !UpdateCloseRequested && session != null && session.PairingReady && pending.SelectedItem is SunshinePendingPair;
     }
+    private void SetConnectionDetails(bool expanded)
+    {
+        connectionDetailsExpanded = expanded; connectionDetails.Visible = expanded;
+        detailsToggle.Text = expanded ? "연결 정보 접기" : "연결 정보 · 문제 해결";
+    }
     private void UpdatePresentation()
     {
         if (closing || IsDisposed) return;
@@ -1006,7 +1012,7 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
             : "연결을 준비하고 있습니다. 아래 상태 안내를 확인하세요.";
         prepare.Visible = !ready && (manualAccount || HadFailure);
         refresh.Visible = ready && pendingWarning;
-        if (session != null && session.NeedsSecurityReapply) { connectionDetails.Visible = true; detailsToggle.Text = "연결 정보 접기"; }
+        if (session != null && session.NeedsSecurityReapply) SetConnectionDetails(true);
         UpdatePairAvailability();
     }
     private void ClampToWorkingArea()
