@@ -166,6 +166,15 @@ int main(int argc,char **argv) {
         expect(db_env_name(L"PaTh=C:\\Tools",L"PATH",0),"normal PATH detection must be case insensitive");
     }
     expect(!db_show_failure(1,1,DB_DISABLE) && !db_show_failure(2,1,DB_DISABLE),"silent uninstall must not show either failure path");
+    {
+        const wchar_t *valid[]={L"C:\\Program Files\\Knot\\Knot.exe"}, *legacy[]={L"C:\\Program Files\\DeskBridge\\DeskBridge-Windows.exe"};
+        const wchar_t *other[]={L"C:\\other.exe"}, *relative[]={L"Knot.exe"}, *network[]={L"\\\\server\\Knot.exe"};
+        expect(db_close_update_dispatch(1,valid)==DB_CLOSE_UPDATE,"native close bridge refused Knot target");
+        expect(db_close_update_dispatch(1,legacy)==DB_CLOSE_UPDATE,"native close bridge refused legacy target");
+        expect(db_close_update_dispatch(0,NULL)==DB_INVALID && db_close_update_dispatch(2,valid)==DB_INVALID,"native close bridge accepted wrong arity");
+        expect(db_close_update_dispatch(1,other)==DB_INVALID && db_close_update_dispatch(1,relative)==DB_INVALID && db_close_update_dispatch(1,network)==DB_INVALID,"native close bridge accepted unrelated or unsafe target");
+        expect(db_dispatch(1,valid)==DB_INVALID,"normal app must not expose installer-only close mode");
+    }
     completion_matrix();
     printf("{\"status\":\"passed\",\"checks\":%u,\"scope\":\"pure native bootstrap dispatch, result completion matrix, UTF8 public request bounds and Windows CRT quoting; no Windows operations\"}\n",count);
     return 0;

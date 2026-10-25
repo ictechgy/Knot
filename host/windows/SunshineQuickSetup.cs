@@ -102,6 +102,15 @@ internal static class SunshineSetupPolicy
     { return needsReapply ? (canReapply ? ReapplyRecovery : LoginRecovery) : ""; }
     internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 고급 설정에서 Sunshine을 확인하세요.";
     internal static void Require(bool condition) { if (!condition) throw new SunshineSetupFailure(Manual); }
+    internal static bool ExistingPath(Func<FileAttributes> probe, bool directory)
+    {
+        FileAttributes attributes;
+        try { attributes = probe(); }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        Require((attributes & FileAttributes.ReparsePoint) == 0 && ((attributes & FileAttributes.Directory) != 0) == directory);
+        return true;
+    }
     internal static void ValidateProtectedAncestors(Action validate)
     {
         try { validate(); }
@@ -509,20 +518,20 @@ internal sealed class SunshinePinnedApi : ISunshineSetupApi, IDisposable
             // metadata before starting a stopped SYSTEM service. No contents read.
             foreach (string directory in new[] { Path.Combine(install, "config"), Path.GetDirectoryName(certificate) })
             {
-                if (!Directory.Exists(directory)) continue;
+                if (!SunshineSetupPolicy.ExistingPath(delegate { return File.GetAttributes(directory); }, true)) continue;
                 SafeFileHandle handle = CreateFile(directory, 1, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
                 SunshineSetupPolicy.Require(!handle.IsInvalid); locks.Add(handle);
                 SunshineSetupPolicy.ValidateProtectedAncestors(delegate { Launcher.AssertProtectedAncestors(directory); });
                 AssertProtectedAcl(Directory.GetAccessControl(directory));
             }
             foreach (string configFile in new[] { Path.Combine(install, @"config\sunshine.conf"), Path.Combine(install, @"config\apps.json") })
-                if (File.Exists(configFile))
+                if (SunshineSetupPolicy.ExistingPath(delegate { return File.GetAttributes(configFile); }, false))
                 {
                     SunshineSetupPolicy.Require((File.GetAttributes(configFile) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0);
                     AssertProtectedFile(configFile);
                 }
             string existingKey = Path.Combine(install, @"config\credentials\cakey.pem");
-            if (File.Exists(existingKey)) AssertConfidentialKeyMetadata(existingKey);
+            if (SunshineSetupPolicy.ExistingPath(delegate { return File.GetAttributes(existingKey); }, false)) AssertConfidentialKeyMetadata(existingKey);
             SunshineServiceStartup.EnsureStarted(serviceBinary);
 
             if (!Directory.Exists(Path.GetDirectoryName(certificate))) throw new IOException();
@@ -829,7 +838,7 @@ internal sealed class SunshineQuickSetupForm : Form
             if (busy || polling || closing || session == null || !session.PairingReady) return;
             polling = true;
             try { await RefreshPendingAsync(true, true); } catch (OperationCanceledException) { }
-            catch (Exception) { if (!closing) { poll.Interval = 5000; } }
+            catch (Exception) { if (!closing) { poll.Stop(); pendingWarning = true; status.Text = "요청 자동 갱신을 중단했습니다. 요청 새로고침으로 다시 시도하세요. 연결 권한과 인증서는 변경하지 않습니다."; } }
             finally { polling = false; }
         };
         pending.SelectedIndexChanged += delegate { UpdatePairAvailability(); };

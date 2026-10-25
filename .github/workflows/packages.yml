@@ -245,6 +245,9 @@ jobs:
       - name: Build Windows installer
         shell: powershell
         run: .\packaging\windows\Build-Installer.ps1 -Compiler $env:INNO_COMPILER -NativeCompiler $env:DESKBRIDGE_NATIVE_COMPILER
+      - name: Validate actual hardened update-close bridge with fresh owned windows
+        shell: powershell
+        run: .\host\windows\tests\Test-ManagedRuntime.ps1 -NativeClosePath .\build\windows\KnotCloseForUpdate.exe
       - name: Validate actual installer product metadata
         shell: powershell
         run: |

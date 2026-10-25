@@ -1,6 +1,7 @@
 ﻿#Requires -Version 5.1
 # SPDX-License-Identifier: GPL-3.0-only
 # Only newly created synthetic files/processes; no installation, user vault, service or network.
+param([string] $NativeClosePath)
 $ErrorActionPreference='Stop'
 $root=Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 $compiler=Join-Path ([Environment]::GetFolderPath('Windows')) 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
@@ -17,6 +18,7 @@ try {
     $close=Join-Path $directory 'Close.exe'
     & $compiler /nologo /noconfig /target:winexe /platform:x64 /langversion:5 /warnaserror+ /reference:System.dll /reference:System.Core.dll "/out:$close" (Join-Path $root 'packaging/windows/KnotCloseForUpdate.cs')
     if ($LASTEXITCODE -ne 0) {throw 'Update close helper compilation failed'}
+    if ($NativeClosePath) { $close=[IO.Path]::GetFullPath($NativeClosePath); if (-not [IO.File]::Exists($close)) {throw 'Built native bridge missing'} }
     $target=Join-Path $directory 'Knot.exe'
     & $compiler /nologo /noconfig /target:winexe /platform:x64 /langversion:5 /warnaserror+ /reference:System.dll /reference:System.Windows.Forms.dll "/out:$target" (Join-Path $root 'scripts/tests/UpdateCloseFixture.cs')
     if ($LASTEXITCODE -ne 0) {throw 'Inert update target compilation failed'}
@@ -34,7 +36,7 @@ try {
         } finally {$closer.Dispose()}
         if (-not $process.HasExited) {$process.Kill();$process.WaitForExit()}
     }
-    @{status='passed';checks=3;freshSyntheticOnly=$true;gracefulCloseRuntimeTested=$true;busyRefusalTested=$true;existingProcessesTargeted=$false;installerExecuted=$false}|ConvertTo-Json -Compress
+    @{status='passed';checks=3;freshSyntheticOnly=$true;gracefulCloseRuntimeTested=$true;busyRefusalTested=$true;existingProcessesTargeted=$false;installerExecuted=$false;nativeBridgeTested=[bool]$NativeClosePath}|ConvertTo-Json -Compress
 } finally {
     foreach ($process in $owned) {try {if (-not $process.HasExited) {$process.Kill();$process.WaitForExit()}} finally {$process.Dispose()}}
     [IO.Directory]::Delete($directory,$true)

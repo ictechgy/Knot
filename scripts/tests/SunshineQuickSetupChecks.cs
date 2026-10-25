@@ -255,6 +255,14 @@ public static class SunshineQuickSetupChecks
     { controller.PrepareAsync(session, manual, "old-user", "old-synthetic-password", verified, System.Threading.CancellationToken.None).GetAwaiter().GetResult(); }
     private static void CheckAccountAutomation()
     {
+        Check(!SunshineSetupPolicy.ExistingPath(delegate { throw new System.IO.FileNotFoundException(); }, false));
+        Check(!SunshineSetupPolicy.ExistingPath(delegate { throw new System.IO.DirectoryNotFoundException(); }, true));
+        Check(SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.Directory; }, true));
+        Check(SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.Normal; }, false));
+        Reject(delegate { SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.ReparsePoint; }, false); });
+        Reject(delegate { SunshineSetupPolicy.ExistingPath(delegate { return System.IO.FileAttributes.Normal; }, true); });
+        bool accessRefused = false; try { SunshineSetupPolicy.ExistingPath(delegate { throw new System.UnauthorizedAccessException(); }, true); } catch (System.UnauthorizedAccessException) { accessRefused = true; } Check(accessRefused);
+        bool ioRefused = false; try { SunshineSetupPolicy.ExistingPath(delegate { throw new System.IO.IOException(); }, false); } catch (System.IO.IOException) { ioRefused = true; } Check(ioRefused);
         var selected = new SunshinePendingPair { ID = "same", Name = "Mac", Address = "192.168.1.2" };
         Check(SunshineSetupPolicy.SamePending(selected, new SunshinePendingPair { ID = "same", Name = "Mac", Address = "192.168.1.2" }));
         Check(!SunshineSetupPolicy.SamePending(selected, new SunshinePendingPair { ID = "same", Name = "Other", Address = "192.168.1.2" }));

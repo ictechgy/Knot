@@ -418,8 +418,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,PWSTR command_line,int
     // Static dependencies are system KnownDLLs/UCRT API sets; later loads search only System32.
     hardened=SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) && SetDllDirectoryW(L"");
     argv=CommandLineToArgvW(GetCommandLineW(),&argc); if (!argv || argc<1) goto done;
-    operation=db_dispatch(argc-1,(const wchar_t *const *)(argv+1)); if (operation==DB_INVALID) goto done;
+#ifdef KNOT_CLOSE_UPDATE_BOOTSTRAP
+    silent=1;
+    operation=db_close_update_dispatch(argc-1,(const wchar_t *const *)(argv+1));
+#else
+    operation=db_dispatch(argc-1,(const wchar_t *const *)(argv+1));
     silent=db_silent_disable(argc-1,(const wchar_t *const *)(argv+1));
+#endif
+    if (operation==DB_INVALID) goto done;
     if (silent) SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
     if (!hardened || !db_load_crypto()) goto done;
     ZeroMemory(&version,sizeof(version)); version.dwOSVersionInfoSize=sizeof(version);
