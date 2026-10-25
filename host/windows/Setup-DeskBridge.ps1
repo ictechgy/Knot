@@ -93,6 +93,10 @@ $script:setupBusyDepth=0
 function Update-BusyControls {
     $effectiveBusy=$script:setupBusyDepth -gt 0
     foreach ($control in (Get-SetupControls $flow)) {
+        # Keep an already enabled cancellation button usable while draining.
+        # Its original action can only cancel owned work; never enable a dormant one.
+        if ($form.UpdateCloseRequested -and $control.Tag -and
+            $control.Tag.PSObject.Properties['AllowDuringUpdate'] -and $control.Tag.AllowDuringUpdate) { continue }
         if ($control -is [Windows.Forms.Button] -or $control -is [Windows.Forms.ComboBox]) { $control.Enabled = -not ($effectiveBusy -or $form.UpdateCloseRequested) }
     }
     $form.UseWaitCursor=$effectiveBusy
@@ -419,7 +423,7 @@ $automatic=Add-Button '자동 파일 설정 · Mac 연결 받기…' {
 $enrollmentCancel=Add-Button '자동 파일 설정 연결 취소' {
     if ($script:enrollmentClient) { $script:enrollmentClient.Cancel() }
     $enrollmentCancel.Enabled=$false
-}
+} -AllowDuringUpdate
 $enrollmentCancel.Visible=$false
 $null=Add-Text '수동 복구: 자동 연결이 어려울 때만 Mac에서 설정 JSON을 저장해 아래에서 불러오세요.' 40
 $requestBox = New-Object Windows.Forms.TextBox; $requestBox.ReadOnly=$true; $requestBox.Width=710; $filePanel.Controls.Add($requestBox)

@@ -7,7 +7,7 @@ import Foundation
     private var task: Task<Void, Never>?
     private(set) var waiting = false
 
-    func begin(timeout: Duration = .seconds(120), poll: Duration = .milliseconds(50),
+    func begin(timeout: Duration = .seconds(110), poll: Duration = .milliseconds(50),
                protectedWork: @escaping @MainActor () -> Bool,
                ready: @escaping @MainActor () -> Void,
                refused: @escaping @MainActor () -> Void) {
