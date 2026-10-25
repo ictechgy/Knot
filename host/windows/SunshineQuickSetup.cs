@@ -96,11 +96,12 @@ internal static class SunshineSetupPolicy
 {
     internal const string Version = "2026.914.233613";
     internal const int MaximumBody = 262144;
+    internal const string RefreshPendingLabel = "연결 요청 다시 확인";
     internal const string ReapplyRecovery = "설정 저장 또는 재시작 확인을 마치지 못했습니다. 이 창의 '보안 설정 다시 적용 · 재시작'을 눌러 다시 확인하세요. 확인 전에는 PIN 승인을 준비하지 않습니다. 인증서는 교체하지 않습니다.";
     internal const string LoginRecovery = "Sunshine 계정 생성 또는 로그인 확인을 마치지 못했습니다. 이 창의 연결 준비를 다시 시도하세요. 보관한 계정은 자동으로 재사용하며, 기존 계정 인증이 필요하면 로그인 입력란을 표시합니다. 인증 전에는 재시작이나 PIN 승인을 진행하지 않습니다.";
     internal static string RecoveryGuidance(bool needsReapply, bool canReapply)
     { return needsReapply ? (canReapply ? ReapplyRecovery : LoginRecovery) : ""; }
-    internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 고급 설정에서 Sunshine을 확인하세요.";
+    internal const string Manual = "빠른 설정을 안전하게 완료하지 못했습니다. 기존 설정과 연결 인증서는 자동으로 교체하지 않습니다. 다른 기능 및 도움 → 연결 문제 해결에서 Sunshine을 확인하세요.";
     internal static void Require(bool condition) { if (!condition) throw new SunshineSetupFailure(Manual); }
     internal static bool ExistingPath(Func<FileAttributes> probe, bool directory)
     {
@@ -161,12 +162,12 @@ internal static class SunshineSetupPolicy
     internal static string ReadyMessage(bool configured)
     {
         return configured ? "보안 설정 저장과 재시작을 확인했습니다. 이제 Mac에서 새 연결 요청을 시작하고 아래에서 PIN을 확인하세요."
-            : "계정 인증과 저장된 보안 설정을 확인했습니다. Sunshine을 재시작하지 않았으며 현재 적용 상태는 다시 확인하지 않았습니다. 요청한 Mac과 PIN을 확인하세요. 이전 준비가 실패했거나 중단되었다면 '보안 설정 다시 적용 · 재시작'을 먼저 사용하세요.";
+            : "계정 인증과 저장된 보안 설정을 확인했습니다. Sunshine을 재시작하지 않았으며 현재 적용 상태는 다시 확인하지 않았습니다. 요청한 Mac과 PIN을 확인하세요. 이전 준비가 실패했거나 중단되었다면 연결 정보 · 문제 해결의 '보안 설정 다시 적용 · 재시작'을 먼저 사용하세요.";
     }
     internal static string PendingFailure(bool security)
     {
-        return security ? "요청 목록의 보안 확인에 실패했습니다. 준비 완료 상태는 유지됩니다. '요청 새로고침'으로 다시 확인하세요. 인증서를 교체하거나 검증을 생략하지 않습니다."
-            : "요청 목록을 불러오지 못했습니다. 준비 완료 상태는 유지됩니다. '요청 새로고침'으로 다시 확인하세요.";
+        return security ? "요청 목록의 보안 확인에 실패했습니다. 준비 완료 상태는 유지됩니다. '" + RefreshPendingLabel + "'으로 다시 확인하세요. 인증서를 교체하거나 검증을 생략하지 않습니다."
+            : "요청 목록을 불러오지 못했습니다. 준비 완료 상태는 유지됩니다. '" + RefreshPendingLabel + "'으로 다시 확인하세요.";
     }
     internal static string PendingStatus(bool configured, string failure) { return ReadyMessage(configured) + Environment.NewLine + failure; }
     internal static bool SamePending(SunshinePendingPair a, SunshinePendingPair b)
@@ -850,18 +851,18 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
         pending.DropDownStyle = ComboBoxStyle.DropDownList; pending.Width = 510; requestFields.Controls.Add(pending);
         var pairing = new FlowLayoutPanel { AutoSize = true }; pin.Width = 100; pin.MaxLength = 4; pin.UseSystemPasswordChar = true; pair.Text = "이 Mac 연결 허용"; pair.AutoSize = true; pair.Enabled = false;
         pairing.Controls.Add(new Label { Text = "Mac에 표시된 PIN", AutoSize = true }); pairing.Controls.Add(pin); pairing.Controls.Add(pair); requestFields.Controls.Add(pairing); layout.Controls.Add(requestFields);
-        refresh.Text = "연결 요청 다시 확인"; refresh.AutoSize = true; refresh.Enabled = false; refresh.Visible = false; layout.Controls.Add(refresh);
+        refresh.Text = SunshineSetupPolicy.RefreshPendingLabel; refresh.AutoSize = true; refresh.Enabled = false; refresh.Visible = false; layout.Controls.Add(refresh);
         var discoveryHelp = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Visible = false };
         discoveryHelp.Controls.Add(new Label { Text = "같은 Wi-Fi 또는 Tailscale에 연결하세요. 목록에 없다면 Mac의 Knot에서 이 PC의 QR 이미지나 연결 링크를 가져오세요.", AutoSize = true, MaximumSize = new Size(530, 0) });
         invitation.Text = "이 PC의 QR / 연결 링크 보기"; invitation.AutoSize = true; invitation.Enabled = false;
         invitation.Click += async delegate { await WorkAsync(ShowInvitationAsync); }; discoveryHelp.Controls.Add(invitation);
         var help = new Button { Text = "Mac에서 이 PC가 보이지 않나요?", AutoSize = true };
-        help.Click += delegate { discoveryHelp.Visible = !discoveryHelp.Visible; help.Text = discoveryHelp.Visible ? "PC 찾기 도움 접기" : "Mac에서 이 PC가 보이지 않나요?"; };
+        help.Click += delegate { if (busy || closing || UpdateCloseRequested) return; discoveryHelp.Visible = !discoveryHelp.Visible; help.Text = discoveryHelp.Visible ? "PC 찾기 도움 접기" : "Mac에서 이 PC가 보이지 않나요?"; };
         layout.Controls.Add(help); layout.Controls.Add(discoveryHelp);
         var details = new Label { Text = "Knot은 Sunshine 계정과 화면 암호화 설정을 준비합니다. 계정은 이 PC에서 암호화해 보관하며, 기존 계정이 있으면 한 번만 로그인합니다.\n처음 설정하거나 보안 설정을 바꿀 때 Sunshine이 재시작되어 화면 연결이 잠시 끊길 수 있습니다. 다른 Sunshine 설정 창은 닫아 주세요.", AutoSize = true, MaximumSize = new Size(530, 0) };
         connectionDetails.AutoSize = true; connectionDetails.FlowDirection = FlowDirection.TopDown; connectionDetails.WrapContents = false; connectionDetails.Visible = false; connectionDetails.Controls.Add(details);
         detailsToggle.Text = "연결 정보 · 문제 해결"; detailsToggle.AutoSize = true;
-        detailsToggle.Click += delegate { connectionDetails.Visible = !connectionDetails.Visible; detailsToggle.Text = connectionDetails.Visible ? "연결 정보 접기" : "연결 정보 · 문제 해결"; };
+        detailsToggle.Click += delegate { if (busy || closing || UpdateCloseRequested) return; connectionDetails.Visible = !connectionDetails.Visible; detailsToggle.Text = connectionDetails.Visible ? "연결 정보 접기" : "연결 정보 · 문제 해결"; };
         layout.Controls.Add(detailsToggle); layout.Controls.Add(connectionDetails);
         reapply.Text = "보안 설정 다시 적용 · 재시작"; reapply.AutoSize = true; reapply.Visible = false; reapply.Enabled = false; connectionDetails.Controls.Add(reapply);
         var close = new Button { Text = "다른 기능으로 돌아가기", AutoSize = true }; close.Click += delegate { Close(); }; layout.Controls.Add(close);
@@ -990,7 +991,7 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
     private void UpdatePairAvailability()
     {
         if (closing || pair.IsDisposed) return;
-        pair.Enabled = SunshineSetupPolicy.CanPair(busy, session != null && session.PairingReady, pending.SelectedItem is SunshinePendingPair)
+        pair.Enabled = SunshineSetupPolicy.CanPair(busy || UpdateCloseRequested, session != null && session.PairingReady, pending.SelectedItem is SunshinePendingPair)
             && Regex.IsMatch(pin.Text, @"\A[0-9]{4}\z");
         pin.Enabled = !busy && !UpdateCloseRequested && session != null && session.PairingReady && pending.SelectedItem is SunshinePendingPair;
     }
@@ -1058,7 +1059,7 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
             }
             catch (OperationCanceledException) { cancellation.ThrowIfCancellationRequested(); }
         }
-        throw new SunshineSetupFailure("Sunshine이 아직 시작되지 않았습니다. 잠시 뒤 빠른 설정을 다시 여세요. 다른 경로나 포트를 쓰는 설치는 고급 설정으로 확인하세요.");
+        throw new SunshineSetupFailure("Sunshine이 아직 시작되지 않았습니다. 잠시 뒤 빠른 설정을 다시 여세요. 다른 경로나 포트를 쓰는 설치는 다른 기능 및 도움 → 연결 문제 해결에서 확인하세요.");
         }
         finally
         {
@@ -1088,11 +1089,11 @@ internal sealed class SunshineQuickSetupForm : KnotUpdateForm
     }
     private void RestoreAvailability()
     {
-        bool ready = session != null && session.PairingReady;
-        username.Enabled = session != null && !ready; password.Enabled = username.Enabled;
-        pending.Enabled = ready;
-        prepare.Enabled = !ready; refresh.Enabled = ready; invitation.Enabled = session != null;
-        reapply.Visible = session != null && session.CanReapply && !session.Configured; reapply.Enabled = reapply.Visible;
+        bool ready = session != null && session.PairingReady, available = !busy && !UpdateCloseRequested;
+        username.Enabled = available && session != null && !ready; password.Enabled = username.Enabled;
+        pending.Enabled = available && ready;
+        prepare.Enabled = available && !ready; refresh.Enabled = available && ready; invitation.Enabled = available && session != null;
+        reapply.Visible = session != null && session.CanReapply && !session.Configured; reapply.Enabled = available && reapply.Visible;
         UpdatePresentation();
     }
     protected override void Dispose(bool disposing)

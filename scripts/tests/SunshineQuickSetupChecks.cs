@@ -505,7 +505,7 @@ public static class SunshineQuickSetupChecks
         partialRestart.Replies.Enqueue(null);
         SunshinePendingLoad load = partialSession.LoadPendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();
         Check(!load.Succeeded && load.Items.Count == 0 && partialSession.PairingReady && partialSession.Configured);
-        Check(load.Failure.Contains("요청 새로고침") && SunshineSetupPolicy.PendingStatus(partialSession.Configured, load.Failure).StartsWith(SunshineSetupPolicy.ReadyMessage(true), System.StringComparison.Ordinal));
+        Check(load.Failure.Contains(SunshineSetupPolicy.RefreshPendingLabel) && SunshineSetupPolicy.PendingStatus(partialSession.Configured, load.Failure).StartsWith(SunshineSetupPolicy.ReadyMessage(true), System.StringComparison.Ordinal));
         var listTrust = new Fake(new SunshineApiReply(401, ""), Reply(SecureConfig), new SunshineApiReply(401, "{}"), Reply(Pairs));
         var listSession = Session(listTrust); Prepare(listSession);
         load = listSession.LoadPendingAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult();

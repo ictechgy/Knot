@@ -174,7 +174,7 @@ function Invoke-SunshineLocalCheck([int] $WaitMilliseconds=2000,[ValidateSet('St
                 } elseif ($Open -ceq 'Encryption') {
                     'LAN Encryption Mode와 WAN Encryption Mode를 둘 다 Required for all clients로 선택하세요. 한국어 화면에서는 LAN/WAN 암호화 모드 → 모든 사용자에게 필수입니다. Save 후 Apply/재시작까지 완료하고 Mac에서 다시 연결하세요. 기존 PIN 페어링은 유지하세요.'
                 } else {
-                    '이 Windows의 브라우저에서 초기 계정을 만들고 로그인하세요. 다음으로 영상 암호화 설정 열기를 눌러 LAN/WAN 암호화 모드를 둘 다 Required for all clients(모든 사용자에게 필수)로 Save하고 Apply/재시작하세요. 이후 3단계에서 Mac의 PIN을 승인합니다.'
+                    '이 Windows의 브라우저에서 초기 계정을 만들고 로그인하세요. 다음으로 영상 암호화 설정 열기를 눌러 LAN/WAN 암호화 모드를 둘 다 Required for all clients(모든 사용자에게 필수)로 Save하고 Apply/재시작하세요. 이후 「이 Windows에서 PIN 입력 화면 열기」로 Mac의 PIN을 승인하세요.'
                 }
             } catch {
                 $status.Text='이 Windows의 설정 브라우저를 열지 못했습니다. 이 Windows의 Edge/Chrome 주소창에 ' + $url + ' 을 직접 입력하세요. Mac에서 localhost를 열면 이 Windows에 연결되지 않습니다.'
@@ -387,7 +387,7 @@ $null = Add-Text '연결 QR과 링크에는 주소만 들어 있습니다. PIN �
 $qrAddressHint=Add-Text (Get-QRAddressHintText '' 0) 48
 $qrAddressHint.AccessibleName='QR에 포함되는 연결 주소'
 $addresses=New-Object Windows.Forms.ComboBox; $addresses.AccessibleName='이 PC의 연결 주소'; $addresses.AccessibleDescription='Mac에서 도달할 수 있는 Wi-Fi 또는 Tailscale 주소를 선택하세요.'; $addresses.DropDownStyle='DropDownList'; $addresses.Width=710
-$addresses.Add_SelectedIndexChanged({ $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count })
+$addresses.Add_SelectedIndexChanged({ $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count; Sync-WindowsFileAddress })
 function Update-WindowsAddresses {
     $previous=[string]$addresses.SelectedItem
     $addresses.Items.Clear()
@@ -401,6 +401,7 @@ function Update-WindowsAddresses {
     if ($addresses.Items.Contains($previous)) { $addresses.SelectedItem=$previous }
     elseif ($addresses.Items.Count -gt 0) { $addresses.SelectedIndex=0 }
     $qrAddressHint.Text=Get-QRAddressHintText ([string]$addresses.SelectedItem) $addresses.Items.Count
+    Sync-WindowsFileAddress
 }
 $qrPanel.Controls.Add($addresses)
 $script:section=$qrPanel
@@ -457,6 +458,23 @@ $enrollmentCancel=Add-Button '자동 파일 설정 연결 취소' {
 $enrollmentCancel.Visible=$false
 $fileRecoveryPanel=Add-SetupDisclosure '파일 연결 복구' '자동 파일 연결이 어려울 때만 사용하세요. Mac에서 저장한 설정 파일을 불러온 뒤 연결을 허용하거나, 이미 설정한 연결 파일을 다시 저장할 수 있습니다.'
 $script:section=$fileRecoveryPanel
+$null=Add-Text '이 Windows의 연결 주소 · Mac에서 도달할 수 있는 Wi-Fi 또는 Tailscale 주소를 선택하세요.' 40
+$fileAddresses=New-Object Windows.Forms.ComboBox; $fileAddresses.DropDownStyle='DropDownList'; $fileAddresses.Width=710
+$fileAddresses.AccessibleName='파일 연결에 사용할 이 Windows의 주소'; $fileRecoveryPanel.Controls.Add($fileAddresses)
+$fileAddresses.Add_SelectedIndexChanged({
+    if (-not $script:syncingFileAddress -and $fileAddresses.SelectedItem -and $addresses.Items.Contains([string]$fileAddresses.SelectedItem)) {
+        $addresses.SelectedItem=[string]$fileAddresses.SelectedItem
+    }
+})
+function Sync-WindowsFileAddress {
+    if ($script:syncingFileAddress -or -not $fileAddresses) { return }
+    $script:syncingFileAddress=$true
+    try {
+        $fileAddresses.Items.Clear()
+        foreach ($address in $addresses.Items) { [void]$fileAddresses.Items.Add($address) }
+        if ($addresses.SelectedItem) { $fileAddresses.SelectedItem=[string]$addresses.SelectedItem }
+    } finally { $script:syncingFileAddress=$false }
+}
 $requestBox = New-Object Windows.Forms.TextBox; $requestBox.ReadOnly=$true; $requestBox.Width=710; $fileRecoveryPanel.Controls.Add($requestBox)
 $requestBox.AccessibleName='불러온 Mac 설정 파일'; $requestBox.AccessibleDescription='Mac 설정 파일 불러오기에서 선택한 JSON 파일의 위치입니다.'
 $load = Add-Button 'Mac 설정 파일 불러오기…' {

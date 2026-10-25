@@ -13,6 +13,7 @@ internal static class WindowsSetupPresentationChecks
     private static object Field(object target, string name) { return target.GetType().GetField(name, Private).GetValue(target); }
     private static void Set(object target, string name, object value) { target.GetType().GetField(name, Private).SetValue(target, value); }
     private static void Call(object target, string name) { target.GetType().GetMethod(name, Private).Invoke(target, null); }
+    private static void Click(Button button) { typeof(Button).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty }); }
     // Control.Visible includes invisible ancestors. Inspect each control's local
     // visibility bit on the supported Framework runtime while the form stays hidden.
     private static bool LocallyVisible(Control control)
@@ -31,6 +32,8 @@ internal static class WindowsSetupPresentationChecks
             var pending = (ComboBox)Field(form, "pending"); var pin = (TextBox)Field(form, "pin"); var pair = (Button)Field(form, "pair");
             var requests = (Control)Field(form, "requestFields"); var details = (Control)Field(form, "connectionDetails");
             var status = (TextBox)Field(form, "status");
+            var detailsToggle = (Button)Field(form, "detailsToggle");
+            Expect(refresh.Text == (string)assembly.GetType("SunshineSetupPolicy", true).GetField("RefreshPendingLabel", BindingFlags.Static | BindingFlags.NonPublic).GetRawConstantValue(), "Recovery instructions and visible refresh share one action label");
             Expect(!form.IsHandleCreated, "Construction must not show or initialize production setup");
             Expect(!LocallyVisible(prepare) && !LocallyVisible(refresh) && !LocallyVisible(requests) && !LocallyVisible(details), "Only contextual actions belong on the initial screen");
             Expect(status.ReadOnly && status.Parent is TableLayoutPanel && status.Parent != requests.Parent, "Selectable status stays outside scrolling content");
@@ -49,8 +52,16 @@ internal static class WindowsSetupPresentationChecks
             pin.Text = "1234"; Expect(pair.Enabled, "Exact four-digit PIN and selected peer enables approval");
             Set(form, "busy", true); Call(form, "UpdatePresentation");
             Expect(!pin.Enabled && !pair.Enabled, "Busy work blocks duplicate pairing");
+            Call(form, "RestoreAvailability"); Click(detailsToggle);
+            Expect(!pending.Enabled && !refresh.Enabled && !LocallyVisible(details), "Busy update cancellation does not re-enable inputs or disclosure actions");
             Set(form, "busy", false); Call(form, "RestoreAvailability");
             Expect(pin.Enabled && pair.Enabled, "Control availability recovers after work");
+            form.GetType().BaseType.GetProperty("UpdateCloseRequested").SetValue(form, true, null);
+            Click(detailsToggle); Call(form, "UpdatePresentation");
+            Expect(!LocallyVisible(details) && !pair.Enabled && !pin.Enabled, "Update admission also blocks queued disclosure and pairing actions");
+            form.GetType().BaseType.GetProperty("UpdateCloseRequested").SetValue(form, false, null);
+            Click(detailsToggle); Expect(LocallyVisible(details), "Idle disclosure remains available");
+            Click(detailsToggle); Expect(!LocallyVisible(details), "Idle disclosure can close again");
             pending.Items.Clear(); Call(form, "UpdatePresentation");
             Expect(!LocallyVisible(requests) && !pair.Enabled, "An expired or completed request cannot remain actionable");
             status.Text = "synthetic retained status"; Set(form, "pendingWarning", true); Call(form, "UpdatePresentation");

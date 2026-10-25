@@ -13,6 +13,6 @@ try {
     $output=@(& $exe (Join-Path $root 'build/windows/DeskBridge-Managed.exe') $directory)
     if ($LASTEXITCODE -ne 0 -or $output.Count -eq 0) { throw 'Actual form presentation checks failed' }
     $result=$output[-1] | ConvertFrom-Json
-    if ($result.status -cne 'passed' -or $result.checks -lt 17 -or -not $result.actualPackagedForm -or -not $result.freshSyntheticOnly -or $result.shown -or $result.network -or $result.vaultAccess) { throw 'Incomplete presentation evidence' }
+    if ($result.status -cne 'passed' -or $result.checks -lt 22 -or -not $result.actualPackagedForm -or -not $result.freshSyntheticOnly -or $result.shown -or $result.network -or $result.vaultAccess) { throw 'Incomplete presentation evidence' }
     $result | ConvertTo-Json -Compress
 } finally { [IO.Directory]::Delete($directory,$true) }

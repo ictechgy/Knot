@@ -158,4 +158,15 @@ Expect ($discoveryPanel.Visible -and -not $optionsPanel.Visible) 'Root disclosur
 Show-SetupTroubleshooting
 Expect ($optionsPanel.Visible -and $advancedPanel.Visible -and -not $discoveryPanel.Visible) 'Automatic fallback reveals both troubleshooting ancestors without a hidden recovery panel'
 Expect ($optionsPanel.Tag.Toggle.Text -ceq '－ Other tasks' -and $advancedPanel.Tag.Toggle.Text -ceq '－ Troubleshooting') 'Automatic fallback keeps disclosure labels synchronized'
+$sync=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Sync-WindowsFileAddress'},$true))
+Expect ($sync.Count -eq 1) 'Expected actual shared-address synchronization'
+Invoke-Expression $sync[0].Extent.Text
+$addresses=[pscustomobject]@{Items=[Collections.Generic.List[string]]::new();SelectedItem='100.80.1.20'}
+$addresses.Items.Add('192.168.1.20');$addresses.Items.Add('100.80.1.20')
+$fileAddresses=[pscustomobject]@{Items=[Collections.Generic.List[string]]::new();SelectedItem=$null}
+Sync-WindowsFileAddress
+Expect ($fileAddresses.Items.Count -eq 2 -and $fileAddresses.SelectedItem -ceq '100.80.1.20') 'Manual file recovery exposes the current Tailscale choice without losing other addresses'
+$addresses.SelectedItem='192.168.1.20';Sync-WindowsFileAddress
+Expect ($fileAddresses.SelectedItem -ceq '192.168.1.20' -and -not $script:syncingFileAddress) 'Address synchronization follows selection and releases its reentrancy guard'
+Expect ($retainedInput.Text -ceq 'synthetic input retained') 'Address synchronization cannot clear unrelated recovery input'
 @{status='passed';checks=$script:checks;actualPrimaryAction=$true;actualUpdateButtons=$true;actualTaskDisclosures=$true;freshSyntheticOnly=$true;network=$false;serviceAccess=$false;gui=$false} | ConvertTo-Json -Compress
