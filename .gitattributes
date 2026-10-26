@@ -1,3 +1,6 @@
+# Build manifests and corresponding-source archives must use the committed bytes.
+# Disable checkout/commit newline conversion, including Windows core.autocrlf.
+* -text
 # Preserve exact upstream source/license bytes across Windows checkouts.
 /Vendor/** -text
 # Byte-pinned virtual display configuration must match on every checkout platform.

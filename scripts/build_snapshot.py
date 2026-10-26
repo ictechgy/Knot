@@ -111,9 +111,10 @@ def tree_snapshot(root):
 
 def validate_corresponding_source(root, expected, revision="HEAD"):
     # Compare the actual archive, including export-ignore/export-subst behavior.
+    # Do not let a runner's autocrlf/eol settings transform corresponding source.
     # No archive paths are extracted to the filesystem.
     try:
-        data = subprocess.check_output(["git", "archive", "--format=tar", revision], cwd=root, stderr=subprocess.PIPE)
+        data = subprocess.check_output(["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=tar", revision], cwd=root, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as error:
         diagnostic = error.stderr.decode("utf-8", errors="replace").strip()[:1000]
         raise BuildSnapshotError("Could not read the committed source archive; inspect the revision and rebuild: " + diagnostic) from error
