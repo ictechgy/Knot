@@ -14,7 +14,8 @@ HEADLESS_SOURCE_PATHS = ['host/windows/HeadlessNative.cs', 'host/windows/Headles
                          'host/windows/Knot-vdd_settings.xml', 'host/windows/VirtualDisplayDeployments.json',
                          'host/windows/Show-HeadlessSetup.ps1', 'host/windows/HeadlessStatus.psm1',
                          'host/windows/tests/Test-HeadlessStatus.ps1', 'packaging/windows/NativeBootstrap.c',
-                         'packaging/windows/NativeArguments.h', 'scripts/tests/NativeBootstrapChecks.c']
+                         'packaging/windows/NativeArguments.h', 'packaging/windows/NativeLaunchStatus.h',
+                         'scripts/tests/NativeBootstrapChecks.c']
 MAC_INTEROP_SOURCE_PATHS = ['Sources/DeskBridgeAppChecks/main.swift', 'Sources/DeskBridgeApp/MacHostPage.swift',
                             'Sources/DeskBridgeCore/ConnectionInvitation.swift']
 

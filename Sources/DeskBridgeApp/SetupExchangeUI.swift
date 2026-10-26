@@ -11,12 +11,25 @@ extension FilesModel {
         guard canExchangeSetup else {
             throw AppFailure("진행 중인 연결을 마친 뒤 다시 불러오세요.")
         }
+        try commitWindowsConnection(preview)
+    }
+    /// The caller has admitted a new import or revalidated an already-owned enrollment.
+    private func commitWindowsConnection(_ preview: SetupExchange.Preview) throws {
         try desktopForSetup.saveFileSettings(username: preview.reply.username, port: preview.reply.port,
             hostKey: preview.reply.serverPublicKey, identityPath: identityPath, address: preview.reply.address)
         username = preview.reply.username; port = String(preview.reply.port)
         pinnedHostKey = preview.reply.serverPublicKey
         errorMessage = nil
         status = "파일 접속 정보를 채웠습니다. 파일 연결을 선택하세요. 화면 PIN 페어링은 별도로 진행합니다."
+    }
+    func applyEnrollmentConfirmation(_ preview: SetupExchange.Preview, epoch: UUID, identity: String, addresses: String, publicKey: String) throws {
+        try requireEnrollmentConfirmation(epoch: epoch, identity: identity, addresses: addresses, expectedAddress: preview.reply.address)
+        guard try selectedPublicKey() == publicKey else { throw EnrollmentProtocol.Failure.peer }
+        // No await or modal callback occurs between this admission check and the
+        // complete settings transaction. The completion marker remains active.
+        busy = false
+        guard canCompleteSetupExchange else { throw EnrollmentProtocol.Failure.expired }
+        try commitWindowsConnection(preview)
     }
     /// Modal panels keep processing app events. Validate the selection again before using it.
     func requireSetupExchangeSelection(identityPath expectedIdentityPath: String, setupAddresses expectedAddresses: String? = nil) throws {

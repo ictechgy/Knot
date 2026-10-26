@@ -97,7 +97,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install native GTK build/check dependencies
-        run: sudo apt-get update && sudo apt-get install -y python3-gi gir1.2-gtk-3.0 python3-qrcode python3-pil
+        run: sudo apt-get update && sudo apt-get install -y python3-gi gir1.2-gtk-3.0 python3-qrcode python3-pil build-essential
       - name: Build Debian package without privilege or Sunshine
         run: PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 scripts/build_linux_host.py --output build/linux/Knot-Linux.deb
       - name: Check package and inert synthetic fixtures (no real desktop or network)
@@ -220,6 +220,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
           $pin = Get-Content -LiteralPath .\packaging\windows\ZigDependency.json -Raw | ConvertFrom-Json
           $platform = $pin.platforms.'x86_64-windows'
           if ($pin.version -cne '0.17.0' -or $platform.tarball -cne 'https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip') { throw 'Unexpected native compiler pin' }
@@ -227,7 +228,8 @@ jobs:
           Invoke-WebRequest -UseBasicParsing -Uri $platform.tarball -OutFile $download
           if ((Get-Item -LiteralPath $download).Length -ne [long]$platform.size -or (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne $platform.shasum) { throw 'Native compiler size or SHA256 mismatch' }
           $directory = Join-Path $env:RUNNER_TEMP 'DeskBridgeZig-0.17.0'
-          Expand-Archive -LiteralPath $download -DestinationPath $directory
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::ExtractToDirectory($download, $directory)
           $compiler = Join-Path $directory 'zig-x86_64-windows-0.17.0\zig.exe'
           if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Native compiler missing from pinned archive' }
           "DESKBRIDGE_NATIVE_COMPILER=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-10-25
+- Last refreshed: 2026-10-26
 - Primary product surfaces: native macOS host connection, fullscreen desktop, SFTP file browser, Mac sharing setup, Windows sharing/client role chooser, drag-to-Applications Mac package.
 - Evidence reviewed: conversation requirements; pinned GlimmerEngine source; .omx/plans/deskbridge-v0.1.md; user-approved Concept A (Quiet Sidebar), selected 2026-10-19.
 - Approved visual references: ../design-concepts/previews/a-{desktop,files,setup}-window.png in the local deliverable; immutable copies under .omx/artifacts/visual-ralph/quiet-sidebar. Reproduce native synthetic snapshots with scripts/render_visual_fixture.py. No Local Media UI or existing user settings inspected.
@@ -184,3 +184,13 @@ Windows 설정·QR 창은 DPI에 맞춰 확대되고 현재 작업 영역 안으
 - The outer window keeps one primary preparation action. Put optional tasks under “다른 기능 및 도움”: files, headless use, opening another computer, and connection troubleshooting. Explain when each is needed. Expand one sibling task at a time without clearing inputs or starting work merely on expansion.
 - Within files, automatic enrollment is primary. JSON recovery and access revocation are separate collapsed tasks; access revocation explicitly retains shared files. Within troubleshooting, direct Sunshine installation/account/encryption/browser PIN controls require a further explicit manual-setup disclosure. Avoid numbered references to sections that are no longer visible.
 - Disclosure actions respect update/busy admission. Cancellation, existing pairing, certificate pins, SSH identity and explicit UAC/file authorization remain unchanged. Tests use actual disclosure handlers with inert controls and existing protocol/primary-action fixtures; no live service, user preferences, screen, clipboard or history is read. Real Windows layout and two-device acceptance remain separate from CI compilation.
+
+
+## Cross-platform review corrections (2026-10-26)
+
+- Native Quit begins a reversible admission pause synchronously across desktop, files, enrollment and Mac sharing. Current work may finish; cancel/disconnect and approved persistence stay available. A refused quit lifts admission without auto-pairing, reconnecting or discarding trust.
+- Pairing timeout/rejection guidance creates a fresh Mac request and relies on the Windows automatic request list. Only a Windows polling failure asks for “연결 요청 다시 확인”. Avoid instructions for controls hidden in a healthy state.
+- Input saturation has a visible, fixed recovery notice. Do not retain unlimited later actions or replay an arbitrarily old backlog on MainActor. Preserve accepted-input release retries, and do not let a per-key focus assertion clear the recovery latch.
+- Linux download progress keeps the latest value with at most one pending UI callback. Completion wins over stale progress; cancellation/close suppress delivery.
+- Linux engine restart uses Knot stop/start. Web Restart and custom child programs cannot escape the owned lifetime boundary; missing kernel restriction support prevents startup with actionable authored guidance.
+- Use neutral Windows startup guidance until a typed OS failure proves a category. Signing/publisher configuration is an external prerequisite, not a generic explanation for every setup error. Compact/high-DPI Windows native layout still needs separate device acceptance.

@@ -71,6 +71,43 @@ internal static class Checks
             "DeskBridge.QrDecoder, Version=0.0.0.0, Culture=neutral, PublicKeyToken=0123456789abcdef" })
             Expect(ResolveDecoder(identity) == null, "Resolver must reject a different decoder identity/version/culture/token");
         var launcher = assembly.GetType("Launcher", true)!;
+        var setupHostResult = launcher.GetMethod("InterpretSetupHostResult", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var processStartFailure = launcher.GetMethod("ProcessStartFailureMessage", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var diagnosticCode = launcher.GetMethod("DiagnosticCode", BindingFlags.Static | BindingFlags.NonPublic)!;
+        foreach (int code in new[] { 0, 10, 11, 12 })
+            Expect((int)setupHostResult.Invoke(null, new object[] { code })! == code, "Setup UI role outcome changed");
+        foreach (int code in new[] { 1, 2, 3, 13, 193, 216, 225, 226, 577, 1260, 1602, 3010, -1, Int32.MinValue, Int32.MaxValue })
+        {
+            string? guidance = null;
+            try { setupHostResult.Invoke(null, new object[] { code }); }
+            catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException)
+            { guidance = error.InnerException.Message; }
+            Expect(guidance != null && guidance.Contains("setup-ui.child-exit / code " + unchecked((uint)code).ToString(System.Globalization.CultureInfo.InvariantCulture)), "Unknown setup UI exit did not retain a bounded numeric child status");
+            Expect(!guidance!.Contains("AllSigned") && !guidance.Contains("그룹 정책") && !guidance.Contains("이미지 서명") && !guidance.Contains("악성 소프트웨어"), "PowerShell child status inferred an unobserved Windows or execution-policy block");
+        }
+        foreach (var input in new[] { (Code: 577, Text: "이미지 서명"), (Code: 1260, Text: "그룹 정책"),
+            (Code: 225, Text: "악성 소프트웨어"), (Code: 226, Text: "악성 소프트웨어"),
+            (Code: 193, Text: "파일 형식"), (Code: 216, Text: "파일 형식") })
+        {
+            string guidance = (string)processStartFailure.Invoke(null, new object[] { input.Code })!;
+            Expect(guidance.Contains(input.Text) && guidance.Contains("process.start / Win32 " + input.Code), "Known Windows start failure lost its observed category or numeric code");
+            Expect(!guidance.Contains("AllSigned"), "A Win32 start failure asserted a PowerShell execution policy");
+        }
+        foreach (int code in new[] { 0, 1, 2, 5, 192, 194, 215, 217, 224, 227, 576, 578, 1259, 1261, -1, Int32.MinValue, Int32.MaxValue })
+        {
+            string guidance = (string)processStartFailure.Invoke(null, new object[] { code })!;
+            Expect(guidance.Contains("process.start / Win32 " + unchecked((uint)code).ToString(System.Globalization.CultureInfo.InvariantCulture)), "Unknown start failure lost its bounded numeric code");
+            Expect(!guidance.Contains("그룹 정책") && !guidance.Contains("이미지 서명") && !guidance.Contains("악성 소프트웨어") && !guidance.Contains("파일 형식") && !guidance.Contains("AllSigned"), "Unknown start failure invented a Windows cause");
+        }
+        var diagnosticCulture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("ar-SA");
+            foreach (var input in new[] { (Code: 0, Text: "0"), (Code: -1, Text: "4294967295"),
+                (Code: Int32.MinValue, Text: "2147483648"), (Code: Int32.MaxValue, Text: "2147483647") })
+                Expect((string)diagnosticCode.Invoke(null, new object[] { input.Code })! == input.Text, "Diagnostic numeric formatting changed with culture or lost a DWORD boundary");
+        }
+        finally { System.Globalization.CultureInfo.CurrentCulture = diagnosticCulture; }
         var quote = launcher.GetMethod("Quote", BindingFlags.Static | BindingFlags.NonPublic)!;
         var validate = launcher.GetMethod("ValidateName", BindingFlags.Static | BindingFlags.NonPublic)!;
         foreach (var path in new[] { @"C:\테스트 폴더\setup.ps1", @"C:\one&two\setup.ps1", @"C:\$draft\setup.ps1" })

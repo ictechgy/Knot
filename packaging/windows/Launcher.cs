@@ -118,7 +118,7 @@ internal static class Launcher
                 start.WorkingDirectory = directory;
                 start.UseShellExecute = false;
                 start.CreateNoWindow = true;
-                int hostResult = RunAndWait(start);
+                int hostResult = InterpretSetupHostResult(RunAndWait(start));
                 if (hostResult == 12)
                 {
                     DeskBridge.Reverse.KnotUpdates.SetIdle(true);
@@ -129,8 +129,6 @@ internal static class Launcher
                     DeskBridge.Reverse.ClientMain.RunEmbedded(bootstrap, hostResult == 11 ? DeskBridge.Reverse.HostPlatform.Linux : DeskBridge.Reverse.HostPlatform.Mac);
                     return 0;
                 }
-                if (hostResult != 0)
-                    throw new InvalidOperationException("설정 창을 열지 못했거나 정상 종료하지 못했습니다. 조직에서 AllSigned를 강제하면 별도로 서명한 스크립트나 조직에서 승인한 수동 배포가 필요합니다. 이 프리뷰의 스크립트는 Authenticode 서명이 없습니다.");
             }
             return 0;
         }
@@ -345,13 +343,57 @@ internal static class Launcher
         throw new InvalidOperationException("파일 설정을 시작하거나 완료하지 못했습니다. 조직의 스크립트 실행 정책과 설치 안내를 확인하세요.");
     }
 
+    private static int InterpretSetupHostResult(int result)
+    {
+        // These role choices belong only to the normal setup UI, not broker results.
+        if (result == 0 || result == 10 || result == 11 || result == 12) return result;
+        throw new InvalidOperationException("설정 창을 열지 못했거나 정상 종료하지 못했습니다. Knot을 다시 열고, 계속 실패하면 Windows 관리자에게 아래 진단을 전달하세요.\n\n진단: setup-ui.child-exit / code " + DiagnosticCode(result));
+    }
+
+    private static string DiagnosticCode(int code)
+    {
+        return unchecked((uint)code).ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static string ProcessStartFailureMessage(int code)
+    {
+        // NativeErrorCode is evidence about Process.Start only. A child exit
+        // with the same number must never be classified as a Windows block.
+        string guidance;
+        switch (code)
+        {
+            case 577:
+                guidance = "Windows가 설정 프로세스의 이미지 서명을 확인하지 못해 실행을 거부했습니다. 새 Knot 배포 파일을 사용하고 Windows 보안 및 조직의 앱 실행 정책을 관리자와 확인하세요."; break;
+            case 1260:
+                guidance = "Windows가 그룹 정책에 따라 설정 프로세스의 실행을 차단했습니다. Windows 관리자에게 실행 승인을 확인하세요."; break;
+            case 225: case 226:
+                guidance = "Windows가 악성 소프트웨어 또는 원치 않는 소프트웨어 감지를 보고하며 설정 프로세스를 실행하지 못했습니다. Windows 보안의 보호 기록과 배포 파일을 관리자와 확인하세요."; break;
+            case 193: case 216:
+                guidance = "Windows가 설정 프로세스의 실행 파일 형식 또는 시스템 종류 문제를 보고했습니다. Windows 11 x64용 Knot 배포 파일을 다시 받아 실행하세요."; break;
+            default:
+                guidance = "설정 프로세스를 시작하지 못했습니다. Knot을 다시 열고, 계속 실패하면 Windows 관리자에게 아래 진단을 전달하세요."; break;
+        }
+        return guidance + "\n\n진단: process.start / Win32 " + DiagnosticCode(code);
+    }
+
     private static int RunAndWait(ProcessStartInfo start)
     {
-        using (Process child = Process.Start(start))
+        Process child;
+        try { child = Process.Start(start); }
+        catch (Win32Exception error) { throw new InvalidOperationException(ProcessStartFailureMessage(error.NativeErrorCode)); }
+        if (child == null) throw new InvalidOperationException(ProcessStartFailureMessage(0));
+        using (child)
         {
-            if (child == null) throw new InvalidOperationException("설정 프로세스를 열지 못했습니다.");
-            child.WaitForExit();
-            return child.ExitCode;
+            try { child.WaitForExit(); }
+            catch (Win32Exception error)
+            {
+                throw new InvalidOperationException("설정 프로세스의 종료를 확인하지 못했습니다. 작업 완료 여부를 확인한 뒤 다시 시도하세요.\n\n진단: process.wait / Win32 " + DiagnosticCode(error.NativeErrorCode));
+            }
+            try { return child.ExitCode; }
+            catch (Win32Exception error)
+            {
+                throw new InvalidOperationException("설정 프로세스의 종료 결과를 읽지 못했습니다. 작업 완료 여부를 확인한 뒤 다시 시도하세요.\n\n진단: process.exit-query / Win32 " + DiagnosticCode(error.NativeErrorCode));
+            }
         }
     }
 

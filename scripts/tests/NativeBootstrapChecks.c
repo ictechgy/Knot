@@ -7,8 +7,52 @@
 #include <string.h>
 #include <wchar.h>
 #include "../../packaging/windows/NativeArguments.h"
+#include "../../packaging/windows/NativeLaunchStatus.h"
 static unsigned count;
 static void expect(int value,const char *message) { if (!value) { fprintf(stderr,"%s\n",message); exit(1); } ++count; }
+static void launch_diagnostics(void) {
+    const db_launch_stage stages[]={DB_LAUNCH_PREPARE,DB_LAUNCH_START_FAILED,DB_LAUNCH_WAIT_FAILED,
+        DB_LAUNCH_WAIT_UNEXPECTED,DB_LAUNCH_EXIT_QUERY_FAILED,DB_LAUNCH_CHILD_EXIT,(db_launch_stage)-1,(db_launch_stage)99};
+    struct launch_case { uint32_t code; db_launch_category start_category; int child_exit; } cases[]={
+        {0,DB_LAUNCH_UNKNOWN,0},{1,DB_LAUNCH_UNKNOWN,1},{2,DB_LAUNCH_UNKNOWN,2},{5,DB_LAUNCH_UNKNOWN,5},
+        {10,DB_LAUNCH_UNKNOWN,10},{11,DB_LAUNCH_UNKNOWN,11},{12,DB_LAUNCH_UNKNOWN,12},{13,DB_LAUNCH_UNKNOWN,13},
+        {192,DB_LAUNCH_UNKNOWN,192},{193,DB_LAUNCH_IMAGE_FORMAT,193},{194,DB_LAUNCH_UNKNOWN,194},
+        {215,DB_LAUNCH_UNKNOWN,215},{216,DB_LAUNCH_IMAGE_FORMAT,216},{217,DB_LAUNCH_UNKNOWN,217},
+        {224,DB_LAUNCH_UNKNOWN,224},{225,DB_LAUNCH_SECURITY_SOFTWARE,225},{226,DB_LAUNCH_SECURITY_SOFTWARE,226},{227,DB_LAUNCH_UNKNOWN,227},
+        {576,DB_LAUNCH_UNKNOWN,576},{577,DB_LAUNCH_SIGNATURE,577},{578,DB_LAUNCH_UNKNOWN,578},
+        {1259,DB_LAUNCH_UNKNOWN,1259},{1260,DB_LAUNCH_APP_POLICY,1260},{1261,DB_LAUNCH_UNKNOWN,1261},
+        {1602,DB_LAUNCH_UNKNOWN,1602},{3010,DB_LAUNCH_UNKNOWN,3010},
+        {INT32_MAX,DB_LAUNCH_UNKNOWN,INT_MAX},{UINT32_C(2147483648),DB_LAUNCH_UNKNOWN,INT_MIN},{UINT32_MAX,DB_LAUNCH_UNKNOWN,-1}
+    };
+    wchar_t message[DB_LAUNCH_MESSAGE_CAP]; size_t i,j;
+    for (i=0;i<sizeof(stages)/sizeof(*stages);++i)
+        for (j=0;j<sizeof(cases)/sizeof(*cases);++j) {
+            db_launch_result result={stages[i],cases[j].code};
+            db_launch_category category=stages[i]==DB_LAUNCH_START_FAILED?cases[j].start_category:DB_LAUNCH_UNKNOWN;
+            expect(db_launch_classify(result)==category,"diagnosis inferred a Windows cause outside a known API start failure");
+            expect(db_launch_exit_code(result)==(stages[i]==DB_LAUNCH_CHILD_EXIT?cases[j].child_exit:1),"launch diagnostics changed the child status or accepted an API failure as a child result");
+            expect(db_launch_message(message,DB_LAUNCH_MESSAGE_CAP,result),"fixed launch diagnostic exceeded its bounded buffer");
+            expect(wcsstr(message,db_launch_stage_name(stages[i]))!=NULL,"launch diagnostic lost its result stage");
+            expect(wcsstr(message,L"AllSigned")==NULL,"launch diagnostic inferred an unobserved PowerShell execution policy");
+            if (stages[i]!=DB_LAUNCH_START_FAILED)
+                expect(wcsstr(message,L"그룹 정책")==NULL && wcsstr(message,L"이미지 서명")==NULL && wcsstr(message,L"악성 소프트웨어")==NULL,
+                    "a child/wait/preparation result was described as an observed Windows start block");
+        }
+    {
+        db_launch_result result={DB_LAUNCH_CHILD_EXIT,UINT32_MAX}; size_t length,capacity;
+        wchar_t bounded[DB_LAUNCH_MESSAGE_CAP+1];
+        expect(db_launch_message(message,DB_LAUNCH_MESSAGE_CAP,result) && wcsstr(message,L"bootstrap.child-exit / code 4294967295")!=NULL,"32-bit status was truncated, signed or formatted using ambient text");
+        length=wcslen(message);
+        expect(db_launch_message(bounded,length+1,result) && wcscmp(bounded,message)==0,"exact diagnostic capacity was rejected");
+        for (capacity=0;capacity<=length;++capacity) {
+            size_t at; for (at=0;at<sizeof(bounded)/sizeof(*bounded);++at) bounded[at]=L'!';
+            expect(!db_launch_message(bounded,capacity,result),"short diagnostic buffer was accepted");
+            expect(bounded[capacity]==L'!',"diagnostic wrote beyond its advertised capacity");
+            expect(!capacity || wmemchr(bounded,0,capacity)!=NULL,"short diagnostic buffer was not terminated");
+        }
+        expect(!db_launch_message(NULL,10,result),"diagnostic accepted a null output buffer");
+    }
+}
 /* Test-only composition bridge: no bootstrap process, dialogs or Windows APIs. */
 static int result_cli(int argc,char **argv) {
     db_operation operation; long code; char *end=NULL;
@@ -176,6 +220,7 @@ int main(int argc,char **argv) {
         expect(db_dispatch(1,valid)==DB_INVALID,"normal app must not expose installer-only close mode");
     }
     completion_matrix();
-    printf("{\"status\":\"passed\",\"checks\":%u,\"scope\":\"pure native bootstrap dispatch, result completion matrix, UTF8 public request bounds and Windows CRT quoting; no Windows operations\"}\n",count);
+    launch_diagnostics();
+    printf("{\"status\":\"passed\",\"checks\":%u,\"scope\":\"pure native bootstrap dispatch, result completion matrix, stage-bound launch diagnostics, UTF8 public request bounds and Windows CRT quoting; no Windows operations\"}\n",count);
     return 0;
 }

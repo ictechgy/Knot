@@ -19,6 +19,10 @@ public final class StreamInput: @unchecked Sendable {
     @MainActor var desktopTextGeneration = UUID()
     @MainActor var desktopTextTask: Task<Void, Never>?
     @MainActor var desktopEvents: [@MainActor () -> Void] = []
+    @MainActor var desktopEventBytes = 0
+    @MainActor var desktopTextEpoch: UInt64 = 0
+    var desktopRevocationEpoch: UInt64 = 0 // Guarded by core; revokes queued MainActor work.
+    var desktopInputBlocked = false // Cleared by real focus loss, never a repeated focus=true.
     var terminal = false
     var focused = false
     let initialAttempt = UUID()
@@ -38,6 +42,7 @@ public final class StreamInput: @unchecked Sendable {
     public enum Event: Sendable, Equatable {
         case controllersActive(Bool)
         case mouseMode(ControllerRegistration, enabled: Bool)
+        case desktopInputBlocked(Bool)
         case stopRequested
     }
 
@@ -137,7 +142,12 @@ public final class StreamInput: @unchecked Sendable {
     /// Closing focus releases local ownership. Reopening can suppress individually held controls until released.
     public func setFocused(_ value: Bool, suppressHeldControls: Bool = true) {
         core.withLock {
-            guard !terminal, focused != value else { return }
+            guard !terminal else { return }
+            if !value, desktopInputBlocked {
+                desktopInputBlocked = false
+                emit(.desktopInputBlocked(false))
+            }
+            guard focused != value else { return }
             focused = value
             haptics.setOwnership(value)
             for slot in registrations.keys {
@@ -155,7 +165,7 @@ public final class StreamInput: @unchecked Sendable {
     }
 
     func accepts(_ timestamp: TimeInterval) -> Bool {
-        !terminal && core.snapshot.ready && core.snapshot.focused
+        !terminal && !desktopInputBlocked && core.snapshot.ready && core.snapshot.focused
             && timestamp.isFinite && timestamp >= core.snapshot.acceptEventsAfter
     }
 
@@ -216,6 +226,10 @@ public final class StreamInput: @unchecked Sendable {
     }
 
     func releaseOwnership() {
+        desktopRevocationEpoch &+= 1
+        Task { @MainActor [weak self] in
+            self?.cancelRevokedDesktopText()
+        }
         invalidateChordContext()
         core.resetPointerMotion()
         core.releaseControllerTouches()

@@ -525,7 +525,6 @@ def preflight(pin, env=None):
         raise Failure('install')
     if not os.access('/dev/uinput', os.R_OK | os.W_OK):
         raise Failure('input')
-    trusted_program('/usr/bin/setpriv')
     expected_commands = {b'sunshine', os.fsencode(Path(program).name)[:15]}
     # Detect any existing Sunshine without reading argv/environment/logs/configuration.
     for index, entry in enumerate(Path('/proc').iterdir()):
@@ -566,21 +565,35 @@ class OwnedHost:
             env, program = preflight(pin)
             store.prepare()
             store.prepare_web_credentials(username, password)
-            argv = ['/usr/bin/setpriv', '--no-new-privs', '--', program] + host_arguments
+            argv = [program] + host_arguments
             self._spawn(argv, child_environment(env, store.root))
 
     def _spawn(self, argv, env):
         reader, writer = os.pipe2(os.O_CLOEXEC)
+        ready_reader = ready_writer = None
         try:
+            ready_reader, ready_writer = os.pipe2(os.O_CLOEXEC)
             supervisor = str(Path(__file__).with_name('lifetime.py'))
-            self.child = subprocess.Popen(['/usr/bin/python3', '-I', supervisor, str(reader), *argv], env=env,
+            self.child = subprocess.Popen(['/usr/bin/python3', '-I', supervisor, str(reader), str(ready_writer), *argv], env=env,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True, close_fds=True, pass_fds=(reader,), umask=0o077)
+                start_new_session=True, close_fds=True, pass_fds=(reader, ready_writer), umask=0o077)
             self.lifetime_writer = writer
+            # A spawned supervisor is not a started host: require confirmation
+            # of kernel containment and the direct child's successful exec.
+            os.close(ready_writer); ready_writer = None
+            if not select.select([ready_reader], [], [], 5)[0] or os.read(ready_reader, 1) != b'R':
+                raise Failure('operation')
         except BaseException:
-            os.close(writer); raise
+            if self.child is not None:
+                self._close_lifetime()
+                self._finish()
+            else:
+                os.close(writer)
+            raise
         finally:
             os.close(reader)
+            if ready_reader is not None: os.close(ready_reader)
+            if ready_writer is not None: os.close(ready_writer)
 
     def _close_lifetime(self):
         if self.lifetime_writer is not None:

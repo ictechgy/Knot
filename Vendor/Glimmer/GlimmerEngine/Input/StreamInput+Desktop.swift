@@ -4,12 +4,58 @@ import Foundation
 
 
 extension StreamInput {
+    // The active text is separately limited to InputText.maxBytes. Later actions
+    // retain at most this many closures and UTF-8 text bytes during backpressure.
+    static let desktopEventLimit = 256
+    static let desktopTextByteLimit = 16 * 1024
+
+    @MainActor private func enqueueDesktopEvent(textBytes: Int = 0, _ event: @escaping @MainActor () -> Void) {
+        guard desktopEvents.count < Self.desktopEventLimit,
+              textBytes <= Self.desktopTextByteLimit - desktopEventBytes else {
+            // Nothing that has not reached the uplink is replayed after saturation.
+            // Accepted downs remain release obligations, including rejected ups.
+            cancelDesktopText()
+            core.withLock {
+                guard !terminal, !desktopInputBlocked else { return }
+                desktopInputBlocked = true
+                core.snapshot.focused = false
+                core.snapshot.acceptEventsAfter = ProcessInfo.processInfo.systemUptime
+                releaseOwnership()
+                emit(.desktopInputBlocked(true))
+            }
+            return
+        }
+        desktopEventBytes += textBytes
+        desktopEvents.append(event)
+    }
+
+    @MainActor func cancelDesktopText() {
+        desktopTextGeneration = UUID()
+        desktopTextTask?.cancel()
+        desktopTextTask = nil
+        desktopEvents.removeAll()
+        desktopEventBytes = 0
+        let batcher = core.withLock { () -> InputBatcher? in
+            guard let native = core.backend as? NativeBackend else { return nil }
+            return native.withState { native.inputBatcher }
+        }
+        batcher?.abandonTextSubmission()
+    }
+
+    @MainActor func cancelRevokedDesktopText() {
+        let epoch = core.withLock { desktopRevocationEpoch }
+        guard desktopTextEpoch != epoch else { return }
+        cancelDesktopText()
+        desktopTextEpoch = epoch
+    }
+
     /// Windows virtual key in 0...255. Keys are positional; the Mac adapter owns layout mapping.
     @MainActor public func setKey(_ virtualKey: UInt16, pressed: Bool, modifiers: UInt8 = 0,
                                    capturedAt: TimeInterval) {
-        guard virtualKey <= 255 else { return }
+        cancelRevokedDesktopText()
+        guard virtualKey <= 255, core.withLock({ accepts(capturedAt) }) else { return }
         if desktopTextTask != nil {
-            desktopEvents.append { [weak self] in
+            enqueueDesktopEvent { [weak self] in
                 self?.setKey(virtualKey, pressed: pressed, modifiers: modifiers, capturedAt: capturedAt)
             }
             return
@@ -50,10 +96,11 @@ extension StreamInput {
 
     /// Text commits are bounded and ordered before later keys, including rejected-packet retries.
     @MainActor public func commitText(_ value: String, capturedAt: TimeInterval) {
+        cancelRevokedDesktopText()
         let text = InputText.prepared(value)
         guard !text.isEmpty, core.withLock({ accepts(capturedAt) }) else { return }
         if desktopTextTask != nil {
-            desktopEvents.append { [weak self] in self?.commitText(text, capturedAt: capturedAt) }
+            enqueueDesktopEvent(textBytes: text.utf8.count) { [weak self] in self?.commitText(text, capturedAt: capturedAt) }
             return
         }
         let attempt = core.withLock { () -> UUID? in
@@ -69,6 +116,7 @@ extension StreamInput {
         }
         let token = UUID()
         desktopTextGeneration = token
+        desktopTextEpoch = core.withLock { desktopRevocationEpoch }
         desktopTextTask = InputText.send(text, core: core, waitForRelease: false,
             isCurrent: { [weak self] in
                 guard let self else { return false }
@@ -79,12 +127,15 @@ extension StreamInput {
                 self.desktopTextTask = nil
                 let queued = self.desktopEvents
                 self.desktopEvents.removeAll()
+                self.desktopEventBytes = 0
                 for event in queued { event() }
             })
     }
 
     /// Reuse the existing text continuation FIFO for a click/caret action after a pending commit.
     @MainActor public func afterDesktopText(capturedAt: TimeInterval, _ action: @escaping @MainActor () -> Void) {
+        cancelRevokedDesktopText()
+        guard core.withLock({ accepts(capturedAt) }) else { return }
         let attempt = core.withLock { activeAttempt }
         let guarded: @MainActor () -> Void = { [weak self] in
             guard let self, self.core.withLock({ self.activeAttempt == attempt && self.accepts(capturedAt) }) else { return }
@@ -92,22 +143,13 @@ extension StreamInput {
         }
         if desktopTextTask != nil {
             // Re-enter at replay: an earlier queued commit may have opened another acceptance wait.
-            desktopEvents.append { [weak self] in self?.afterDesktopText(capturedAt: capturedAt, guarded) }
+            enqueueDesktopEvent { [weak self] in self?.afterDesktopText(capturedAt: capturedAt, guarded) }
         } else { guarded() }
     }
 
     /// The native view invokes this before focus is lost or its window closes.
     @MainActor public func releaseDesktopInput() {
-        desktopTextGeneration = UUID()
-        desktopTextTask?.cancel()
-        desktopTextTask = nil
-        desktopEvents.removeAll()
+        cancelDesktopText()
         setFocused(false)
-        // The task is cancelled and its continuations revoked before the owned send cursor resets.
-        let batcher = core.withLock { () -> InputBatcher? in
-            guard let native = core.backend as? NativeBackend else { return nil }
-            return native.withState { native.inputBatcher }
-        }
-        batcher?.abandonTextSubmission()
     }
 }

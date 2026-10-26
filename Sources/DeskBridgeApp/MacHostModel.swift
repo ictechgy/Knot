@@ -16,6 +16,8 @@ import Foundation
     enum Phase: Equatable { case stopped, starting, running, stopping }
     @Published private(set) var phase: Phase = .stopped
     @Published private(set) var shuttingDown = false
+    @Published private(set) var terminationAdmissionPaused = false
+    var activityAllowed: Bool { !terminationAdmissionPaused && !KnotUpdates.shared.installationPending && !shuttingDown }
     @Published private(set) var installed = false
     @Published private(set) var addresses: [MacHostAddress] = []
     @Published var selectedAddress = ""
@@ -40,24 +42,25 @@ import Foundation
         }
     }
     var busy: Bool { phase == .starting || phase == .stopping }
-    var canDownload: Bool { !KnotUpdates.shared.installationPending && !shuttingDown && phase == .stopped && !downloading }
+    var canDownload: Bool { activityAllowed && phase == .stopped && !downloading }
+    var canStart: Bool { activityAllowed && phase == .stopped && !downloading && acknowledged }
     var invitation: ConnectionInvitation? {
         guard phase == .running, addresses.contains(where: { $0.address == selectedAddress }) else { return nil }
         return try? ConnectionInvitation(name: name, addresses: [selectedAddress], platform: .macos)
     }
     func refresh() {
-        guard !shuttingDown else { return }
+        guard activityAllowed else { return }
         refreshInstallation()
         addresses = MacHostAddress.selected(operations.addresses())
         if !addresses.contains(where: { $0.address == selectedAddress }) { selectedAddress = addresses.first?.address ?? "" }
     }
     /// Returning from Finder must refresh installation without replacing a running share's status or address.
     private func refreshInstallation() {
-        guard !shuttingDown else { return }
+        guard activityAllowed else { return }
         installed = operations.installed()
     }
     func start() {
-        guard !KnotUpdates.shared.installationPending, !shuttingDown, phase == .stopped, !downloading, acknowledged else { return }
+        guard canStart else { return }
         guard addresses.contains(where: { $0.address == selectedAddress }) else {
             errorMessage = "사용할 LAN 또는 Tailscale IPv4 주소를 선택하세요. 네트워크가 연결된 뒤 주소를 새로 고치세요."; return
         }
@@ -125,6 +128,7 @@ import Foundation
         }
     }
     func cancelDownload() { downloadTask?.cancel() }
+    func setTerminationAdmissionPaused(_ paused: Bool) { terminationAdmissionPaused = paused }
     func beginShutdown() {
         shuttingDown = true
         activation.remove()

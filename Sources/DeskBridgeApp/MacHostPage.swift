@@ -25,7 +25,7 @@ struct MacHostPage: View {
                             Button("다운로드 취소") { host.cancelDownload() }
                         }
                         if let url = host.downloadedURL { Button("검증된 DMG 열기") { open(url) } }
-                        Button("설치 상태 새로 고침") { host.refresh() }.disabled(host.busy)
+                        Button("설치 상태 새로 고침") { host.refresh() }.disabled(!host.activityAllowed || host.busy)
                     }
                     QuietHelp(text: "기존 Sunshine이 실행 중이면 직접 종료하세요. 기존 Sunshine 설정·인증서·키를 가져오거나 로그인 시 자동 실행을 등록하지 않습니다.")
                 }.padding(16).quietPanel()
@@ -43,15 +43,15 @@ struct MacHostPage: View {
                         Button("손쉬운 사용 설정") { openSettings("Privacy_Accessibility") }
                     }
                     Toggle("이 Mac의 화면·키보드·마우스 원격 제어를 허용합니다. 확인 후 ‘이 Mac 공유 시작’을 누르세요.", isOn: $host.acknowledged)
-                        .disabled(host.phase != .stopped)
+                        .disabled(!host.activityAllowed || host.phase != .stopped)
                     Text("최초 공유 전에 웹 관리자 계정을 준비합니다. 기존 계정은 유지하며 아래 입력으로 변경하지 않습니다. 비밀번호는 평문 저장하거나 QR에 넣지 않습니다.").foregroundStyle(.secondary)
                     Text("최초 공유용 관리자 계정").font(.subheadline.weight(.medium))
-                    TextField("최초 공유용 관리자 이름 (영문·숫자·_·-)", text: $host.adminName).disabled(host.phase != .stopped)
-                    SecureField("최초 공유용 관리자 비밀번호 (16~128바이트)", text: $host.adminPassword).disabled(host.phase != .stopped)
+                    TextField("최초 공유용 관리자 이름 (영문·숫자·_·-)", text: $host.adminName).disabled(!host.activityAllowed || host.phase != .stopped)
+                    SecureField("최초 공유용 관리자 비밀번호 (16~128바이트)", text: $host.adminPassword).disabled(!host.activityAllowed || host.phase != .stopped)
                     HStack {
                         if host.phase == .stopped {
                             Button("이 Mac 공유 시작") { host.start() }
-                                .buttonStyle(.borderedProminent).disabled(host.shuttingDown || !host.acknowledged || !host.installed || host.downloading)
+                                .buttonStyle(.borderedProminent).disabled(!host.canStart || !host.installed)
                         } else {
                             Button(host.phase == .stopping ? "공유 종료 중…" : "공유 끄기") { host.stop() }
                                 .disabled(host.phase == .stopping)
@@ -72,8 +72,8 @@ struct MacHostPage: View {
                         Picker("연결 주소", selection: $host.selectedAddress) {
                             if host.addresses.isEmpty { Text("사용 가능한 주소 없음").tag("") }
                             ForEach(host.addresses) { Text($0.label).tag($0.address) }
-                        }.frame(maxWidth: 440)
-                        Button("주소 새로 고침") { host.refresh() }.disabled(host.busy)
+                        }.frame(maxWidth: 440).disabled(!host.activityAllowed)
+                        Button("주소 새로 고침") { host.refresh() }.disabled(!host.activityAllowed || host.busy)
                     }
                     if let invitation = host.invitation {
                         HStack(alignment: .top, spacing: 20) {
@@ -106,14 +106,16 @@ struct MacHostPage: View {
         switch host.phase { case .stopped: "공유 꺼짐"; case .starting: "시작 중"; case .running: "프로세스 실행 중"; case .stopping: "종료 중" }
     }
     private func chooseDownload() {
+        guard host.canDownload else { return }
         let panel = NSSavePanel(); panel.allowedContentTypes = [.diskImage]
         panel.nameFieldStringValue = "Sunshine-\(MacHostPolicy.sunshineVersion)-\(MacHostPolicy.currentDownload.architecture).dmg"
         panel.message = "공식 파일 크기와 SHA256을 확인한 뒤 저장합니다. 같은 이름의 파일은 덮어쓰지 않습니다."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url, host.canDownload else { return }
         do { try MacHostFileWork.requireAbsent(url); host.download(to: url) }
         catch { host.errorMessage = (error as? MacHostPolicy.Failure)?.localizedDescription ?? "저장 위치를 확인하고 다른 이름이나 폴더를 선택하세요." }
     }
     private func open(_ url: URL) {
+        guard host.activityAllowed else { return }
         if !NSWorkspace.shared.open(url) { host.errorMessage = "선택한 파일 또는 설정 페이지를 열지 못했습니다. 위치를 확인하고 다시 시도하세요." }
     }
     private func openSettings(_ pane: String) { if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") { open(url) } }
@@ -123,8 +125,9 @@ struct MacHostPage: View {
     }
     private func saveLink(_ invitation: ConnectionInvitation) { save(Data(invitation.url.absoluteString.utf8), type: .plainText, name: "Knot-Mac-연결.txt") }
     private func save(_ data: Data, type: UTType, name: String) {
+        guard host.activityAllowed else { return }
         let panel = NSSavePanel(); panel.allowedContentTypes = [type]; panel.nameFieldStringValue = name
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url, host.activityAllowed else { return }
         do { try data.write(to: url, options: .withoutOverwriting) }
         catch { host.errorMessage = "연결 파일을 저장하지 못했습니다. 다른 이름이나 폴더를 선택하세요." }
     }

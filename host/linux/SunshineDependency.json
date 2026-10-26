@@ -9,5 +9,5 @@
   "sha256": "c38e9c705f650f8705f61702717e99bec34044c5028fcb8f23a08fe041292c21",
   "binary": "/usr/bin/sunshine",
   "binarySHA256": "61e1ecbc8db2df786b9760c652aa4b9885dff36c57d4af09616344314cb7c34c",
-  "provenance": "Official release API and freshly downloaded Ubuntu 24.04 amd64 package verified 2026-10-22. Extracted as inert data. The upstream package supplies uaccess rules and file capabilities; DeskBridge adds no privileged installer and suppresses privilege gains at runtime using setpriv --no-new-privs."
+  "provenance": "Official release API and freshly downloaded Ubuntu 24.04 amd64 package verified 2026-10-22. Extracted as inert data. The upstream package supplies uaccess rules and file capabilities; Knot adds no privileged installer. Before exec, the isolated supervisor requires no_new_privs and inherited seccomp restrictions, preventing process/group/session/namespace escape while retaining supported native threads. Unsupported enforcement fails closed."
 }

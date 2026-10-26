@@ -181,6 +181,7 @@ if not args.skip_checks:
     shutil.copy2(BUILD / "DeskBridgeAppChecks", model_checker)
     run("sign-model-check", ["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime", str(model_checker)])
     run("synthetic-model-checks", [str(model_checker)])
+    run("termination-admission-checks", [str(model_checker), "--synthetic-termination-admission"])
 run("sign-app", ["/usr/bin/codesign", "--force", "--sign", signing_identity, "--options", "runtime",
     "--entitlements", str(ROOT / "packaging/macos/DeskBridge.entitlements"), str(app)])
 run("verify-app", ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)])

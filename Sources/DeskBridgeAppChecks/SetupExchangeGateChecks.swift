@@ -89,10 +89,13 @@ func runSetupExchangeGateChecks(temporary: URL) throws -> Int {
     try expect(canceledModalRefused && files.pinnedHostKey.isEmpty, "canceled modal adopted SSH trust")
     files.enrollmentModalActive = false
     let approved = stage()
+    desktop.setTerminationAdmissionPaused(true); files.setTerminationAdmissionPaused(true)
+    try expect(!files.canExchangeSetup && !desktop.canChoosePC, "Quit drain admitted a new setup exchange")
     try files.applyEnrollmentConfirmation(preview, epoch: approved, identity: identity, addresses: addresses, publicKey: clientKey)
     try expect(files.pinnedHostKey == serverKey && desktop.settings.sshHostPublicKey == serverKey,
                "approved exact enrollment did not persist the public SSH pin")
     try expect(files.enrollmentActive, "owned synchronous commit cleared update gate before completion cleanup")
     files.enrollmentConfirmation = nil; files.busy = false
+    desktop.setTerminationAdmissionPaused(false); files.setTerminationAdmissionPaused(false)
     return count
 }

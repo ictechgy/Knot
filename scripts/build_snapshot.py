@@ -7,7 +7,7 @@ import hashlib, io, json, os, stat, struct, subprocess, tarfile
 class BuildSnapshotError(ValueError):
     pass
 
-REQUIRED_CHECK_STAGES = {"synthetic-checks", "synthetic-model-checks", "build-contract-checks", "system-dependency-policy-checks",
+REQUIRED_CHECK_STAGES = {"synthetic-checks", "synthetic-model-checks", "termination-admission-checks", "build-contract-checks", "system-dependency-policy-checks",
                          "input-batching-checks", "control-hardening-checks", "desktop-input-backpressure-checks",
                          "video-frame-lifecycle-checks", "video-color-checks", "video-prepare-checks", "stream-launch-lifecycle-checks", "media-receive-lifecycle-checks", "audio-notice-power-checks",
                          "rtsp-replay-checks", "inspect-app-entitlements", "inspect-dependencies",
@@ -148,6 +148,7 @@ def validate_completed_build(root, build, require_release=False):
         invocations = json.loads((build / "build-invocations.json").read_text())
         checks = json.loads((build / "synthetic-checks.stdout").read_text())
         model_checks = json.loads((build / "synthetic-model-checks.stdout").read_text())
+        admission_checks = json.loads((build / "termination-admission-checks.stdout").read_text())
         lifetime_checks = json.loads((build / "mac-host-lifetime-checks.stdout").read_text())
         expected = json.loads((build / "source-manifest.json").read_text())
         current = source_snapshot(root)
@@ -165,6 +166,10 @@ def validate_completed_build(root, build, require_release=False):
                 not REQUIRED_CHECK_STAGES <= labels or
                 checks.get("status") != "passed" or model_checks.get("status") != "passed"):
             raise BuildSnapshotError("A completed build with both check suites is required")
+        if (admission_checks.get("status") != "passed" or any(
+                type(admission_checks.get(key)) is not int or admission_checks[key] < minimum
+                for key, minimum in (("terminationAdmissionChecks", 21), ("setupExchangeGateChecks", 39), ("desktopGuidanceChecks", 123)))):
+            raise BuildSnapshotError("Actual synthetic Quit/admission proof is required")
         if (lifetime_checks.get("status") != "passed" or type(lifetime_checks.get("checks")) is not int or
                 lifetime_checks["checks"] < 41 or
                 any(lifetime_checks.get(key) is not True for key in (

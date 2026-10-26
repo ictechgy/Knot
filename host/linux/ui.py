@@ -15,6 +15,42 @@ from policy import Failure, invitation
 from runtime import OwnedHost, Store, addresses, download, open_installer, save_package, cleanup_owned
 
 
+class LatestProgress:
+    """One pending UI callback holds the latest fraction across operation generations."""
+    def __init__(self, schedule, deliver):
+        self.schedule, self.deliver = schedule, deliver
+        self.lock = threading.Lock()
+        self.token, self.latest, self.pending = None, None, False
+
+    def begin(self, token):
+        with self.lock:
+            self.token, self.latest = token, None
+
+    def report(self, token, value):
+        with self.lock:
+            if token is not self.token: return
+            self.latest = value
+            if self.pending: return
+            self.pending = True
+        self.schedule(self.drain)
+
+    def drain(self):
+        with self.lock:
+            token, value = self.token, self.latest
+            self.latest, self.pending = None, False
+        if token is not None and value is not None: self.deliver(token, value)
+        return False
+
+    def finish(self, token, value=None):
+        # Called on the UI thread before the terminal status/new operation. A
+        # previously queued drain stays pending and can service the next token.
+        with self.lock:
+            if token is not self.token: return
+            value = self.latest if value is None else value
+            self.token, self.latest = None, None
+        if value is not None: self.deliver(token, value)
+
+
 class Window(Gtk.Window):
     def __init__(self, pin):
         super().__init__(title='Knot · 이 Linux 공유')
@@ -22,6 +58,7 @@ class Window(Gtk.Window):
         self.host, self.cancel = OwnedHost(), threading.Event()
         self.busy, self.running, self.closing = False, False, False
         self.operation_kind = None
+        self.operation_token = None
         self.generation = 0
         self.qr_bytes, self.link_text = None, ''
         self.set_default_size(740, 700)
@@ -51,6 +88,8 @@ class Window(Gtk.Window):
         body.pack_start(self.install_command, False, False, 0)
         self.progress = Gtk.ProgressBar(); body.pack_start(self.progress, False, False, 0)
         self.progress.get_accessible().set_name('Sunshine 패키지 다운로드 진행률')
+        self.download_progress = LatestProgress(GLib.idle_add, lambda token, value:
+            self.progress.set_fraction(value) if self.operation_token is token and not self.closing and not self.cancel.is_set() else None)
         label('2. 이 Linux 공유 시작\n최초 공유 전에 웹 관리자 계정을 준비합니다. 아래 비밀번호는 평문 저장하거나 QR에 넣지 않습니다. 기존 계정이 있으면 유지하며 아래 입력으로 변경하지 않습니다. 화면과 키보드·마우스의 원격 제어를 허용합니다.')
         self.admin_name = Gtk.Entry(); self.admin_name.set_text('deskbridge'); self.admin_name.set_max_length(64)
         self.admin_name.get_accessible().set_name('최초 Sunshine 웹 관리자 이름, 영문 숫자 밑줄 하이픈'); body.pack_start(self.admin_name, False, False, 0)
@@ -104,6 +143,8 @@ class Window(Gtk.Window):
 
     def run(self, work, completed, kind=None):
         if self.busy or self.closing: return
+        token = object(); self.operation_token = token
+        if kind == 'download': self.download_progress.begin(token)
         self.busy = True; self.operation_kind = kind; self.cancel.clear(); self.controls()
         def execute():
             result, failure = None, None
@@ -114,6 +155,9 @@ class Window(Gtk.Window):
                     failure += ' 임시 패키지 사본을 정리하지 못했습니다. 선택한 저장 폴더에서 숨김 파일을 표시하고 .deskbridge-package-로 시작하는 임시 사본을 확인하세요.'
             GLib.idle_add(finish, result, failure)
         def finish(result, failure):
+            if self.operation_token is not token: return False
+            if kind == 'download': self.download_progress.finish(token, 1.0 if failure is None else None)
+            self.operation_token = None
             self.busy = False; self.operation_kind = None
             if self.closing: self.shutdown(); return False
             if failure: self.status.set_text(failure)
@@ -124,7 +168,8 @@ class Window(Gtk.Window):
         threading.Thread(target=execute, daemon=False).start()
 
     def get_package(self):
-        return download(self.pin, self.storage(), self.cancel, lambda value: GLib.idle_add(self.progress.set_fraction, value))
+        token = self.operation_token
+        return download(self.pin, self.storage(), self.cancel, lambda value: self.download_progress.report(token, value))
 
     def got_package(self, package):
         self.package = package

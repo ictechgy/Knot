@@ -35,6 +35,16 @@ struct StreamConfiguration: Sendable {
     private var audioPlatform: DesktopAudio?
     private var events: Task<Void, Never>?
     private var recovery = DesktopRecoveryPresentation()
+    private var inputBlocked = false
+    private var recoveryMessage: String? {
+        if inputBlocked, recovery.phase == .live {
+            return "입력 전송이 밀려 일부 입력을 보내지 못했습니다. 다른 창으로 전환한 뒤 이 화면으로 돌아와 내용을 확인하고 다시 입력하세요."
+        }
+        return recovery.message
+    }
+    private var recoveryStatus: String {
+        inputBlocked && recovery.phase == .live ? "화면 연결됨 · 입력을 일시 중지했습니다." : recovery.status
+    }
     private var audioNoticeTask: Task<Void, Never>?
     private var timedAudioNotice: UUID?
     private var generation = UUID()
@@ -73,7 +83,8 @@ struct StreamConfiguration: Sendable {
         view = picture
         picture.keyboardMode = keyboardMode
         recovery = DesktopRecoveryPresentation()
-        picture.showRecovery(recovery.message)
+        inputBlocked = false
+        picture.showRecovery(recoveryMessage)
         let video = VideoDecoder(configuration: configuration, displayInfo: { [weak picture] in
             guard let screen = picture?.window?.screen else { return nil }
             return VideoDisplayInfo(currentHeadroom: screen.maximumExtendedDynamicRangeColorComponentValue,
@@ -115,15 +126,16 @@ struct StreamConfiguration: Sendable {
         }, tickOffMain: { true }, prepareTickThread: {}), configuredFps: Int32(dimensions.2))
         let updates = pair.session.events
         events = Task { [weak self] in
-            var publishedStatus = self?.recovery.status
+            var publishedStatus = self?.recoveryStatus
             for await update in updates {
                 guard let self, self.generation == epoch else { break }
+                if case .input(.desktopInputBlocked(let blocked)) = update.event { self.inputBlocked = blocked }
                 self.recovery.receive(update.event)
-                picture.showRecovery(self.recovery.message)
+                picture.showRecovery(self.recoveryMessage)
                 self.refreshAudioNoticeTimer(epoch: epoch)
-                if self.recovery.status != publishedStatus {
-                    publishedStatus = self.recovery.status
-                    self.onStatus?(self.recovery.status)
+                if self.recoveryStatus != publishedStatus {
+                    publishedStatus = self.recoveryStatus
+                    self.onStatus?(self.recoveryStatus)
                 }
                 switch update.event {
                 case .connectionEstablished:
@@ -170,6 +182,7 @@ struct StreamConfiguration: Sendable {
         // Revoke and detach before the await. An older teardown never owns replacement resources.
         session = nil; events = nil; window = nil; view = nil; decoder = nil; audioPlatform = nil
         pendingFullScreen = false
+        inputBlocked = false
         oldEvents?.cancel()
         oldView?.releaseInput()
         oldView?.showRecovery(nil)
@@ -197,7 +210,7 @@ struct StreamConfiguration: Sendable {
                   self.timedAudioNotice == notice, self.recovery.audioNoticeID == notice else { return }
             self.recovery.acknowledgeAudioNotice(notice)
             self.timedAudioNotice = nil; self.audioNoticeTask = nil
-            self.view?.showRecovery(self.recovery.message)
+            self.view?.showRecovery(self.recoveryMessage)
         }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {

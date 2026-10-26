@@ -16,6 +16,12 @@ func runDesktopFailureGuidanceChecks(temporary: URL) async throws -> Int {
     try expect(model.pairingTitle.contains("Windows Knot") && model.pairingGuidance.contains("연결 준비") &&
                model.pairingGuidance.contains("새 PIN") && model.pairingGuidance.contains("https://localhost:47990/pin"),
                "Windows PIN guidance must lead to native approval, retain manual fallback and explain restart recovery")
+    for failure in [PairingFailure.timedOut, .rejected] {
+        let message = DesktopModel.failureMessage(failure)
+        try expect(message.contains("새 PIN 연결") && message.contains("자동으로 갱신") && message.contains("직접 선택") &&
+                   message.contains("실패한 경우에만 ‘연결 요청 다시 확인’") && !message.contains("요청 새로고침"),
+                   "pairing recovery did not match automatic polling and explicit approval")
+    }
     let raw = "synthetic-untrusted-detail-192.0.2.1-private-path"
     let cases: [(any Error, String)] = [
         (ConnectionInvitation.Failure.invalid, "새 연결 QR"),
@@ -86,8 +92,9 @@ func runDesktopFailureGuidanceChecks(temporary: URL) async throws -> Int {
             let guidance = target.errorMessage ?? ""
             try expect(!target.busy, "pairing recovery did not complete")
             if platform == .windows {
-                try expect(guidance.contains("Windows Knot") && guidance.contains("요청 새로고침"),
-                           "Windows pairing failure must lead to the native request refresh and approval")
+                try expect(guidance.contains("Windows Knot") && guidance.contains("자동으로 갱신") && guidance.contains("직접 선택") &&
+                           guidance.contains("실패한 경우에만 ‘연결 요청 다시 확인’") && !guidance.contains("요청 새로고침"),
+                           "Windows pairing failure must lead to automatic polling, explicit selection and failure-only recovery")
             } else {
                 try expect(guidance.contains("Linux 브라우저") && guidance.contains("PIN 페이지") && !guidance.contains("Windows Knot"),
                            "Linux pairing failure must retain its own browser PIN workflow")

@@ -18,7 +18,7 @@ English · [한국어](README.ko.md)
 
 The app UI and most setup guides are currently in Korean.
 
-The source tree is **0.2.0-preview.23**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
+The source tree is **0.2.0-preview.25**. Its first-run enrollment, higher-quality streaming and signed updater changes are not included in the published preview.16 packages below. Automatic updates remain unavailable until the release publisher's keys, feed and platform signing are configured; see [updates](docs/UPDATES.md).
 
 ## Supported connections
 
@@ -66,12 +66,23 @@ Follow the steps below to connect. **Screen access does not require SSH setup.**
 
 ### Open Windows from Mac
 
-**Current source-build Windows setup:** install and open **Knot**. Connection preparation begins automatically: Knot installs and starts the pinned Sunshine component, generates a fresh account, stores credentials using Windows DPAPI with administrator-only access, and applies required security settings. An existing Sunshine account needs one login, then is remembered. Keep the prepared window open, choose the requesting Mac and approve its PIN; the request list refreshes automatically. Sunshine remains a separately licensed service managed through Knot. Existing pairing is retained. Updates gracefully close owned Knot windows, migrate the old executable name to `Knot.exe`, and reopen the app; active screen sessions close automatically; configuration work drains before replacement, with a bounded refusal if it cannot finish. Optional tasks are grouped under **다른 기능 및 도움** (other functions and help): files, monitorless setup, opening another computer, and troubleshooting. Manual Sunshine controls are inside troubleshooting. The preparation window shows PIN approval only when requests arrive and keeps retry/refresh controls contextual. Unsupported/custom installations use **연결 문제 해결** (connection troubleshooting). The published preview.16 packages below retain their older manual flow.
+**Current source builds (preview.25)**
+
+1. Install and open **Knot** on Windows. Connection preparation starts automatically. Approve Windows administrator access when requested. Knot installs the pinned Sunshine component when needed, creates a fresh account, and applies the required security settings. An existing Sunshine account needs one successful login, then is remembered using Windows DPAPI and administrator-only access.
+2. Keep the preparation window open. On the Mac, choose this PC and start PIN pairing. On Windows, explicitly select the requesting Mac and approve its four-digit PIN. The request list refreshes automatically; a refresh recovery action appears only if polling fails.
+3. Open **Windows 열기** on the Mac. Future connections use the saved pairing. Additional tasks—files, monitorless setup, opening another computer and troubleshooting—are under **다른 기능 및 도움**. Screen access does not need file setup.
+
+Sunshine remains a separately licensed service. Existing pairing and file settings are retained. Unsupported/custom installations use **연결 문제 해결**. Unsigned previews may be blocked by Windows application-control policies; retrying does not establish a trusted signature. Startup errors now distinguish confirmed Windows launch rejection from an unexplained child failure instead of inferring AllSigned.
+
+<details>
+<summary>Published preview.16 or manually managed Sunshine</summary>
 
 1. Install the Windows setup EXE, open **Knot 설정** from the Start menu and choose **이 Windows 공유** (share this Windows PC). Follow the Sunshine installation steps.
 2. In a **Windows browser**, open `https://localhost:47990` and create the Sunshine administrator account. Open **Configuration → Network** and set both LAN and WAN encryption modes to **Required for all clients** (**모든 사용자에게 필수** in Korean), then **Save → Apply**. Check that a Desktop app is available.
 3. Install Knot on your Mac. Choose the PC under **Windows 화면** (Windows desktop), or import the Windows helper's QR/link if discovery finds nothing.
 4. On Windows, open `https://localhost:47990/pin` and approve the PIN shown on the Mac, then choose **Windows 열기** (open Windows). Sunshine can run in the background without a normal app window.
+
+</details>
 
 [Detailed installation](INSTALLATION.md#mac에서-windows-열기) · [Windows host and file setup](host/windows/README.md)
 

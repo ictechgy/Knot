@@ -285,7 +285,30 @@ class HostChecks(unittest.TestCase):
         program = '/synthetic/root-controlled/sunshine-version'
         with patch('runtime.preflight', return_value=({'DISPLAY': ':1'}, program)), patch.object(host, '_spawn') as spawn:
             host.start(dict(binary='/synthetic/symlink'), storage, 'Linux', 'synthetic', 'Synthetic-password-42!')
-        self.assertEqual(spawn.call_args.args[0][:4], ['/usr/bin/setpriv', '--no-new-privs', '--', program])
+        self.assertEqual(spawn.call_args.args[0][0], program)
+
+    def test_spawn_requires_enforced_exec_confirmation_and_cleans_refusal(self):
+        for ready in (b'R', b'F', b'', None):
+            with self.subTest(ready=ready):
+                host, child = OwnedHost(), Mock(pid=12345)
+                def finish(): host.child = None
+                with patch('runtime.os.pipe2', side_effect=[(101, 102), (103, 104)], create=True), \
+                     patch('runtime.os.close') as close, patch('runtime.subprocess.Popen', return_value=child) as spawn, \
+                     patch('runtime.select.select', return_value=([103] if ready is not None else [], [], [])), \
+                     patch('runtime.os.read', return_value=ready), patch.object(host, '_finish', side_effect=finish) as cleanup:
+                    if ready == b'R':
+                        host._spawn(['/synthetic/inert-host'], {})
+                        self.assertIs(host.child, child); self.assertEqual(host.lifetime_writer, 102)
+                        cleanup.assert_not_called()
+                    else:
+                        with self.assertRaises(Failure): host._spawn(['/synthetic/inert-host'], {})
+                        cleanup.assert_called_once()
+                        self.assertIsNone(host.child); self.assertIsNone(host.lifetime_writer)
+                        self.assertIn(unittest.mock.call(102), close.call_args_list)
+                    self.assertEqual(spawn.call_args.kwargs['pass_fds'], (101, 104))
+                    self.assertTrue(spawn.call_args.kwargs['start_new_session'])
+                    for descriptor in (101, 103, 104):
+                        self.assertEqual(close.call_args_list.count(unittest.mock.call(descriptor)), 1)
 
     def test_invalid_host_name_never_prepares_or_commits_credentials(self):
         host, storage = OwnedHost(), Mock(root=self.store.root)

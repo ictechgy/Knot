@@ -10,7 +10,7 @@ def validate_linux_check_record(checks, build):
 # Exact installed entry -> corresponding source and mode. No maintainer/root scripts.
 LINUX_PAYLOAD_SOURCES = {
     **{'usr/lib/deskbridge-linux/' + name: ('host/linux/' + name, 0o644)
-       for name in ('policy.py', 'runtime.py', 'lifetime.py', 'ui.py', 'SunshineDependency.json')},
+       for name in ('policy.py', 'runtime.py', 'lifetime.py', 'containment.py', 'ui.py', 'SunshineDependency.json')},
     'usr/bin/deskbridge-linux': ('packaging/linux/deskbridge-linux', 0o755),
     'usr/share/applications/org.deskbridge.LinuxHost.desktop': ('packaging/linux/org.deskbridge.LinuxHost.desktop', 0o644),
     'usr/share/icons/hicolor/1024x1024/apps/org.deskbridge.LinuxHost.png': ('Assets/Brand/knot.png', 0o644),

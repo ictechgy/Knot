@@ -21,7 +21,8 @@ final class FilesModel: ObservableObject {
     @Published var enrollmentConfirmation: UUID?
     @Published var enrollmentModalActive = false
     var enrollmentActive: Bool { enrollmentServer != nil || enrollmentOperation != nil || enrollmentConfirmation != nil || enrollmentModalActive }
-    var activityAllowed: Bool { !KnotUpdates.shared.installationPending && !enrollmentModalActive }
+    @Published private(set) var terminationAdmissionPaused = false
+    var activityAllowed: Bool { !terminationAdmissionPaused && !shuttingDown && !KnotUpdates.shared.installationPending && !enrollmentModalActive }
     var keyFingerprint: String {
         // Reuse exactly the transport's key parser, independently of unfinished
         // address/user/key-file drafts. This constructor performs no I/O.
@@ -50,7 +51,8 @@ final class FilesModel: ObservableObject {
         }
         return "파일 작업을 완료하지 못했습니다. 설정 파일과 개인 키의 접근 권한을 확인한 뒤 다시 시도하세요."
     }
-    var canExchangeSetup: Bool { activityAllowed && !shuttingDown && desktop.supportsFiles && !busy && !connected && desktop.canChoosePC }
+    var canExchangeSetup: Bool { activityAllowed && canCompleteSetupExchange && desktop.canChoosePC }
+    var canCompleteSetupExchange: Bool { !KnotUpdates.shared.installationPending && !shuttingDown && !enrollmentModalActive && desktop.supportsFiles && !busy && !connected && desktop.canCompleteFileSetup }
     struct KeyReplacementSnapshot: Equatable {
         let savedPath: String
         let draftPath: String
@@ -290,6 +292,7 @@ final class FilesModel: ObservableObject {
         identityPath = url.path; generatedPublicKey = ""
         errorMessage = nil
     }
+    func setTerminationAdmissionPaused(_ paused: Bool) { terminationAdmissionPaused = paused }
     func beginShutdown() {
         cancelEnrollment()
         shuttingDown = true

@@ -125,7 +125,7 @@ struct FilesPage: View {
             Spacer(minLength: 12)
             Button("파일 연결") { model.connect(address: addressDraft) }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.busy || desktop.busy)
+                .disabled(!model.activityAllowed || model.busy || desktop.busy)
         }
         .padding(16)
         .quietPanel()
@@ -154,7 +154,7 @@ struct FilesPage: View {
                     .disabled(model.selectedEntry?.kind != .file)
             }
             .padding(12)
-            .disabled(model.busy)
+            .disabled(!model.activityAllowed || model.busy)
 
             Divider()
             HStack {
@@ -231,7 +231,7 @@ struct FilesPage: View {
                 if entry.kind == .directory {
                     Button("열기") { model.refresh(path: entry.path) }
                         .buttonStyle(.borderless)
-                        .disabled(model.busy)
+                        .disabled(!model.activityAllowed || model.busy)
                         .accessibilityLabel("\(entry.name) 폴더 열기")
                 } else {
                     Color.clear.frame(height: 1).accessibilityHidden(true)

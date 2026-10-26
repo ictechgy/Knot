@@ -112,7 +112,7 @@ struct DesktopPage: View {
                         Picker("열 화면", selection: appSelection) {
                             if launchApp == nil { Text("화면 선택").tag(Optional<Int>.none) }
                             ForEach(model.apps) { app in Text(app.name).tag(Optional(app.id)) }
-                        }.frame(maxWidth: 260).disabled(model.busy || model.stream.isEngaged || model.peerEngaged || model.enrollmentEngaged)
+                        }.frame(maxWidth: 260).disabled(!model.activityAllowed || model.busy || model.stream.isEngaged || model.peerEngaged || model.enrollmentEngaged)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 MonitorIllustration(platform: model.platformName).frame(width: 190)
@@ -127,7 +127,7 @@ struct DesktopPage: View {
                 Label(launchApp?.name.localizedCaseInsensitiveContains("desktop") == false ? "앱 열기" : "\(model.platformName) 열기",
                       systemImage: "arrow.up.left.and.arrow.down.right")
                     .padding(.horizontal, 5).padding(.vertical, 4)
-            }.buttonStyle(.borderedProminent).disabled(model.busy || model.stream.isEngaged || model.peerEngaged || model.enrollmentEngaged || launchApp == nil)
+            }.buttonStyle(.borderedProminent).disabled(!model.activityAllowed || model.busy || model.stream.isEngaged || model.peerEngaged || model.enrollmentEngaged || launchApp == nil)
             if model.apps.isEmpty {
                 Text("Sunshine에 Desktop 앱을 추가한 뒤 PC를 다시 확인하세요.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -136,7 +136,7 @@ struct DesktopPage: View {
             Button("저장된 PC 다시 확인") { model.connect() }
                 .buttonStyle(.borderedProminent).disabled(!model.canVerifyCurrentPC)
         } else if !model.serverName.isEmpty {
-            Button("PIN으로 연결") { model.pair() }.buttonStyle(.borderedProminent).disabled(model.busy || model.enrollmentEngaged)
+            Button("PIN으로 연결") { model.pair() }.buttonStyle(.borderedProminent).disabled(!model.activityAllowed || model.busy || model.enrollmentEngaged)
         } else {
             Button(model.settings.host == nil ? "PC 확인" : "저장된 PC 확인") { model.connect() }
                 .buttonStyle(.borderedProminent).disabled(!model.canVerifyCurrentPC || model.address.isEmpty)
@@ -153,7 +153,7 @@ struct DesktopPage: View {
                             Text(value == 2160 ? "4K (2160p)" : "\(value)p").tag(value)
                         }
                     }
-                }.disabled(model.busy || model.stream.isEngaged || model.streaming)
+                }.disabled(!model.activityAllowed || model.busy || model.stream.isEngaged || model.streaming)
                 Divider().padding(.vertical, 12)
                 setting("프레임") {
                     Picker("프레임", selection: $model.frameRate) {
@@ -161,7 +161,7 @@ struct DesktopPage: View {
                             Text("\(value) fps").tag(value)
                         }
                     }
-                }.disabled(model.busy || model.stream.isEngaged || model.streaming)
+                }.disabled(!model.activityAllowed || model.busy || model.stream.isEngaged || model.streaming)
               }.fixedSize(horizontal: false, vertical: true)
               Divider()
               HStack(spacing: 0) {
@@ -171,14 +171,14 @@ struct DesktopPage: View {
                             Text(value == 0 ? "자동 (해상도 기준)" : "\(value / 1000) Mbps").tag(value)
                         }
                     }
-                }.disabled(model.busy || model.stream.isEngaged || model.streaming)
+                }.disabled(!model.activityAllowed || model.busy || model.stream.isEngaged || model.streaming)
                 Divider().padding(.vertical, 12)
                 setting("키보드") {
                     Picker("키보드 입력", selection: $model.keyboardMode) {
                         Text("Mac 입력기").tag(DesktopKeyboardMode.localIME)
                         Text("물리 키보드").tag(DesktopKeyboardMode.physicalKeys)
                     }
-                }.disabled(model.busy)
+                }.disabled(!model.activityAllowed || model.busy)
               }.fixedSize(horizontal: false, vertical: true)
             }.quietPanel()
             Text("4K는 상대 PC의 화면·캡처·인코더 지원이 필요합니다. 비트레이트를 높이면 네트워크 사용량이 늘어납니다. 화질 설정은 다음 화면 연결에 적용됩니다.")

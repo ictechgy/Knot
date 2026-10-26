@@ -333,6 +333,7 @@ class BuildSnapshotTests(unittest.TestCase):
         ]))
         (self.build / "synthetic-checks.stdout").write_text('{"status":"passed"}')
         (self.build / "synthetic-model-checks.stdout").write_text('{"status":"passed"}')
+        (self.build / "termination-admission-checks.stdout").write_text(json.dumps({"status":"passed", "terminationAdmissionChecks":21, "setupExchangeGateChecks":39, "desktopGuidanceChecks":123}))
         (self.build / "mac-host-lifetime-checks.stdout").write_text(json.dumps({
             "status": "passed", "checks": 41, "productionHostLaunched": False,
             "testedSupervisorSHA256": host_supervisor_snapshot(self.root / "dist/Knot.app")["sha256"],
@@ -388,6 +389,26 @@ class BuildSnapshotTests(unittest.TestCase):
 
     def test_missing_model_result_cannot_be_labeled_successful(self):
         (self.build / "synthetic-model-checks.stdout").unlink()
+        with self.assertRaises(BuildSnapshotError): self.validate()
+
+    def test_missing_quit_admission_proof_is_rejected(self):
+        (self.build / "termination-admission-checks.stdout").unlink()
+        with self.assertRaises(BuildSnapshotError): self.validate()
+
+    def test_incomplete_quit_admission_proof_is_rejected(self):
+        path = self.build / "termination-admission-checks.stdout"
+        valid = json.loads(path.read_text())
+        for key in ("terminationAdmissionChecks", "setupExchangeGateChecks", "desktopGuidanceChecks"):
+            with self.subTest(missing=key):
+                invalid = dict(valid); invalid.pop(key)
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(BuildSnapshotError): self.validate()
+            with self.subTest(too_few=key):
+                invalid = dict(valid); invalid[key] = 0
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(BuildSnapshotError): self.validate()
+        invalid = dict(valid); invalid["status"] = "failed"
+        path.write_text(json.dumps(invalid))
         with self.assertRaises(BuildSnapshotError): self.validate()
 
     def test_new_source_without_index_is_rejected(self):

@@ -51,7 +51,9 @@ final class DesktopModel: ObservableObject {
         didSet { stream.keyboardMode = keyboardMode }
     }
     @Published private(set) var settings: SavedSettings
-    var canForgetHost: Bool { !enrollmentEngaged && !KnotUpdates.shared.installationPending && !shuttingDown && settingsReadable && settings.host != nil && !busy && !streaming && !stream.isEngaged }
+    @Published private(set) var terminationAdmissionPaused = false
+    var activityAllowed: Bool { !terminationAdmissionPaused && !KnotUpdates.shared.installationPending && !shuttingDown }
+    var canForgetHost: Bool { !enrollmentEngaged && activityAllowed && settingsReadable && settings.host != nil && !busy && !streaming && !stream.isEngaged }
     let platform: HostPlatform
     var supportsFiles: Bool { platform == .windows }
     var platformName: String { platform.displayName }
@@ -80,9 +82,12 @@ final class DesktopModel: ObservableObject {
     let stream: DesktopStreamController
     let nearby = NearbyPCBrowser()
     weak var fileActivity: FilesModel?
-    var canChoosePC: Bool { !KnotUpdates.shared.installationPending && !shuttingDown && settingsReadable && !busy && !streaming && !stream.isEngaged && !peerEngaged && fileActivity?.enrollmentModalActive != true && fileActivity?.busy != true && fileActivity?.connected != true }
+    private var targetSelectionReady: Bool { settingsReadable && !busy && !streaming && !stream.isEngaged && !peerEngaged && fileActivity?.enrollmentModalActive != true && fileActivity?.busy != true && fileActivity?.connected != true }
+    var canChoosePC: Bool { activityAllowed && targetSelectionReady }
+    /// Only an already-admitted enrollment may finish its synchronous commit during Quit's drain.
+    var canCompleteFileSetup: Bool { !KnotUpdates.shared.installationPending && !shuttingDown && targetSelectionReady }
     var canVerifyCurrentPC: Bool {
-        guard !enrollmentEngaged, !KnotUpdates.shared.installationPending, !shuttingDown, settingsReadable, !busy, !streaming, !stream.isEngaged, !peerEngaged, fileActivity?.busy != true else { return false }
+        guard !enrollmentEngaged, activityAllowed, settingsReadable, !busy, !streaming, !stream.isEngaged, !peerEngaged, fileActivity?.busy != true else { return false }
         guard fileActivity?.connected == true else { return true }
         guard let checked = try? EndpointPolicy.validatedAddress(address) else { return false }
         return fileActivity?.isConnected(toValidatedAddress: checked) == true
@@ -157,8 +162,8 @@ final class DesktopModel: ObservableObject {
     }
     func perform(allowCleanup: Bool = false, _ body: @escaping @MainActor () async throws -> Void) {
         guard !shuttingDown else { return }
-        guard allowCleanup || !KnotUpdates.shared.installationPending else {
-            errorMessage = "업데이트 설치를 기다리고 있습니다. 연결을 마친 뒤 앱을 다시 여세요."; return
+        guard allowCleanup || activityAllowed else {
+            errorMessage = terminationAdmissionPaused ? "진행 중인 작업을 마치고 앱을 종료합니다. 새 연결과 설정을 시작하지 않습니다." : "업데이트 설치를 기다리고 있습니다. 연결을 마친 뒤 앱을 다시 여세요."; return
         }
         guard allowCleanup || !enrollmentEngaged else {
             errorMessage = "자동 파일 설정을 마치거나 취소한 뒤 화면 작업을 시작하세요."; return
@@ -176,6 +181,7 @@ final class DesktopModel: ObservableObject {
         }
     }
     func cancelOperation() { operation?.cancel(); pairingPIN = nil }
+    func setTerminationAdmissionPaused(_ paused: Bool) { terminationAdmissionPaused = paused }
     func beginShutdown() {
         shuttingDown = true
         nearby.stop(); cancelOperation()
@@ -206,12 +212,12 @@ final class DesktopModel: ObservableObject {
             case .gameStream: return "지원되는 Sunshine 호스트를 설치하고 다시 연결하세요."
             case .timedOut:
                 return platform == .windows
-                    ? "PIN 입력 시간이 지났습니다. Mac에서 PIN 연결을 다시 시작한 뒤 Windows Knot의 연결 준비 창에서 '요청 새로고침'을 누르고 요청한 Mac과 새 PIN을 승인하세요."
+                    ? "PIN 입력 시간이 지났습니다. Mac에서 새 PIN 연결을 시작하세요. Windows Knot의 연결 준비 창에서 요청 목록이 자동으로 갱신되면 요청한 Mac을 직접 선택하고 새 PIN을 승인하세요. 목록 확인이 실패한 경우에만 ‘연결 요청 다시 확인’을 누르세요."
                     : "PIN 입력 시간이 지났습니다. \(platform.displayName) 브라우저의 Sunshine PIN 페이지를 열고 PIN 연결을 다시 시작하세요."
             case .busy: return "Sunshine에서 다른 PIN 연결을 진행 중입니다. 해당 작업을 마친 뒤 다시 시도하세요."
             case .rejected:
                 return platform == .windows
-                    ? "Sunshine에서 PIN 연결을 승인하지 않았습니다. 올바른 Windows Knot의 연결 준비 창인지 확인하고 Mac에서 새 PIN으로 다시 시도하세요. Windows의 '요청 새로고침'에서 요청한 Mac을 선택해 승인하세요."
+                    ? "Sunshine에서 PIN 연결을 승인하지 않았습니다. 올바른 Windows Knot의 연결 준비 창인지 확인하고 Mac에서 새 PIN 연결을 시작하세요. 요청 목록이 자동으로 갱신되면 요청한 Mac을 직접 선택하고 새 PIN을 승인하세요. 목록 확인이 실패한 경우에만 ‘연결 요청 다시 확인’을 누르세요."
                     : "Sunshine에서 PIN 연결을 승인하지 않았습니다. 올바른 \(platform.displayName) 브라우저의 PIN 페이지인지 확인하고 새 PIN으로 다시 시도하세요."
             }
         }

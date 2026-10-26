@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <wchar.h>
 #include "NativeArguments.h"
+#include "NativeLaunchStatus.h"
 #include "NativePayload.h"
 
 #define DB_PATH_CAP 32768
@@ -386,9 +387,10 @@ static int db_append_number(wchar_t *out,size_t cap,size_t *used,uint64_t number
     while (count) if (!db_append(out,cap,used,digits[--count])) return 0;
     return 1;
 }
-static int db_run(const wchar_t *helper,const wchar_t *stage,const wchar_t *original,int argc,wchar_t **argv,int silent,int elevated,HANDLE token) {
+static db_launch_result db_run(const wchar_t *helper,const wchar_t *stage,const wchar_t *original,int argc,wchar_t **argv,int silent,int elevated,HANDLE token) {
     wchar_t *command=(wchar_t *)db_alloc(DB_COMMAND_CAP*sizeof(wchar_t)),*env=NULL;
-    size_t used=0; int i,exit_code=1; STARTUPINFOW startup; PROCESS_INFORMATION process; DWORD code=1;
+    size_t used=0; int i; STARTUPINFOW startup; PROCESS_INFORMATION process; DWORD code=0,wait_result;
+    db_launch_result result={DB_LAUNCH_PREPARE,0};
     ZeroMemory(&startup,sizeof(startup)); ZeroMemory(&process,sizeof(process)); startup.cb=sizeof(startup);
     if (!command || !db_quote(command,DB_COMMAND_CAP,&used,helper)) goto done;
     if (!argc) {
@@ -404,14 +406,24 @@ static int db_run(const wchar_t *helper,const wchar_t *stage,const wchar_t *orig
     } else for (i=0;i<argc;++i) if (!db_append(command,DB_COMMAND_CAP,&used,L' ') || !db_quote(command,DB_COMMAND_CAP,&used,argv[i])) goto done;
     env=db_clean_environment(elevated,token); if (!env) goto done;
     // Fixed protected/owned application and cwd; no inherited handles or ambient loader environment.
-    if (!CreateProcessW(helper,command,NULL,NULL,FALSE,CREATE_UNICODE_ENVIRONMENT|(silent?CREATE_NO_WINDOW:0),env,stage,&startup,&process)) goto done;
-    if (WaitForSingleObject(process.hProcess,INFINITE)==WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess,&code)) exit_code=(int)code;
+    if (!CreateProcessW(helper,command,NULL,NULL,FALSE,CREATE_UNICODE_ENVIRONMENT|(silent?CREATE_NO_WINDOW:0),env,stage,&startup,&process)) {
+        code=GetLastError(); result.stage=DB_LAUNCH_START_FAILED; result.code=code; goto done;
+    }
+    wait_result=WaitForSingleObject(process.hProcess,INFINITE);
+    if (wait_result==WAIT_FAILED) {
+        code=GetLastError(); result.stage=DB_LAUNCH_WAIT_FAILED; result.code=code;
+    } else if (wait_result!=WAIT_OBJECT_0) {
+        result.stage=DB_LAUNCH_WAIT_UNEXPECTED; result.code=wait_result;
+    } else if (!GetExitCodeProcess(process.hProcess,&code)) {
+        code=GetLastError(); result.stage=DB_LAUNCH_EXIT_QUERY_FAILED; result.code=code;
+    } else { result.stage=DB_LAUNCH_CHILD_EXIT; result.code=code; }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
-done: db_free(command); db_free(env); return exit_code;
+done: db_free(command); db_free(env); return result;
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,PWSTR command_line,int show) {
     wchar_t *image=NULL,*stage=NULL,*helper=NULL; wchar_t **argv=NULL; HANDLE token=NULL,extracted=INVALID_HANDLE_VALUE;
     int argc=0,exit_code=1,elevated=0,created_stage=0,locked_stage=0,silent=0,hardened=0,acknowledged=0; db_operation operation=DB_INVALID;
+    wchar_t launch_failure[DB_LAUNCH_MESSAGE_CAP]; db_launch_result launch_result;
     const wchar_t *failure=L"설정 도우미의 실행 환경을 확인하지 못했습니다. Windows 11 x64용 Knot 배포 파일인지, 실행 파일과 사용자 임시 폴더의 접근 권한이 올바른지 확인하세요. 실행 파일은 OneDrive·동기화·링크 폴더 밖의 로컬 폴더에 저장하세요. 임시 폴더 문제는 파일을 옮기는 것만으로 해결되지 않을 수 있습니다."; const BYTE *bytes=NULL; DWORD size=0,used=0;
     TOKEN_ELEVATION elevation; USHORT process_machine=0,native_machine=0; OSVERSIONINFOW version; db_locks locks={{0},0};
     (void)instance; (void)previous; (void)command_line; (void)show; db_heap=GetProcessHeap();
@@ -442,8 +454,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,PWSTR command_line,int
     used=GetModuleFileNameW(NULL,image,DB_PATH_CAP); if (!used || used>=DB_PATH_CAP || !db_lock_image_path(image,&locks) || !db_resource(&bytes,&size) || !db_make_stage(elevated,token,stage)) goto done;
     created_stage=1; if (!db_lock_directory_chain(stage,&locks)) goto done; locked_stage=1;
     extracted=db_extract(stage,bytes,size,helper); if (extracted==INVALID_HANDLE_VALUE) goto done;
-    failure=L"설정 작업을 완료하지 못했습니다. 표시된 오류를 확인하세요. 조직에서 AllSigned를 강제하면 별도로 서명한 스크립트나 조직이 승인한 수동 배포가 필요합니다.";
-    exit_code=db_run(helper,stage,image,argc-1,argv+1,silent,elevated,token);
+    launch_result=db_run(helper,stage,image,argc-1,argv+1,silent,elevated,token);
+    exit_code=db_launch_exit_code(launch_result);
+    if (db_launch_message(launch_failure,DB_LAUNCH_MESSAGE_CAP,launch_result)) failure=launch_failure;
 done:
     if (extracted!=INVALID_HANDLE_VALUE) CloseHandle(extracted);
     // Never recursively remove unknown files, links, sidecars or user content.

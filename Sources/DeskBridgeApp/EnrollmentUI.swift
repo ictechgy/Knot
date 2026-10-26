@@ -89,15 +89,6 @@ extension FilesModel {
               identityPath == identity, setupAddresses == addresses,
               desktopForSetup.address == expectedAddress else { throw EnrollmentProtocol.Failure.expired }
     }
-    func applyEnrollmentConfirmation(_ preview: SetupExchange.Preview, epoch: UUID, identity: String, addresses: String, publicKey: String) throws {
-        try requireEnrollmentConfirmation(epoch: epoch, identity: identity, addresses: addresses, expectedAddress: preview.reply.address)
-        guard try selectedPublicKey() == publicKey else { throw EnrollmentProtocol.Failure.peer }
-        // No await or modal callback occurs between this admission check and the
-        // complete settings transaction. The completion marker remains active.
-        busy = false
-        try requireSetupExchangeSelection(identityPath: identity, setupAddresses: addresses)
-        try applyWindowsConnection(preview)
-    }
     private func confirmEnrollment(_ preview: SetupExchange.Preview, epoch: UUID, identity: String, addresses: String, publicKey: String) throws {
         let alert = NSAlert(); alert.messageText = "Windows의 SSH 지문과 비교하세요"
         alert.informativeText = "Windows Knot 도우미에 표시된 SSH 지문이 아래 값과 같은지 직접 확인하세요. 화면 PIN과 별도로 파일 전송에 사용할 PC를 확인합니다.\n\nWindows PC: \(preview.reply.address)"
