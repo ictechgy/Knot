@@ -129,7 +129,7 @@ class SourceCheckoutChecks(unittest.TestCase):
         hooks.mkdir()
         sentinel = foreign / "hook-ran"
         hook = hooks / "reference-transaction"
-        hook.write_text("#!/bin/sh\nprintf called >> " + shlex.quote(sentinel.as_posix()) + "\nexit 99\n")
+        hook.write_bytes(("#!/bin/sh\nprintf called >> " + shlex.quote(sentinel.as_posix()) + "\nexit 99\n").encode("utf-8"))
         hook.chmod(0o755)
         config = foreign / "synthetic-global-config"
         subprocess.run(["git", "config", "--file", str(config), "core.hooksPath", str(hooks)],
