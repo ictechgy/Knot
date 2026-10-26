@@ -581,7 +581,10 @@ class OwnedHost:
             # A spawned supervisor is not a started host: require confirmation
             # of kernel containment and the direct child's successful exec.
             os.close(ready_writer); ready_writer = None
-            if not select.select([ready_reader], [], [], 5)[0] or os.read(ready_reader, 1) != b'R':
+            status = os.read(ready_reader, 1) if select.select([ready_reader], [], [], 5)[0] else b''
+            if status == b'C':
+                raise Failure('containment')
+            if status != b'R':
                 raise Failure('operation')
         except BaseException:
             if self.child is not None:

@@ -21,6 +21,7 @@ sys.path.insert(0, str(HOST))
 import containment
 from policy import Failure
 from runtime import OwnedHost
+import lifetime
 
 
 class FilterChecks(unittest.TestCase):
@@ -67,6 +68,42 @@ class FilterChecks(unittest.TestCase):
              patch('containment.ctypes.CDLL', return_value=library), self.assertRaises(containment.ContainmentUnavailable):
             containment.install_containment()
         self.assertEqual(library.prctl.call_count, 2)
+
+    def test_only_typed_preexec_refusal_reports_containment(self):
+        for failure in (containment.ContainmentUnavailable('synthetic refusal'), RuntimeError('synthetic unexpected error')):
+            with self.subTest(failure=type(failure).__name__):
+                # Exercise the actual preexec callback and Popen's error
+                # translation without forking or installing a filter on Mac.
+                def spawn(*_args, **kwargs):
+                    try: kwargs['preexec_fn']()
+                    except Exception: raise subprocess.SubprocessError('Exception occurred in preexec_fn.') from None
+                    raise AssertionError('Fixture must refuse before exec')
+                with patch('lifetime.os.pipe2', return_value=(101, 102), create=True), \
+                     patch('lifetime.os.close'), patch('lifetime.os.write') as write, \
+                     patch('lifetime.os.read', return_value=b'C' if isinstance(failure, containment.ContainmentUnavailable) else b''), \
+                     patch('lifetime.install_containment', side_effect=failure), \
+                     patch('lifetime.subprocess.Popen', side_effect=spawn):
+                    expected = containment.ContainmentUnavailable if isinstance(failure, containment.ContainmentUnavailable) else subprocess.SubprocessError
+                    with self.assertRaises(expected): lifetime.spawn_restricted(['/synthetic/inert-host'])
+                    if expected is containment.ContainmentUnavailable:
+                        write.assert_called_once_with(102, b'C')
+                    else:
+                        write.assert_not_called()
+
+    def test_exec_error_does_not_report_containment_refusal(self):
+        with patch('lifetime.os.pipe2', return_value=(101, 102), create=True), \
+             patch('lifetime.os.close'), patch('lifetime.os.write') as write, \
+             patch('lifetime.os.read') as read, \
+             patch('lifetime.subprocess.Popen', side_effect=FileNotFoundError('synthetic missing executable')):
+            with self.assertRaises(FileNotFoundError): lifetime.spawn_restricted(['/synthetic/missing-host'])
+        write.assert_not_called(); read.assert_not_called()
+
+    def test_containment_guidance_is_fixed_and_actionable(self):
+        guidance = str(Failure('containment'))
+        self.assertEqual(guidance, Failure.messages['containment'])
+        for term in ('Ubuntu 24.04 LTS amd64', 'seccomp', '관리자', '보안 제한을 해제하지 마세요'):
+            self.assertIn(term, guidance)
+        self.assertNotEqual(guidance, str(Failure('operation')))
 
 
 @unittest.skipUnless(sys.platform == 'linux' and platform.machine() == 'x86_64', 'Linux amd64 seccomp kernel fixtures')
@@ -185,8 +222,10 @@ from policy import Failure
 host=OwnedHost()
 try:
     host._spawn(sys.argv[2:],{'PATH':'/usr/bin:/bin'})
-except Failure:
+except Failure as error:
     assert host.child is None and host.lifetime_writer is None
+    assert error.key == 'containment'
+    assert str(error) == Failure.messages['containment'] and 'seccomp' in str(error)
 else:
     host.stop()
     raise SystemExit('Unrestricted fallback executed')
@@ -194,6 +233,14 @@ else:
         subprocess.run([str(self.fixture), 'forbid-install-exec', sys.executable, '-I', '-c', code,
                         str(HOST), str(self.fixture), 'hold', str(self.marker)], check=True, capture_output=True, timeout=5)
         self.assertFalse(self.marker.exists())
+
+    def test_native_exec_failure_remains_neutral_and_reaps_owner(self):
+        with self.assertRaises(Failure) as caught:
+            self.host._spawn([str(self.base / 'fresh-missing-executable')], {'PATH': '/usr/bin:/bin'})
+        self.assertEqual(caught.exception.key, 'operation')
+        self.assertEqual(str(caught.exception), Failure.messages['operation'])
+        self.assertIsNone(self.host.child)
+        self.assertIsNone(self.host.lifetime_writer)
 
 
 if __name__ == '__main__': unittest.main()

@@ -288,7 +288,7 @@ class HostChecks(unittest.TestCase):
         self.assertEqual(spawn.call_args.args[0][0], program)
 
     def test_spawn_requires_enforced_exec_confirmation_and_cleans_refusal(self):
-        for ready in (b'R', b'F', b'', None):
+        for ready in (b'R', b'C', b'F', b'?', b'', None):
             with self.subTest(ready=ready):
                 host, child = OwnedHost(), Mock(pid=12345)
                 def finish(): host.child = None
@@ -301,7 +301,9 @@ class HostChecks(unittest.TestCase):
                         self.assertIs(host.child, child); self.assertEqual(host.lifetime_writer, 102)
                         cleanup.assert_not_called()
                     else:
-                        with self.assertRaises(Failure): host._spawn(['/synthetic/inert-host'], {})
+                        with self.assertRaises(Failure) as caught: host._spawn(['/synthetic/inert-host'], {})
+                        self.assertEqual(caught.exception.key, 'containment' if ready == b'C' else 'operation')
+                        self.assertEqual(str(caught.exception), Failure.messages[caught.exception.key])
                         cleanup.assert_called_once()
                         self.assertIsNone(host.child); self.assertIsNone(host.lifetime_writer)
                         self.assertIn(unittest.mock.call(102), close.call_args_list)

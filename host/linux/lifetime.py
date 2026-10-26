@@ -12,7 +12,36 @@ import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from containment import install_containment
+from containment import ContainmentUnavailable, install_containment
+
+
+def spawn_restricted(argv):
+    """Distinguish an authored enforcement refusal from other startup errors."""
+    reader, writer = os.pipe2(os.O_CLOEXEC)
+    try:
+        def restrict():
+            try:
+                install_containment()
+            except ContainmentUnavailable:
+                os.write(writer, b'C')
+                raise
+            finally:
+                os.close(writer)
+        try:
+            return subprocess.Popen(argv, close_fds=True, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    pass_fds=(writer,), preexec_fn=restrict)
+        except subprocess.SubprocessError:
+            # Popen hides the preexec exception type. Only our child's explicit
+            # marker permits attributing this failure to containment. Ordinary
+            # exec errors and unexpected preexec errors keep the neutral status.
+            os.close(writer); writer = None
+            if os.read(reader, 1) == b'C':
+                raise ContainmentUnavailable('Kernel containment unavailable') from None
+            raise
+    finally:
+        os.close(reader)
+        if writer is not None: os.close(writer)
 
 
 def supervise(reader, ready, argv):
@@ -20,15 +49,14 @@ def supervise(reader, ready, argv):
     os.set_inheritable(ready, False)
     # Catch rather than ignore TERM: exec resets a caught disposition for the engine.
     signal.signal(signal.SIGTERM, lambda *_: None)
+    failure = b'F'
     try:
         if select.select([reader], [], [], 0)[0] and not os.read(reader, 1):
             return 1
         # This interpreter has no worker threads. Its direct child's preexec
         # function is safe here and Popen's exec-error pipe confirms that both
         # inherited enforcement and exec succeeded before acknowledging start.
-        child = subprocess.Popen(argv, close_fds=True, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 preexec_fn=install_containment)
+        child = spawn_restricted(argv)
         os.write(ready, b'R')
         os.close(ready)
         ready = None
@@ -37,9 +65,11 @@ def supervise(reader, ready, argv):
                 break
             if child.poll() is not None:
                 break
+    except ContainmentUnavailable:
+        failure = b'C'
     finally:
         if ready is not None:
-            try: os.write(ready, b'F')
+            try: os.write(ready, failure)
             except OSError: pass
             os.close(ready)
         # Enforcement forbids new processes and group/session/namespace moves.

@@ -49,6 +49,8 @@ assert "var recovery = DesktopRecoveryPresentation()" not in block(
     sources["controller"], "func open(")
 timer = block(sources["controller"], "private func refreshAudioNoticeTimer(")
 assert "Task.sleep(for: .seconds(8))" in timer
+recovery_getters = "\n".join(block(sources["controller"], signature) for signature in [
+    "private var recoveryMessage:", "private var recoveryStatus:"])
 
 types = (ENGINE / "Models/Types.swift").read_text()
 connection = (ENGINE / "Session/StreamConnection.swift").read_text()
@@ -135,12 +137,16 @@ public actor StreamSession {
 // Exact production timer; the view and outer window/network owner are inert.
 @MainActor final class DesktopStreamController {
     var recovery = DesktopRecoveryPresentation()
+    var inputBlocked = false
+    __RECOVERY_GETTERS__
+    var visibleMessage: String? { recoveryMessage }
+    var visibleStatus: String { recoveryStatus }
     var audioNoticeTask: Task<Void, Never>?
     var timedAudioNotice: UUID?
     var generation = UUID()
     var view: View? = View()
     func receive(_ event: StreamEvent) {
-        recovery.receive(event); view?.showRecovery(recovery.message)
+        recovery.receive(event); view?.showRecovery(recoveryMessage)
         refreshAudioNoticeTimer(epoch: generation)
     }
     func syntheticStop() {
@@ -187,6 +193,28 @@ public actor StreamSession {
         }
         let liveTask = live.audioNoticeTask!, stalledTask = stalled.audioNoticeTask!
         let stoppedTask = stopped.audioNoticeTask!, replacedTask = replaced.audioNoticeTask!
+        let inputRecovery = DesktopStreamController()
+        inputRecovery.receive(.firstFrame); inputRecovery.receive(.audioFailed("synthetic audio and input backpressure"))
+        let inputAudioTask = inputRecovery.audioNoticeTask!
+        inputRecovery.inputBlocked = true
+        inputRecovery.receive(.waitingForVideo(false))
+        let inputMessage = inputRecovery.visibleMessage, inputStatus = inputRecovery.visibleStatus
+        try expect(inputMessage != nil && inputMessage != inputRecovery.recovery.message &&
+                   inputRecovery.view?.messages.last! == inputMessage && inputStatus != inputRecovery.recovery.status,
+                   "input recovery did not supersede the live audio notice and status")
+        inputRecovery.receive(.waitingForVideo(true))
+        try expect(inputRecovery.visibleMessage == inputRecovery.recovery.message &&
+                   inputRecovery.visibleStatus == inputRecovery.recovery.status && inputRecovery.visibleMessage != inputMessage,
+                   "input recovery masked an active video wait")
+        inputRecovery.receive(.reconnecting)
+        try expect(inputRecovery.visibleMessage == inputRecovery.recovery.message &&
+                   inputRecovery.visibleStatus == inputRecovery.recovery.status && inputRecovery.visibleMessage != inputMessage,
+                   "input recovery masked transport recovery")
+        // The reconnect cancels the old audio notice. Start a fresh live notice
+        // while input remains latched; the real timer must not clear its card.
+        await inputAudioTask.value
+        inputRecovery.receive(.firstFrame); inputRecovery.receive(.audioFailed("fresh live audio notice"))
+        let latchedAudioTask = inputRecovery.audioNoticeTask!
         stalled.receive(.waitingForVideo(true))
         stopped.syntheticStop()
         // A replacement session must not be touched even if an old task was not cancelled.
@@ -206,6 +234,7 @@ public actor StreamSession {
                    "cancelled prior-attempt task dismissed new audio notice")
         reconnect.syntheticStop()
         await liveTask.value; await stalledTask.value; await stoppedTask.value; await replacedTask.value
+        await latchedAudioTask.value
         try expect(live.recovery.message == nil && live.recovery.status.contains("오디오를 사용할 수 없습니다"),
                    "unchanged production timer did not expire visible audio notice")
         for _ in 0..<5 {
@@ -215,6 +244,17 @@ public actor StreamSession {
         }
         try expect(stalled.recovery.phase == .waiting && stalled.recovery.message?.contains("영상을 기다리는") == true,
                    "audio timer hid active video wait")
+        try expect(stalled.view?.messages.last! == stalled.recovery.message,
+                   "audio expiry replaced the visible video wait card")
+        try expect(inputRecovery.recovery.audioNoticeID == nil && inputRecovery.recovery.message == nil &&
+                   inputRecovery.visibleMessage == inputMessage && inputRecovery.view?.messages.last! == inputMessage &&
+                   inputRecovery.visibleStatus == inputStatus,
+                   "audio notice expiry cleared or changed the latched input recovery card")
+        inputRecovery.inputBlocked = false
+        inputRecovery.receive(.waitingForVideo(false))
+        try expect(inputRecovery.visibleMessage == nil && inputRecovery.view?.messages.last! == nil &&
+                   inputRecovery.visibleStatus == inputRecovery.recovery.status,
+                   "input recovery did not return to the expired audio presentation after focus recovery")
         try expect(stopped.view?.messages.last! == nil && stopped.recovery.phase == .ended,
                    "cancelled stop task restored a stale card")
         try expect(replaced.recovery.audioNoticeID == replacementID && replaced.recovery.message != nil,
@@ -231,6 +271,7 @@ for marker, value in {
     "__PRESENTATION_CHECKS__": presentation_checks,
     "__POWER__": power,
     "__TIMER__": timer,
+    "__RECOVERY_GETTERS__": recovery_getters,
     "__STARTUP_POWER_SEQUENCE__": "beginPowerAssertion()\n        refreshPowerAssertion()",
 }.items():
     fixture = fixture.replace(marker, value)
