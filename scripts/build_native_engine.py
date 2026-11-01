@@ -89,8 +89,17 @@ class Builder:
                      "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
                      "synthetic-codec.json", "synthetic-codec-4k.json"]:
             (self.output / name).unlink(missing_ok=True)
+        # These directories contain owned per-step success records too. Refuse
+        # links/files rather than following them or deleting an external target.
+        owned_directories = [self.output / name for name in ["evidence", "visuals"]]
+        for directory in owned_directories:
+            if directory.is_symlink() or directory.exists() and not directory.is_dir():
+                raise ValueError("Linked or non-directory native evidence output is unsupported")
+        for directory in owned_directories:
+            if directory.exists():
+                shutil.rmtree(directory)
         self.evidence = self.output / "evidence"
-        self.evidence.mkdir(exist_ok=True)
+        self.evidence.mkdir()
         self.commands = []
         self.sources = source_snapshot(ROOT)
         validate_corresponding_source(ROOT, self.sources)

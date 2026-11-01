@@ -173,6 +173,11 @@ class NativeRebuildTests(unittest.TestCase):
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
+        nested = [self.output / "visuals/visual-checks.json", self.output / "evidence/invocations.json",
+                  self.output / "evidence/native-host-checks.stdout"]
+        for record in nested:
+            record.parent.mkdir(exist_ok=True)
+            record.write_text('{"status":"passed","scope":"INERT previous run"}')
         path = self.root / "native-engine/windows/uncommitted.cs"
         path.write_text("Fresh changed fixture\n")
         with self.assertRaises(ValueError):
@@ -185,6 +190,8 @@ class NativeRebuildTests(unittest.TestCase):
                      "synthetic-codec.json", "synthetic-codec-4k.json"]:
             self.assertFalse((self.output / name).exists(), name)
         self.assertTrue((self.output / "native-test-public.cer").is_file())
+        for record in nested:
+            self.assertFalse(record.exists(), str(record))
 
     def test_exported_public_pin_must_match_its_certificate(self):
         with self.assertRaisesRegex(ValueError, "pin differs from exported public DER"):
@@ -242,9 +249,10 @@ class NativeRebuildTests(unittest.TestCase):
 
     def test_mac_secondary_validator_rejects_a_shown_window_claim(self):
         self.build_with_inert_tools(invalid_visual="shown-synthetic")
-        builder = native.Builder("macos", self.output)
         report_path = self.output / "visuals/visual-checks.json"
         report = json.loads(report_path.read_text())
+        builder = native.Builder("macos", self.output)
+        report_path.parent.mkdir()
         report["images"] = []
         for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
@@ -257,3 +265,24 @@ class NativeRebuildTests(unittest.TestCase):
         report["syntheticWindowsShown"] = False
         report_path.write_text(json.dumps(report))
         self.assertTrue(builder.record_visual_checks(self.output / "visuals", []).is_file())
+
+    def test_rebuild_refuses_unsafe_owned_evidence_directory(self):
+        self.build_with_inert_tools()
+        evidence = self.output / "evidence"
+        import shutil
+        shutil.rmtree(evidence)
+        with tempfile.TemporaryDirectory(prefix="knot-native-foreign-inert-") as temporary:
+            foreign = Path(temporary)
+            sentinel = foreign / "synthetic-sentinel.txt"
+            sentinel.write_text("Fresh foreign fixture must survive")
+            try:
+                evidence.symlink_to(foreign, target_is_directory=True)
+            except OSError:
+                # Some Windows accounts cannot create directory symlinks. The
+                # ordinary-file branch must still reject a non-directory owner.
+                evidence.write_text("Fresh non-directory fixture")
+            with self.assertRaisesRegex(ValueError, "Linked or non-directory native evidence"):
+                native.Builder("windows", self.output)
+            self.assertEqual(sentinel.read_text(), "Fresh foreign fixture must survive")
+            self.assertTrue(evidence.is_symlink() or evidence.is_file())
+            self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
