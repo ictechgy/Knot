@@ -82,3 +82,15 @@ private func drain(_ queue: inout InputBuffer) -> [Packet] {
     #expect(opposite?.0 == 65535 && opposite?.1 == 65535)
     #expect(Input.point(x: .nan, y: 0, viewWidth: 100, viewHeight: 100, imageWidth: 200, imageHeight: 100, clamp: true) == nil)
 }
+
+@Test func immersiveFourKCoordinatesUseTheEntireEqualAspectCanvas() {
+    for (width, height) in [(3840.0, 2160.0), (1920.0, 1080.0)] {
+        let first = Input.point(x: 0, y: 0, viewWidth: width, viewHeight: height, imageWidth: 3840, imageHeight: 2160)
+        let last = Input.point(x: width, y: height, viewWidth: width, viewHeight: height, imageWidth: 3840, imageHeight: 2160)
+        let center = Input.point(x: width / 2, y: height / 2, viewWidth: width, viewHeight: height, imageWidth: 3840, imageHeight: 2160)
+        #expect(first?.0 == 0 && first?.1 == 0)
+        #expect(last?.0 == 65535 && last?.1 == 65535)
+        #expect(center?.0 == 32768 && center?.1 == 32768)
+    }
+    #expect(Input.point(x: 1920, y: 0, viewWidth: 3840, viewHeight: 2400, imageWidth: 3840, imageHeight: 2160) == nil)
+}

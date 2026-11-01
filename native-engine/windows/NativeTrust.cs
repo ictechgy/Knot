@@ -108,18 +108,21 @@ namespace Knot.NativePreview
         private readonly object gate = new object();
         private readonly byte[] token = new byte[32];
         private readonly long created;
+        private readonly int lifetimeMilliseconds;
         private readonly Func<long> clock;
         private bool claimed, revoked;
         internal Invitation() : this(Stopwatch.GetTimestamp) { }
-        internal Invitation(Func<long> clock)
+        internal Invitation(Func<long> clock) : this(clock, 120000) { }
+        internal Invitation(Func<long> clock, int lifetimeMilliseconds)
         {
-            this.clock = clock; created = clock();
+            if (clock == null || lifetimeMilliseconds < 1 || lifetimeMilliseconds > 120000) throw new ArgumentException("Invalid invitation lifetime.");
+            this.clock = clock; this.lifetimeMilliseconds = lifetimeMilliseconds; created = clock();
             using (RandomNumberGenerator random = RandomNumberGenerator.Create()) random.GetBytes(token);
         }
-        internal bool IsExpired { get { lock (gate) return clock() - created >= 120L * Stopwatch.Frequency; } }
+        internal bool IsExpired { get { return RemainingMilliseconds <= 0; } }
         internal int RemainingMilliseconds
         {
-            get { lock (gate) return (int)Math.Max(0, Math.Min(120000, 120000 - (clock() - created) * 1000.0 / Stopwatch.Frequency)); }
+            get { lock (gate) { long now = clock(); return now < created ? 0 : (int)Math.Max(0, Math.Min(lifetimeMilliseconds, lifetimeMilliseconds - ((double)now - created) * 1000.0 / Stopwatch.Frequency)); } }
         }
         internal string Encode(IPAddress address, int port, string pin)
         {

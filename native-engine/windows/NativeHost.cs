@@ -19,6 +19,13 @@ namespace Knot.NativePreview
         private readonly IInputSink inputSink;
         private readonly RunCertificate certificate;
         private readonly Invitation invitation;
+        private readonly bool enrollmentMode;
+        private readonly Func<long> clock;
+        private readonly EnrollmentServer enrollment;
+        private Invitation enrollmentInvitation;
+        private int enrollmentGrantsIssued;
+        private string enrollmentName;
+        private IPAddress enrollmentPeer;
         private readonly ManualResetEvent approval = new ManualResetEvent(false);
         private readonly ManualResetEvent stopped = new ManualResetEvent(false);
         private readonly ManualResetEvent workerDone = new ManualResetEvent(false);
@@ -34,41 +41,107 @@ namespace Knot.NativePreview
         internal readonly RunIdentity Identity;
         internal Action<string> StatusChanged;
         internal Action<ApprovalMetadata> ApprovalRequested;
+        internal Action<ApprovalMetadata> ClaimAccepted;
         internal Action Finished;
         internal int Port { get { return port; } }
         internal string Pin { get { return Identity.Pin; } }
         internal string OwnedKeyContainerName { get { return certificate.OwnedKeyContainerName; } }
         internal bool IsActive { get { lock (gate) return active; } }
+        internal bool UsesEnrollment { get { return enrollmentMode; } }
+        internal string EnrollmentCode { get { return enrollment == null ? "" : enrollment.Code; } }
+        internal int EnrollmentPort { get { return enrollment == null ? 0 : enrollment.Port; } }
+        internal int DiscoveryPort { get { return enrollment == null ? 0 : enrollment.DiscoveryPort; } }
+        internal int EnrollmentGrantsIssued { get { lock (gate) return enrollmentGrantsIssued; } }
+        internal int EnrollmentAttempts { get { return enrollment == null ? 0 : enrollment.Slot.Attempts; } }
+        internal bool EnrollmentBusy { get { return enrollment != null && enrollment.Slot.Busy; } }
+        internal bool EnrollmentReady { get { lock (gate) return enrollmentMode && !isStopped && enrollmentInvitation != null; } }
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback, Invitation invitation)
+            : this(address, port, mediaFactory, inputSink, syntheticLoopback, invitation, false, Stopwatch.GetTimestamp, null) { }
+        internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback,
+                            Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
             this.address = address; this.syntheticLoopback = syntheticLoopback;
+            this.enrollmentMode = enrollmentMode; this.clock = clock ?? new Func<long>(Stopwatch.GetTimestamp);
             this.mediaFactory = mediaFactory; this.inputSink = inputSink;
-            this.invitation = invitation ?? new Invitation();
+            this.invitation = invitation ?? new Invitation(this.clock);
             certificate = new RunCertificate();
             Identity = new RunIdentity(certificate.Pin);
             listener = new TcpListener(address, port);
-            try { listener.Start(1); }
-            catch { certificate.Dispose(); throw; }
-            this.port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            try
+            {
+                listener.Start(1);
+                this.port = ((IPEndPoint)listener.LocalEndpoint).Port;
+                if (enrollmentMode)
+                {
+                    string name = deviceName ?? Environment.MachineName;
+                    try { EnrollmentProtocol.ValidName(name); } catch (ProtocolException) { name = "Windows PC"; }
+                    enrollment = new EnrollmentServer(address, name, syntheticLoopback, this.clock,
+                        IssueEnrollmentGrant, delegate { Notify("연결번호가 만료됐거나 사용할 수 없어요. 새 번호로 다시 공유해주세요."); Stop(); }, Notify);
+                }
+            }
+            catch { try { listener.Stop(); } catch { } certificate.Dispose(); throw; }
             worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot native media writer";
             worker.SetApartmentState(ApartmentState.MTA);
         }
-        internal void Start() { worker.Start(); }
+        internal void Start() { if (enrollment != null) enrollment.Start(); worker.Start(); }
         internal string GetInvitation()
         {
             lock (gate)
             {
-                if (isStopped || isClaimed) throw new ProtocolException("expired");
+                if (enrollmentMode || isStopped || isClaimed) throw new ProtocolException("expired");
                 return invitation.Encode(address, Port, Pin);
+            }
+        }
+        private EnrollmentGrant IssueEnrollmentGrant(byte[] slot, string name, IPAddress peer)
+        {
+            EnrollmentGrant result;
+            lock (gate)
+            {
+                if (!enrollmentMode || isStopped || isClaimed || enrollmentInvitation != null || enrollment == null ||
+                    enrollment.Slot.IsConsumed || !enrollment.Slot.Busy || enrollment.Slot.LifetimeRemainingMilliseconds <= 0 ||
+                    !NativeProtocol.Equal(slot, enrollment.Slot.Id)) throw new ProtocolException("expired");
+                EnrollmentProtocol.ValidName(name);
+                if (!(NativeProtocol.IsPrivate(peer) || syntheticLoopback && IPAddress.IsLoopback(peer))) throw new ProtocolException("auth");
+                // Consume and mint while Stop is excluded by this run's gate.
+                // The caller has already authenticated and validated ClientConfirm.
+                enrollment.Slot.Confirm();
+                Invitation grant = new Invitation(clock, 30000);
+                try
+                {
+                    string encoded = grant.Encode(address, Port, Pin);
+                    byte[] grantId = EnrollmentProtocol.Random(16);
+                    int remaining = grant.RemainingMilliseconds;
+                    if (remaining < 1) throw new ProtocolException("expired");
+                    result = new EnrollmentGrant(slot, grantId, encoded, remaining);
+                    // A new capability, never the fallback T1, owns this one pregrant.
+                    invitation.Revoke(); enrollmentInvitation = grant; enrollmentName = name; enrollmentPeer = peer;
+                    ++enrollmentGrantsIssued;
+                }
+                catch { grant.Revoke(); throw; }
+            }
+            Notify("연결번호를 확인했어요. Mac의 화면 연결을 준비하고 있어요.");
+            return result;
+        }
+        private Invitation ClaimInvitation
+        { get { lock (gate) return enrollmentMode ? enrollmentInvitation : invitation; } }
+        private bool CredentialsExpired
+        {
+            get
+            {
+                lock (gate)
+                {
+                    if (!enrollmentMode) return invitation.IsExpired;
+                    return enrollmentInvitation == null ? enrollment.Slot.LifetimeRemainingMilliseconds <= 0 : enrollmentInvitation.IsExpired;
+                }
             }
         }
         internal void RespondToApproval(bool allow)
         {
             lock (gate)
             {
-                if (isStopped || !isClaimed || approval.WaitOne(0)) return;
+                if (enrollmentMode || isStopped || !isClaimed || approval.WaitOne(0)) return;
                 approved = allow; approval.Set();
             }
         }
@@ -81,10 +154,10 @@ namespace Knot.NativePreview
             Timer watchdog = null;
             try
             {
-                Notify("Invitation ready. Expires in 120 seconds. Waiting for a viewer.");
+                Notify(enrollmentMode ? "Mac에서 이 PC를 선택하고 8자리 연결번호를 입력해주세요. 이 번호로 한 번의 화면·입력 연결을 허용해요." : "Invitation ready. Expires in 120 seconds. Waiting for a viewer.");
                 while (!Stopping)
                 {
-                    if (invitation.IsExpired) throw new ProtocolException("expired");
+                    if (CredentialsExpired) throw new ProtocolException("expired");
                     if (!listener.Pending()) { if (stopped.WaitOne(50)) return; continue; }
                     TcpClient accepted = listener.AcceptTcpClient();
                     IPAddress remote = ((IPEndPoint)accepted.Client.RemoteEndPoint).Address;
@@ -93,10 +166,15 @@ namespace Knot.NativePreview
                     SslStream tls = stream;
                     // A claim consumes this run's invitation even if approval is denied.
                     listener.Stop();
-                    Notify("Viewer is waiting for your approval. No capture or input has started.");
-                    Action<ApprovalMetadata> request = ApprovalRequested;
-                    if (request != null) request(approvalMetadata);
-                    WaitForApproval(tls);
+                    Action<ApprovalMetadata> acceptedClaim = ClaimAccepted;
+                    if (acceptedClaim != null) acceptedClaim(approvalMetadata);
+                    if (!enrollmentMode)
+                    {
+                        Notify("Viewer is waiting for your approval. No capture or input has started.");
+                        Action<ApprovalMetadata> request = ApprovalRequested;
+                        if (request != null) request(approvalMetadata);
+                        WaitForApproval(tls);
+                    }
                     lock (gate) { if (isStopped) return; if (!approved) throw new ProtocolException("declined"); }
                     NativeProtocol.Write(tls, 4, new byte[0]);
                     Notify("Approved. Initializing the primary SDR display and hardware encoder.");
@@ -160,9 +238,13 @@ namespace Knot.NativePreview
                 try { if (media != null) media.Dispose(); }
                 finally
                 {
-                    certificate.Dispose();
-                    workerDone.Set();
-                    Action finished = Finished; if (finished != null) finished();
+                    try { if (enrollment != null) enrollment.Dispose(); }
+                    finally
+                    {
+                        certificate.Dispose();
+                        workerDone.Set();
+                        Action finished = Finished; if (finished != null) finished();
+                    }
                 }
             }
         }
@@ -205,7 +287,9 @@ namespace Knot.NativePreview
                 // fan-out, and min(10 seconds, remaining invitation TTL) for all TLS
                 // and hello bytes. Repeated private peers can occupy this bounded
                 // window; this is an availability watch, never an approval/trust bypass.
-                int milliseconds = Math.Max(1, Math.Min(10000, invitation.RemainingMilliseconds));
+                Invitation claimInvitation = ClaimInvitation;
+                if (claimInvitation == null) throw new ProtocolException("auth");
+                int milliseconds = Math.Max(1, Math.Min(10000, claimInvitation.RemainingMilliseconds));
                 using (Timer budget = new Timer(delegate { try { accepted.Close(); } catch { } }, null, milliseconds, Timeout.Infinite))
                 {
                     tls.ReadTimeout = 10000; tls.WriteTimeout = 10000;
@@ -213,13 +297,22 @@ namespace Knot.NativePreview
                     Packet hello = NativeProtocol.ReadClient(tls, true);
                     byte[] candidate;
                     string name = NativeProtocol.HelloName(hello.Payload, out candidate);
-                    try { invitation.Claim(candidate); }
+                    try
+                    {
+                        lock (gate)
+                        {
+                            if (isStopped || enrollmentMode && (!object.ReferenceEquals(claimInvitation, enrollmentInvitation) ||
+                                name != enrollmentName || !observedRemote.Equals(enrollmentPeer))) throw new ProtocolException("auth");
+                            claimInvitation.Claim(candidate);
+                        }
+                    }
                     finally { Array.Clear(candidate, 0, candidate.Length); }
                     lock (gate)
                     {
                         if (isStopped) return false;
                         isClaimed = true; peerName = name; claimed = true;
                         approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
+                        if (enrollmentMode) { approved = true; approval.Set(); }
                     }
                 }
                 return true;
@@ -242,7 +335,7 @@ namespace Knot.NativePreview
                     }
                 }
             }
-            if (invitation.IsExpired) throw new ProtocolException("expired");
+            if (CredentialsExpired) throw new ProtocolException("expired");
             return false;
         }
         private void ReadInput()
@@ -294,9 +387,11 @@ namespace Knot.NativePreview
                 if (isStopped) return;
                 isStopped = true; active = false;
                 invitation.Revoke(); stopped.Set(); approval.Set();
+                if (enrollmentInvitation != null) enrollmentInvitation.Revoke();
                 ownedInput = input; ownedClient = client;
             }
             try { listener.Stop(); } catch { }
+            if (enrollment != null) enrollment.Stop();
             // Closing the socket interrupts TLS reads/writes and their bounded budgets.
             try { if (ownedClient != null) ownedClient.Close(); } catch { }
             if (ownedInput != null) ownedInput.Close();
@@ -307,7 +402,7 @@ namespace Knot.NativePreview
             Stop();
             bool ended;
             if (worker.ThreadState == System.Threading.ThreadState.Unstarted || (worker.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
-            { certificate.Dispose(); workerDone.Set(); ended = true; }
+            { if (enrollment != null) enrollment.Dispose(); certificate.Dispose(); workerDone.Set(); ended = true; }
             else ended = worker != Thread.CurrentThread && worker.Join(2000);
             if (ended)
             {

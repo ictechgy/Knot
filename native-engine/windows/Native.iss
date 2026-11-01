@@ -41,8 +41,10 @@ RestartApplications=no
 [Files]
 Source: "{#NativeOutput}\Knot-Native-Preview.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#NativeOutput}\KnotNativeMedia.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#NativeOutput}\KnotNativePairing.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#NativeOutput}\AppIcon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\pairing\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{group}\Knot Native Preview"; Filename: "{app}\Knot-Native-Preview.exe"; IconFilename: "{app}\AppIcon.ico"
 [Run]

@@ -18,10 +18,14 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     var onFailure: (() -> Void)?
     private var observers: [NSObjectProtocol] = []
     private var heldModifiers: Set<UInt16> = []
+    private var localModifiers = KeyboardModifierState()
     private var physicalKeys = PhysicalKeyOwnership()
     private var heldButtons: Set<UInt8> = []
     private var candidateAnchor = CGPoint(x: 24, y: 40)
     private var marked = NSAttributedString(string: "")
+    private var textAuthorization = TextCommitAuthorization()
+    private var discardingComposition = false
+    private var interpretingEvent: NSEvent?
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
     override init(frame: NSRect) {
@@ -45,12 +49,12 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }; observers = []
-        guard let window else { return }
+        guard let window else { model?.releaseInput(); return }
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.acceptsMouseMovedEvents = true
-        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in Task { @MainActor in self?.model?.releaseInput() } })
-        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in Task { @MainActor in self?.model?.disconnect() } })
-        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.model?.releaseInput() } })
+        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.releaseInput() } })
+        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.disconnect() } })
+        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.releaseInput() } })
     }
     func display(_ image: CVPixelBuffer) -> PresentationResult {
         let renderer = video.sampleBufferRenderer
@@ -64,8 +68,24 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         renderer.enqueue(sample)
         return renderer.status == .failed ? .failed : .presented
     }
-    func clear() { video.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil); marked = NSAttributedString(string: "") }
-    func forgetHeldKeys() { heldModifiers.removeAll(); physicalKeys.reset(); heldButtons.removeAll(); marked = NSAttributedString(string: "") }
+    func clear() { video.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil); cancelComposition() }
+    func forgetHeldKeys() {
+        heldModifiers.removeAll(); localModifiers.reset(); physicalKeys.reset(); heldButtons.removeAll()
+        cancelComposition()
+    }
+    private func cancelComposition() {
+        textAuthorization.revoke(); marked = NSAttributedString(string: "")
+        guard !discardingComposition else { return }
+        discardingComposition = true
+        inputContext?.discardMarkedText()
+        discardingComposition = false
+    }
+    private var focusedForInput: Bool {
+        window?.isKeyWindow == true && window?.firstResponder === self && NSApp.isActive
+    }
+    private var acceptsInput: Bool {
+        focusedForInput && model?.phase == .streaming && model?.inputRecovery == false
+    }
     override func resignFirstResponder() -> Bool { model?.releaseInput(); return super.resignFirstResponder() }
     private func pointer(_ event: NSEvent, action: UInt8) {
         let p = convert(event.locationInWindow, from: nil)
@@ -98,15 +118,28 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         if let packet = Input.scroll(vertical: event.scrollingDeltaY, horizontal: event.scrollingDeltaX, precise: event.hasPreciseScrollingDeltas) { model?.send(packet) }
     }
     override func keyDown(with event: NSEvent) {
-        // No event tap/global hook. Control-arrow remains a native macOS Space action.
-        if event.modifierFlags.contains(.control), [123,124,125,126].contains(event.keyCode) { model?.releaseInput(); super.keyDown(with: event); return }
-        if !physicalKeys.routesDown(event.keyCode, textMode: model?.textMode == true, shortcutModifier: !event.modifierFlags.intersection([.control, .command]).isEmpty), model?.textMode == true {
-            interpretKeyEvents([event]); return
+        let route = MacKeyboardRouting.route(keyCode: event.keyCode, modifiers: Self.modifiers(event.modifierFlags),
+            textMode: model?.textMode == true, hasMarkedText: hasMarkedText(), ownsPhysicalDown: physicalKeys.owns(event.keyCode))
+        switch route {
+        case .localCapsLock: return
+        case .localSpace:
+            model?.releaseInput(); super.keyDown(with: event)
+        case .interpretText:
+            guard acceptsInput, let revision = model?.inputRevision else { return }
+            synchronizeModifiers(event.modifierFlags, physicalCommand: false)
+            textAuthorization.begin(epoch: revision); interpretingEvent = event
+            interpretKeyEvents([event])
+            interpretingEvent = nil; textAuthorization.end()
+        case .physical:
+            guard acceptsInput else { return }
+            synchronizeModifiers(event.modifierFlags, physicalCommand: true)
+            physical(event, down: true)
         }
-        physical(event, down: true)
     }
     override func keyUp(with event: NSEvent) {
+        // Matching release follows ownership even after modifier/mode changes.
         physical(event, down: false)
+        if acceptsInput { synchronizeModifiers(event.modifierFlags, physicalCommand: false) }
     }
     private func physical(_ event: NSEvent, down: Bool) {
         guard let mapping = WindowsScanCodes.map[event.keyCode], let packet = try? Input.key(down: down, scan: mapping.0, extended: mapping.1) else { return }
@@ -115,24 +148,50 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         if model?.send(packet) != true, down { _ = physicalKeys.release(event.keyCode) }
     }
     override func flagsChanged(with event: NSEvent) {
-        if event.keyCode == 57 {
-            if model?.textMode == true { return }
-            for down in [true, false] { if let packet = try? Input.key(down: down, scan: 0x3a, extended: false) { model?.send(packet) } }; return
+        // macOS owns both short language-switch and long capitals Caps Lock.
+        guard event.keyCode != 57 else {
+            if !acceptsInput || inputContext?.handleEvent(event) != true { super.flagsChanged(with: event) }
+            return
         }
-        if model?.textMode == true, [56,60,58,61].contains(event.keyCode) { return }
-        guard let flag = ScanCodes.modifiers[event.keyCode], WindowsScanCodes.map[event.keyCode] != nil else { return }
-        let down = event.modifierFlags.contains(flag) && !heldModifiers.contains(event.keyCode)
-        if down { heldModifiers.insert(event.keyCode) } else { heldModifiers.remove(event.keyCode) }
-        physical(event, down: down)
+        localModifiers.observe(keyCode: event.keyCode, flags: Self.modifiers(event.modifierFlags))
+        guard acceptsInput else { return }
+        synchronizeModifiers(event.modifierFlags, physicalCommand: physicalKeys.count > heldModifiers.count)
+    }
+    private static func modifiers(_ flags: NSEvent.ModifierFlags) -> KeyboardModifiers {
+        var value: KeyboardModifiers = []
+        if flags.contains(.shift) { value.insert(.shift) }
+        if flags.contains(.control) { value.insert(.control) }
+        if flags.contains(.option) { value.insert(.option) }
+        if flags.contains(.command) { value.insert(.command) }
+        return value
+    }
+    private func synchronizeModifiers(_ flags: NSEvent.ModifierFlags, physicalCommand: Bool) {
+        let desired = localModifiers.desired(flags: Self.modifiers(flags), textMode: model?.textMode == true, physicalCommand: physicalCommand)
+        for code in heldModifiers.subtracting(desired).sorted() {
+            guard let mapping = WindowsScanCodes.map[code] else { continue }
+            _ = physicalKeys.release(code); heldModifiers.remove(code)
+            if let packet = try? Input.key(down: false, scan: mapping.0, extended: mapping.1) { model?.send(packet) }
+        }
+        for code in desired.subtracting(heldModifiers).sorted() {
+            guard let mapping = WindowsScanCodes.map[code], let packet = try? Input.key(down: true, scan: mapping.0, extended: mapping.1) else { continue }
+            if model?.send(packet) == true { physicalKeys.press(code); heldModifiers.insert(code) }
+        }
     }
     func insertText(_ string: Any, replacementRange: NSRange) {
+        guard let model, textAuthorization.allows(epoch: model.inputRevision, focused: focusedForInput,
+              streaming: model.phase == .streaming, recovery: model.inputRecovery) else { return }
         let text = (string as? NSAttributedString)?.string ?? (string as? String ?? "")
         marked = NSAttributedString(string: "")
-        if let packet = try? Input.text(text) { model?.send(packet) }
+        if let packet = try? Input.text(text) { model.send(packet) }
+        textAuthorization.committed()
     }
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        guard let model, !discardingComposition,
+              textAuthorization.allows(epoch: model.inputRevision, focused: focusedForInput,
+                streaming: model.phase == .streaming, recovery: model.inputRecovery) else { return }
         let text = (string as? NSAttributedString)?.string ?? (string as? String ?? "")
-        guard text.utf8.count <= 4096 else { unmarkText(); return }; marked = NSAttributedString(string: text)
+        guard text.utf8.count <= 4096 else { cancelComposition(); return }
+        marked = NSAttributedString(string: text); textAuthorization.mark()
     }
     func unmarkText() { marked = NSAttributedString(string: "") }
     func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
@@ -149,22 +208,14 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     }
     func characterIndex(for point: NSPoint) -> Int { 0 }
     override func doCommand(by selector: Selector) {
-        let key: (UInt16,Bool)?
-        switch NSStringFromSelector(selector) {
-        case "insertNewline:": key = (0x1c, false)
-        case "insertTab:": key = (0x0f, false)
-        case "deleteBackward:": key = (0x0e, false)
-        case "moveLeft:": key = (0x4b, true)
-        case "moveRight:": key = (0x4d, true)
-        case "moveUp:": key = (0x48, true)
-        case "moveDown:": key = (0x50, true)
-        case "cancelOperation:": key = (1, false)
-        default: key = nil
+        guard acceptsInput, let event = interpretingEvent, MacKeyboardRouting.isCommandKey(event.keyCode),
+              let mapping = WindowsScanCodes.map[event.keyCode] else { return }
+        // Only the physical key that AppKit could not consume is forwarded.
+        // Navigation/selection/F-keys do not depend on a partial selector table.
+        synchronizeModifiers(event.modifierFlags, physicalCommand: true)
+        for down in [true, false] {
+            if let packet = try? Input.key(down: down, scan: mapping.0, extended: mapping.1) { model?.send(packet) }
         }
-        if let key { for down in [true, false] { if let packet = try? Input.key(down: down, scan: key.0, extended: key.1) { model?.send(packet) } } }
+        synchronizeModifiers(event.modifierFlags, physicalCommand: false)
     }
-}
-
-enum ScanCodes {
-    static let modifiers: [UInt16:NSEvent.ModifierFlags] = [56:.shift,60:.shift,59:.control,62:.control,58:.option,61:.option,55:.command,54:.command]
 }

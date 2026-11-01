@@ -19,7 +19,7 @@ sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.4"
+VERSION = "0.1.0-native.5"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -185,10 +185,86 @@ class Builder:
         path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
         return path
 
+    def pairing_crypto(self):
+        source = ROOT / "native-engine/pairing"
+        provenance_path = self.input(source / "PROVENANCE.json")
+        provenance = json.loads(provenance_path.read_text())
+        if (provenance.get("commit") != "ed9209cff8b5a2fbc6c10050f29b3355048bda85" or
+                provenance.get("tree") != "81d696d1f8cbc5a4b635bac55105a6f97b7a538c" or
+                provenance.get("archive", {}).get("sha256") !=
+                "4e3d008e36c65c7cfdde0909879e1b113cae8a8cbd6f445c22209a37c239fc16"):
+            raise ValueError("Native pairing crypto provenance differs from the pinned source")
+        vendor_prefix = "native-engine/pairing/vendor/boringssl/"
+        vendored = {key[len(vendor_prefix):]: value for key, value in self.sources.items()
+                    if key.startswith(vendor_prefix)}
+        if not vendored or vendored != provenance.get("files"):
+            raise ValueError("Native pairing vendor bytes differ from their complete pinned manifest")
+        cmake_name = os.environ.get("KNOT_NATIVE_CMAKE") or shutil.which("cmake")
+        if not cmake_name or not Path(cmake_name).is_file():
+            raise ValueError("CMake3.22+ is required; set KNOT_NATIVE_CMAKE to its trusted executable")
+        cmake = Path(cmake_name).resolve()
+        version = self.run("pairing-cmake-version", [cmake, "--version"]).decode("utf-8-sig")
+        found = re.search(r"cmake version (\d+)\.(\d+)", version)
+        if not found or tuple(map(int, found.groups())) < (3, 22):
+            raise ValueError("Native pairing crypto requires CMake3.22 or newer")
+        build = self.output / "pairing"
+        if build.is_symlink() or build.exists() and not build.is_dir():
+            raise ValueError("Unsupported native pairing build output")
+        if build.exists():
+            shutil.rmtree(build)
+        configure = [cmake, "-S", source, "-B", build, "-DCMAKE_BUILD_TYPE=Release",
+                     "-DOPENSSL_NO_ASM=ON", "-DBUILD_SHARED_LIBS=OFF", "-DBUILD_TESTING=OFF"]
+        if self.platform == "macos":
+            configure.extend(["-DCMAKE_OSX_ARCHITECTURES=arm64", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.0"])
+        else:
+            configure.extend(["-G", "Visual Studio 17 2022", "-A", "x64"])
+        inputs = [self.input(path) for path in [source / "CMakeLists.txt", source / "knot_pairing.cpp",
+                  source / "include/knot_pairing.h", provenance_path,
+                  source / "tests/crypto_checks.cpp", source / "tests/upstream_main.cpp"]]
+        self.run("configure-native-pairing", configure, timeout=600, command_inputs=inputs)
+        self.run("compile-native-pairing", [cmake, "--build", build, "--config", "Release", "--target",
+                 "KnotNativePairing", "KnotPairingCryptoChecks", "KnotPairingUpstreamSpakeChecks", "--parallel", "4"],
+                 timeout=1200, command_inputs=inputs)
+        extension = ".exe" if self.platform == "windows" else ""
+        checked = json.loads(self.run("native-pairing-crypto-checks",
+                            [build / "bin" / ("KnotPairingCryptoChecks" + extension)], timeout=120).decode("utf-8-sig"))
+        if (checked.get("status") != "passed" or checked.get("freshSyntheticOnly") is not True or
+                any(checked.get(key) is not False for key in ["networkInvoked", "captureInvoked", "actualInputInvoked"]) or
+                checked.get("abiVersion") != 2 or type(checked.get("checks")) is not int or checked["checks"] < 85 or
+                any(checked.get(key) is not True for key in
+                    ["hkdfKnownAnswer", "aesGcmKnownAnswer", "mutualConfirmation", "replayRejected"])):
+            raise ValueError("Native pairing crypto checks did not prove the required synthetic contract")
+        upstream = self.run("native-pairing-upstream-spake-checks",
+                            [build / "bin" / ("KnotPairingUpstreamSpakeChecks" + extension)], timeout=120)
+        if not re.search(rb"\[\s*PASSED\s*\]\s+6 tests?\.", upstream):
+            raise ValueError("Pinned upstream SPAKE2 checks did not complete all six tests")
+        if self.platform == "windows":
+            libraries = [self.output / "KnotNativePairing.dll"]
+            shutil.copy2(build / "bin/KnotNativePairing.dll", libraries[0])
+        else:
+            libraries = [self.output / name for name in ["libKnotNativePairing.a", "libcrypto.a"]]
+            for path in libraries:
+                shutil.copy2(build / "lib" / path.name, path)
+        license_path = self.output / "KnotNativePairing-LICENSE.txt"
+        shutil.copy2(self.input(source / "THIRD-PARTY-NOTICES.txt"), license_path)
+        record = self.output / "native-pairing-crypto-checks.json"
+        record.write_text(json.dumps({"schema": 1, "status": "passed", "platform": self.platform,
+            "upstreamCommit": provenance["commit"], "upstreamTree": provenance["tree"],
+            "archiveSHA256": provenance["archive"]["sha256"], "vendorFiles": len(vendored),
+            "provenanceSHA256": digest(provenance_path), "checks": checked,
+            "upstreamTests": 6, "upstreamOutputSHA256": hashlib.sha256(upstream).hexdigest(),
+            "libraries": {path.name: {"sha256": digest(path), "bytes": path.stat().st_size} for path in libraries},
+            "scope": "Actual pinned crypto implementation and fresh synthetic checks; no device capture/input or peer authorization"
+        }, indent=2) + "\n")
+        return [*libraries, record, license_path]
+
     def macos(self):
         package = ROOT / "native-engine/macos"
         scratch = self.output / "swift"
         media = ROOT / "native-engine/windows/media"
+        self.input(media / "media_limits.h")
+        crypto_products = self.pairing_crypto()
+        swift_environment = dict(os.environ, KNOT_NATIVE_PAIRING_LIBDIR=str(self.output))
         parser_checks = self.output / "KnotNativeParserChecks"
         self.run("compile-native-parser-checks", ["/usr/bin/clang++", "-std=c++17", "-O1", "-g",
                  "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
@@ -207,19 +283,22 @@ class Builder:
         cpp_record = self.record_cpp_checks()
         self.run("swift-version", ["/usr/bin/swift", "--version"])
         self.run("swift-build", ["/usr/bin/swift", "build", "--package-path", package,
-                                 "--scratch-path", scratch, "-c", "release"])
+                                 "--scratch-path", scratch, "-c", "release"], env=swift_environment)
         self.run("swift-checks", ["/usr/bin/swift", "test", "--package-path", package,
-                                  "--scratch-path", scratch, "-c", "release"], timeout=600)
+                                  "--scratch-path", scratch, "-c", "release"], timeout=600, env=swift_environment)
         binary_dir = Path(self.run("swift-bin-path", ["/usr/bin/swift", "build", "--package-path", package,
                                                      "--scratch-path", scratch, "-c", "release",
-                                                     "--show-bin-path"]).decode().strip())
+                                                     "--show-bin-path"], env=swift_environment).decode().strip())
         visuals = self.visual_directory()
         renderer = self.input(ROOT / "scripts/render_native_visual_fixture.py")
         visual_inputs = [renderer, package / "Package.swift", ROOT / "Assets/Brand/AppIcon.icns",
+                         package / "Sources/CKnotPairing/module.modulemap", package / "Sources/CKnotPairing/shim.h",
+                         ROOT / "native-engine/pairing/include/knot_pairing.h", ROOT / "native-engine/pairing/knot_pairing.cpp",
+                         ROOT / "native-engine/pairing/CMakeLists.txt", ROOT / "native-engine/pairing/PROVENANCE.json",
                          *sorted((package / "Sources").rglob("*.swift")),
                          *sorted((package / "VisualFixtures").rglob("*.swift"))]
         self.run("native-ui-visual-checks", [sys.executable, renderer, "--output", visuals],
-                 timeout=600, command_inputs=[self.input(path) for path in visual_inputs])
+                 timeout=600, env=swift_environment, command_inputs=[self.input(path) for path in visual_inputs])
         visual_record = self.record_visual_checks(visuals, visual_inputs)
         app = self.output / "Knot Native Preview.app"
         if app.exists():
@@ -232,6 +311,7 @@ class Builder:
         executable.chmod(0o755)
         shutil.copy2(self.input(ROOT / "Assets/Brand/AppIcon.icns"), resources / "AppIcon.icns")
         shutil.copy2(self.input(ROOT / "LICENSE"), resources / "LICENSE")
+        shutil.copy2(self.output / "KnotNativePairing-LICENSE.txt", resources / "KnotNativePairing-LICENSE.txt")
         info = {"CFBundleExecutable": "KnotNativePreview", "CFBundleIdentifier": "org.knot.native-preview",
                 "CFBundleName": "Knot Native Preview", "CFBundleDisplayName": "Knot Native Preview",
                 "CFBundlePackageType": "APPL", "CFBundleVersion": PREVIEW_BUILD, "CFBundleShortVersionString": VERSION_BASE,
@@ -242,7 +322,7 @@ class Builder:
         self.run("sign-native-app", ["/usr/bin/codesign", "--force", "--sign", "-", app])
         self.run("verify-native-app", ["/usr/bin/codesign", "--verify", "--deep", "--strict", app])
         deps = self.run("inspect-native-dependencies", ["/usr/bin/otool", "-L", executable]).decode()
-        if any(x in deps for x in ["Glimmer", "Sunshine", "Moonlight", "Sparkle"]):
+        if any(x in deps for x in ["Glimmer", "Sunshine", "Moonlight", "Sparkle", "libcrypto.", "libssl."]):
             raise ValueError("Experiment accidentally links a production engine")
         zip_path = self.output / ("Knot-Native-" + VERSION + "-macos-arm64.zip")
         self.run("zip-native-app", ["/usr/bin/ditto", "-c", "-k", "--keepParent", app, zip_path])
@@ -256,7 +336,7 @@ class Builder:
         self.run("native-dmg", ["/usr/bin/hdiutil", "create", "-ov", "-format", "UDZO", "-volname",
                                 "Knot Native Preview", "-srcfolder", image_root, dmg])
         self.run("verify-native-dmg", ["/usr/bin/hdiutil", "verify", dmg])
-        return [zip_path, dmg, cpp_record, visual_record]
+        return [zip_path, dmg, cpp_record, visual_record, *crypto_products]
 
     def record_cpp_checks(self):
         path = self.output / "native-cpp-checks.json"
@@ -314,6 +394,8 @@ class Builder:
 
     def windows(self):
         media = ROOT / "native-engine/windows/media"
+        self.input(media / "media_limits.h")
+        crypto_products = self.pairing_crypto() if not self.media_only else []
         libs = ["d3d11.lib", "dxgi.lib", "mfplat.lib", "mf.lib", "mfuuid.lib", "ole32.lib",
                 "oleaut32.lib", "uuid.lib", "user32.lib", "strmiids.lib"]
         common = ["/nologo", "/EHsc", "/std:c++17", "/O2", "/MT", "/W4", "/utf-8", "/DUNICODE", "/D_UNICODE",
@@ -343,10 +425,43 @@ class Builder:
         native_record = json.loads(fixture_record.read_text())
         if native_record.get("hardwareEncoder") is not False or not fixture.is_file() or not fixture.stat().st_size:
             raise ValueError("Synthetic codec evidence must explicitly identify its software-only fixture")
+        fixture_4k = self.output / "synthetic-4k.h264"
+        fixture_record_4k = self.output / "synthetic-codec-4k.json"
+        self.run("native-media-synthetic-4k", [self.output / "KnotNativeMediaSynthetic.exe", "--software-4k",
+                                             fixture_4k, fixture_record_4k], timeout=180)
+        native_record_4k = json.loads(fixture_record_4k.read_text())
+        if (native_record_4k.get("v") != 1 or native_record_4k.get("synthetic") is not True or
+                native_record_4k.get("captureInvoked") is not False or
+                native_record_4k.get("hardwareEncoder") is not False or
+                native_record_4k.get("codec") != "h264-annexb" or
+                any(native_record_4k.get(key) != value for key, value in
+                    {"width": 3840, "height": 2160, "fps": 30, "bitrate": 40000000, "frames": 6}.items()) or
+                native_record_4k.get("parserChecks") is not True or
+                native_record_4k.get("encoderCapacity") != 2 or
+                type(native_record_4k.get("peakOutputScratchBytes")) is not int or
+                not 0 <= native_record_4k["peakOutputScratchBytes"] <= 12441600 or
+                type(native_record_4k.get("peakEncoderInFlight")) is not int or
+                not 1 <= native_record_4k["peakEncoderInFlight"] <= 2 or
+                type(native_record_4k.get("keyframes")) is not int or
+                not 1 <= native_record_4k["keyframes"] <= 6 or
+                not fixture_4k.is_file() or not fixture_4k.stat().st_size):
+            raise ValueError("4K codec evidence must prove its exact fresh software-only synthetic profile")
         if self.media_only:
-            return [self.output / "KnotNativeMedia.dll", fixture, fixture_record, cpp_record]
+            return [self.output / "KnotNativeMedia.dll", fixture, fixture_record, fixture_4k, fixture_record_4k, cpp_record]
         sources = sorted((ROOT / "native-engine/windows").glob("*.cs"))
         executable = self.csharp("Knot-Native-Preview", sources, "Knot.NativePreview.Program", "winexe")
+        managed_crypto = self.csharp("KnotNativePairingBridgeChecks",
+            sources + [self.input(ROOT / "native-engine/pairing/tests/ManagedCryptoChecks.cs")],
+            "Knot.NativePreview.NativePairingBridgeChecks", "exe")
+        managed_result = json.loads(self.run("native-pairing-managed-checks", [managed_crypto],
+                                             timeout=120).decode("utf-8-sig"))
+        if (managed_result.get("status") != "passed" or managed_result.get("checks") != 7 or
+                managed_result.get("freshSyntheticOnly") is not True or
+                any(managed_result.get(key) is not False for key in
+                    ["networkInvoked", "captureInvoked", "actualInputInvoked"])):
+            raise ValueError("Native pairing managed bridge did not pass its actual synthetic ABI checks")
+        managed_record = self.output / "native-pairing-managed-checks.json"
+        managed_record.write_text(json.dumps(managed_result, indent=2) + "\n")
         checks = self.csharp("KnotNativeChecks", sources + sorted((ROOT / "native-engine/windows/tests").glob("*.cs")),
                              "Knot.NativePreview.NativeChecks", "exe")
         public_certificate = self.output / "native-test-public.cer"
@@ -400,9 +515,9 @@ class Builder:
                 inspected.get("inspectionOnly") is not True or inspected.get("installerExecuted") is not False):
             raise ValueError("Native installer version metadata differs from the checked preview version")
         installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
-        return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record,
+        return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record, fixture_4k, fixture_record_4k,
                 self.output / "native-host-checks.json", public_certificate, public_pin, cpp_record, installer_metadata,
-                visual_record]
+                visual_record, managed_record, *crypto_products]
 
     def finish(self, files):
         if source_snapshot(ROOT) != self.sources:

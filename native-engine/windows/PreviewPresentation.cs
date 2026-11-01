@@ -10,11 +10,12 @@ namespace Knot.NativePreview
     internal sealed class HostViewSnapshot
     {
         internal readonly HostViewPhase Phase;
-        internal readonly bool HasAddress, RunPresent, CanCopy;
+        internal readonly bool HasAddress, RunPresent, CanCopy, EnrollmentMode;
         internal readonly string Pin, ViewerLabel, ObservedAddress, Status;
-        internal HostViewSnapshot(HostViewPhase phase, bool hasAddress, bool runPresent, string pin, string label, string address, string status, bool canCopy = true)
+        internal HostViewSnapshot(HostViewPhase phase, bool hasAddress, bool runPresent, string pin, string label, string address, string status, bool canCopy = true, bool enrollmentMode = false)
         {
             Phase = phase; HasAddress = hasAddress; RunPresent = runPresent; CanCopy = canCopy;
+            EnrollmentMode = enrollmentMode;
             Pin = pin ?? ""; ViewerLabel = label ?? ""; ObservedAddress = address ?? ""; Status = status ?? "";
         }
     }
@@ -52,7 +53,7 @@ namespace Knot.NativePreview
                 case "Host declined the viewer request. Click Share for a fresh invitation.":
                     return "연결 요청을 거절했어요. 다시 연결하려면 새 코드를 만들어주세요.";
                 case "Hardware H.264 encoding is unavailable or failed. Check the graphics driver and encoder availability; then create a fresh invitation.":
-                    return "하드웨어 인코더를 사용할 수 없어요. 그래픽 드라이버를 확인한 뒤 다시 시도해주세요.";
+                    return "선택한 화질의 하드웨어 인코더를 사용할 수 없어요. 그래픽 드라이버를 확인하거나 호환 모드로 다시 시작해주세요.";
                 case "Display unsupported. Use a logged-in, unlocked primary SDR display without rotation or HDR.":
                     return "로그인된 기본 SDR 가로 화면이 필요해요. HDR과 화면 회전을 확인해주세요.";
                 case "The graphics device was lost or could not be initialized. Check the display and graphics driver; then create a fresh invitation.":

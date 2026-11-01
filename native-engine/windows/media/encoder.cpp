@@ -37,6 +37,7 @@ void Encoder::Reset() {
     events_.Reset(); codec_.Reset(); outputType_.Reset(); transform_.Reset();
     async_ = hardware_ = draining_ = false;
     inputReady_ = outputReady_ = inFlight_ = 0;
+    peakOutputScratch_ = outputMinimum_ = 0;
     timeline_ = MediaTimeline(1); stamps_.clear(); parameterSets_.clear();
 }
 HRESULT Encoder::SetUInt(const GUID& key, ULONG value, bool required) {
@@ -54,6 +55,7 @@ HRESULT Encoder::SetBool(const GUID& key, bool value, bool required) {
 
 HRESULT Encoder::Start(const KnMediaConfig& config, bool softwareOnly) {
     Reset();
+    if (!ValidMediaConfig(config)) return E_INVALIDARG;
     MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, MFVideoFormat_NV12};
     MFT_REGISTER_TYPE_INFO output{MFMediaType_Video, MFVideoFormat_H264};
     Activations activations;
@@ -238,16 +240,19 @@ HRESULT Encoder::Receive(AccessUnit& output) {
     MFT_OUTPUT_STREAM_INFO info{};
     HRESULT hr = transform_->GetOutputStreamInfo(outputId_, &info);
     if (FAILED(hr)) return hr;
+    outputMinimum_ = info.cbSize;
     ComPtr<IMFSample> owned;
     if ((info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
         ComPtr<IMFMediaBuffer> buffer;
-        if (info.cbSize > kMaxAccessUnit || info.cbAlignment > 65536U ||
+        uint32_t scratchCapacity = 0;
+        if (!CodecOutputScratch(config_, info.cbSize, scratchCapacity) || info.cbAlignment > 65536U ||
             (info.cbAlignment != 0 && (info.cbAlignment & (info.cbAlignment - 1U)) != 0)) return E_FAIL;
         hr = MFCreateSample(&owned);
         if (FAILED(hr)) return hr;
-        hr = MFCreateAlignedMemoryBuffer(static_cast<DWORD>(kMaxAccessUnit),
+        hr = MFCreateAlignedMemoryBuffer(scratchCapacity,
             info.cbAlignment == 0 ? 0 : info.cbAlignment - 1U, &buffer);
         if (FAILED(hr)) return hr;
+        peakOutputScratch_ = std::max(peakOutputScratch_, scratchCapacity);
         hr = owned->AddBuffer(buffer.Get());
         if (FAILED(hr)) return hr;
     }

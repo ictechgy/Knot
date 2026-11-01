@@ -130,7 +130,7 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
 /// Serializes submission against permanent revocation. At most a handshake,
 /// reader and writer can be pending; close cancels their continuations/timers
 /// synchronously and all later submissions fail before reaching Network.
-private final class ChannelLifetime: @unchecked Sendable {
+final class ChannelLifetime: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var closed = false
     private var pending: [UUID: @Sendable () -> Void] = [:]

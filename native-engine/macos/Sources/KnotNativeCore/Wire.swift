@@ -25,6 +25,16 @@ public struct Packet: Sendable, Equatable {
     }
 }
 
+public enum VideoLimits {
+    public static let maximumWidth = 3840
+    public static let maximumHeight = 2160
+    public static let maximumPixels = 8_294_400
+    public static func accepts(width: Int, height: Int) -> Bool {
+        (16...maximumWidth).contains(width) && (16...maximumHeight).contains(height) &&
+        width % 2 == 0 && height % 2 == 0 && width * height <= maximumPixels
+    }
+}
+
 public struct Ready: Sendable, Equatable {
     public let width: Int, height: Int, fps: Int, bitrate: Int
     public init(_ bytes: Data) throws {
@@ -32,7 +42,7 @@ public struct Ready: Sendable, Equatable {
         let width = try json.integer("width"), height = try json.integer("height")
         let fps = try json.integer("fps"), bitrate = try json.integer("bitrate")
         guard try json.integer("v") == 1, try json.string("codec") == "h264-annexb", try json.boolean("hardwareEncoder"),
-              (16...1920).contains(width), (16...1080).contains(height), width % 2 == 0, height % 2 == 0,
+              VideoLimits.accepts(width: width, height: height),
               (1...60).contains(fps), (1_000_000...40_000_000).contains(bitrate) else { throw NativeFailure.malformed }
         self.width = width; self.height = height; self.fps = fps; self.bitrate = bitrate
     }

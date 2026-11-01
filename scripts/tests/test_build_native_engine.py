@@ -33,10 +33,11 @@ class NativeRebuildTests(unittest.TestCase):
         self.git("config", "core.autocrlf", "false")
         for name in ["LICENSE", "INSTALLATION.md", "VERSION", ".gitignore", "fake-iscc",
                      "Assets/Brand/AppIcon.ico", "native-engine/windows/Native.iss", "scripts/verify_native_installer.ps1",
+                     "native-engine/pairing/tests/ManagedCryptoChecks.cs",
                      "native-engine/windows/tests/NativeVisualFixtures.cs",
                      *["native-engine/windows/media/" + name for name in
                        ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp",
-                        "h264_parser_test.cpp", "media_pacing_test.cpp", "media_activation_test.cpp"]]]:
+                        "h264_parser_test.cpp", "media_pacing_test.cpp", "media_activation_test.cpp", "media_limits.h"]]]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("build/\n" if name == ".gitignore" else "Fresh inert fixture\n")
@@ -49,7 +50,8 @@ class NativeRebuildTests(unittest.TestCase):
     def git(self, *args, **kwargs):
         return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE, **kwargs)
 
-    def build_with_inert_tools(self, corrupt_public_pin=False, corrupt_installer_version=False, invalid_visual=None):
+    def build_with_inert_tools(self, corrupt_public_pin=False, corrupt_installer_version=False, invalid_visual=None,
+                               invalid_four_k=None):
         builder = native.Builder("windows", self.output)
         actual_run = builder.run
 
@@ -57,6 +59,17 @@ class NativeRebuildTests(unittest.TestCase):
             if label == "native-synthetic-codec":
                 Path(argv[-2]).write_bytes(b"INERT synthetic codec fixture")
                 Path(argv[-1]).write_text('{"hardwareEncoder":false}')
+            elif label == "native-media-synthetic-4k":
+                self.assertEqual(argv[1], "--software-4k")
+                Path(argv[-2]).write_bytes(b"INERT 4K codec fixture; no media executed")
+                data = dict(v=1, synthetic=True, captureInvoked=False, hardwareEncoder=False,
+                            codec="h264-annexb", width=3840, height=2160, fps=30,
+                            bitrate=40000000, frames=6, keyframes=1, parserChecks=True,
+                            peakEncoderInFlight=1, encoderCapacity=2, peakOutputScratchBytes=0)
+                if invalid_four_k == "dimensions": data["width"] = 1920
+                elif invalid_four_k == "capture": data["captureInvoked"] = True
+                elif invalid_four_k == "scratch": data["peakOutputScratchBytes"] = 12441601
+                Path(argv[-1]).write_text(json.dumps(data))
             elif label == "native-host-checks":
                 self.assertEqual(argv[1], "--export-certificate")
                 with Path(argv[2]).open("xb") as fixture:
@@ -66,6 +79,9 @@ class NativeRebuildTests(unittest.TestCase):
                     fixture.write(pin + "\n")
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
                                        actualCapture=False, actualSendInput=False)).encode()
+            elif label == "native-pairing-managed-checks":
+                return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,
+                    networkInvoked=False, captureInvoked=False, actualInputInvoked=False)).encode()
             elif label == "native-installer":
                 self.assertIn("/DNativeVersion=" + native.VERSION, argv)
                 self.assertIn("/DNativeNumericVersion=" + native.NUMERIC_VERSION, argv)
@@ -114,9 +130,17 @@ class NativeRebuildTests(unittest.TestCase):
         def inert_msvc(*args):
             (self.output / "KnotNativeMedia.dll").write_bytes(b"INERT native image")
 
+        def inert_pairing():
+            paths = [self.output / name for name in ["KnotNativePairing.dll", "native-pairing-crypto-checks.json",
+                                                     "KnotNativePairing-LICENSE.txt"]]
+            for path in paths:
+                path.write_bytes(b"INERT lifecycle-only substitute; no crypto compiled or invoked")
+            return paths
+
         with patch.object(builder, "run", side_effect=inert_run), \
              patch.object(builder, "csharp", side_effect=inert_csharp), \
-             patch.object(builder, "msvc", side_effect=inert_msvc):
+             patch.object(builder, "msvc", side_effect=inert_msvc), \
+             patch.object(builder, "pairing_crypto", side_effect=inert_pairing):
             builder.finish(builder.windows())
 
     @staticmethod
@@ -136,6 +160,8 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertIn("native-test-public.cer", record["products"])
         self.assertIn("native-installer-metadata.json", record["products"])
         self.assertIn("native-ui-visual-checks.json", record["products"])
+        self.assertIn("synthetic-4k.h264", record["products"])
+        self.assertIn("synthetic-codec-4k.json", record["products"])
         metadata = json.loads((self.output / "native-installer-metadata.json").read_text())
         self.assertEqual(metadata["productVersion"], native.VERSION)
         self.assertIn("INERT", metadata["inspector"])
@@ -185,3 +211,20 @@ class NativeRebuildTests(unittest.TestCase):
             self.build_with_inert_tools(invalid_visual="path")
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
+
+    def test_four_k_fixture_must_have_actual_four_k_dimensions(self):
+        self.build_with_inert_tools()
+        with self.assertRaisesRegex(ValueError, "4K codec evidence"):
+            self.build_with_inert_tools(invalid_four_k="dimensions")
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+        self.assertFalse((self.output / "SHA256SUMS").exists())
+
+    def test_four_k_fixture_cannot_claim_real_capture(self):
+        with self.assertRaisesRegex(ValueError, "4K codec evidence"):
+            self.build_with_inert_tools(invalid_four_k="capture")
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+
+    def test_four_k_fixture_cannot_exceed_output_scratch_budget(self):
+        with self.assertRaisesRegex(ValueError, "4K codec evidence"):
+            self.build_with_inert_tools(invalid_four_k="scratch")
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())

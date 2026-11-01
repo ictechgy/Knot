@@ -39,7 +39,8 @@ enum KnMediaStatus {
 
 // All three functions must be called on the SAME dedicated MTA thread.
 // create owns balanced COM/MF startup; normal creation ALWAYS requires hardware.
-// width/height are even bounds (16..1920/1080); output preserves display aspect.
+// width/height are even bounds (16..3840/2160, <=8,294,400 pixels).
+// Output preserves display aspect and never upscales a smaller desktop.
 KN_MEDIA_API void* KN_MEDIA_CALL kn_media_create(const KnMediaConfig* config,
     KnMediaInfo* info, int32_t* error);
 // Nonblocking event polling, <=450 ms application wait budget (<500 ms contract).

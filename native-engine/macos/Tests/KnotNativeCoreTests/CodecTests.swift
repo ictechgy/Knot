@@ -90,6 +90,8 @@ private struct WindowsCodecFixture: Decodable {
     let v: Int, synthetic: Bool, captureInvoked: Bool, codec: String
     let width: Int, height: Int, fps: Int, bitrate: Int, hardwareEncoder: Bool
     let frames: Int, keyframes: Int, parserChecks: Bool
+    let peakEncoderInFlight: Int?, encoderCapacity: Int?
+    let peakOutputScratchBytes: Int?
     let accessUnits: [Unit]
 }
 
@@ -127,4 +129,58 @@ private struct WindowsCodecFixture: Decodable {
     #expect(!failed && validDimensions && decoder.maximumOutstanding <= DecodeAdmission.capacity)
     #expect(offset == data.count && decoded == fixture.frames && keyframes == fixture.keyframes)
     print("Windows MF burst: decoded=\(decoded), peakOutstanding=\(decoder.maximumOutstanding), cap=\(DecodeAdmission.capacity), keyframes=\(keyframes); no per-frame output wait")
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"] != nil,
+               "Windows MF 4K artifact path not supplied locally; CI supplies and requires it."))
+@MainActor func windowsMediaFoundation4KFixtureDecodesWithNativeVideoToolbox() async throws {
+    let root = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"]), isDirectory: true)
+    let json = try Data(contentsOf: root.appendingPathComponent("synthetic-codec-4k.json"))
+    let data = try Data(contentsOf: root.appendingPathComponent("synthetic-4k.h264"))
+    try #require(json.count <= 131_072 && data.count <= 64 * 1024 * 1024)
+    let fixture = try JSONDecoder().decode(WindowsCodecFixture.self, from: json)
+    try #require(fixture.v == 1 && fixture.synthetic && !fixture.captureInvoked && fixture.parserChecks)
+    try #require(fixture.codec == "h264-annexb" && fixture.width == 3840 && fixture.height == 2160)
+    try #require(fixture.fps == 30 && fixture.bitrate == 40_000_000 && !fixture.hardwareEncoder)
+    try #require(fixture.frames == 6 && fixture.accessUnits.count == fixture.frames && fixture.keyframes >= 1)
+    let encoderPeak = try #require(fixture.peakEncoderInFlight)
+    try #require(fixture.encoderCapacity == 2 && (1...2).contains(encoderPeak))
+    let scratchPeak = try #require(fixture.peakOutputScratchBytes)
+    try #require((0...12_441_600).contains(scratchPeak))
+    let decoder = NativeDecoder(width: fixture.width, height: fixture.height)
+    defer { decoder.stop() }
+    var decoded = 0, failed = false, validDimensions = true
+    decoder.onImage = { image in
+        decoded += 1
+        validDimensions = validDimensions && CVPixelBufferGetWidth(image) == 3840 && CVPixelBufferGetHeight(image) == 2160
+    }
+    decoder.onFailure = { failed = true }
+    var offset = 0, keyframes = 0, sequence: UInt64 = 0, timestamp: UInt64 = 0
+    for unit in fixture.accessUnits {
+        try #require(unit.sequence == sequence + 1 && unit.offset == offset && unit.length > 0 && unit.length <= 4_194_287)
+        try #require(unit.offset <= data.count && unit.length <= data.count - unit.offset && unit.flags <= 1 && unit.timestampMicros > timestamp)
+        let access = try AccessUnit(annexB: data.subdata(in: unit.offset..<(unit.offset + unit.length)))
+        try #require(access.isIDR == (unit.flags == 1))
+        if access.isIDR { keyframes += 1; try #require(!access.sps.isEmpty && !access.pps.isEmpty) }
+        try await decoder.decode(access)
+        sequence = unit.sequence; timestamp = unit.timestampMicros; offset += unit.length
+    }
+    try await decoder.waitForPendingFrames()
+    #expect(!failed && validDimensions && decoder.maximumOutstanding <= DecodeAdmission.capacity && decoder.outstanding == 0)
+    #expect(offset == data.count && decoded == fixture.frames && keyframes == fixture.keyframes)
+    let first = try #require(fixture.accessUnits.first)
+    let keyframe = try AccessUnit(annexB: data.subdata(in: first.offset..<(first.offset + first.length)))
+    let wrongSize = NativeDecoder(width: 3838, height: 2160)
+    defer { wrongSize.stop() }
+    do { try await wrongSize.decode(keyframe); Issue.record("4K SPS accepted against mismatched advertised dimensions") } catch {}
+    let malformed = NativeDecoder(width: 3840, height: 2160)
+    defer { malformed.stop() }
+    var damagedSPS = Data()
+    for nal in keyframe.nals {
+        damagedSPS.append(contentsOf: [0, 0, 0, 1])
+        damagedSPS.append((nal.first! & 31) == 7 ? Data([0x67, 0]) : nal)
+    }
+    let invalidAccess = try AccessUnit(annexB: damagedSPS)
+    do { try await malformed.decode(invalidAccess); Issue.record("Malformed4K SPS accepted") } catch {}
+    print("Windows MF4K: decoded=\(decoded), width=\(fixture.width), height=\(fixture.height), peakOutstanding=\(decoder.maximumOutstanding), cap=\(DecodeAdmission.capacity), keyframes=\(keyframes); synthetic pixels only")
 }

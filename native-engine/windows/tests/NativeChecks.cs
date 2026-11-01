@@ -16,7 +16,7 @@ namespace Knot.NativePreview
     // Compile this separate entry with /main:Knot.NativePreview.NativeChecks.
     // It never starts WinForms, loads the media DLL, captures a display, calls
     // SendInput, enumerates certificates, or opens application stores/preferences.
-    internal static class NativeChecks
+    internal static partial class NativeChecks
     {
         private static int assertions, tlsFixtures;
         private static string stage = "protocol";
@@ -35,6 +35,7 @@ namespace Knot.NativePreview
                 if (args.Length == 2 && args[0] == "--export-certificate") certificateExportPath = args[1];
                 else if (args.Length != 0) throw new ArgumentException("Unsupported synthetic check arguments.");
                 ProtocolChecks(); stage = "invitation"; InvitationChecks(); stage = "input"; InputChecks();
+                stage = "media-quality-bounds"; MediaQualityChecks();
                 stage = "host-policy"; HostPolicyChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();
                 stage = "fresh-certificate"; FreshCertificateChecks();
@@ -44,7 +45,8 @@ namespace Knot.NativePreview
                 stage = "tls-delayed-approval"; TlsDelayedApproval();
                 stage = "tls-approved-before-blocking-open-stop-race"; TlsApprovedBeforeBlockingOpen();
                 stage = "tls-release-failure-stop"; TlsReleaseFailureStopsInput();
-                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
+                stage = "short-code-enrollment"; EnrollmentChecks();
+                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
                 return 0;
             }
             catch (Exception failure)
@@ -58,6 +60,31 @@ namespace Knot.NativePreview
             }
         }
         private static byte[] Bytes(string s) { return StrictJson.Utf8.GetBytes(s); }
+        private static void MediaQualityChecks()
+        {
+            MediaConfig sharp = MediaQualityProfile.Sharp4K.Config, smooth = MediaQualityProfile.Smooth4K.Config;
+            MediaConfig compatibility = MediaQualityProfile.Compatible1080.Config;
+            Check(sharp.Width == 3840 && sharp.Height == 2160 && sharp.Fps == 30 && sharp.Bitrate == 40000000);
+            Check(smooth.Width == 3840 && smooth.Height == 2160 && smooth.Fps == 60 && smooth.Bitrate == 40000000);
+            Check(compatibility.Width == 1920 && compatibility.Height == 1080 && compatibility.Fps == 60 && compatibility.Bitrate == 20000000);
+            foreach (MediaConfig config in new MediaConfig[] { sharp, smooth, compatibility }) Check(MediaLimits.ValidConfig(config));
+            MediaInfo valid = new MediaInfo { Width = 3840, Height = 2160, Fps = 30, Bitrate = 40000000, DesktopWidth = 3840, DesktopHeight = 2160, HardwareEncoder = 1 };
+            Dictionary<string, object> ready = StrictJson.Parse(valid.Ready(), "v", "codec", "width", "height", "fps", "bitrate", "hardwareEncoder");
+            Check(StrictJson.Integer(ready, "width", 16, 3840) == 3840 && StrictJson.Integer(ready, "height", 16, 2160) == 2160);
+            foreach (uint[] size in new uint[][] {
+                new uint[] { 3842, 2160 }, new uint[] { 3840, 2162 }, new uint[] { 3839, 2160 }, new uint[] { 3840, 2159 },
+                new uint[] { 15, 16 }, new uint[] { 16, 15 }, new uint[] { uint.MaxValue, 2160 }, new uint[] { 3840, uint.MaxValue } })
+            {
+                Check(!MediaLimits.ValidDimensions(size[0], size[1]));
+                Reject(delegate { MediaInfo invalid = valid; invalid.Width = size[0]; invalid.Height = size[1]; invalid.Ready(); });
+            }
+            foreach (uint fps in new uint[] { 0, 61 }) Reject(delegate { MediaInfo invalid = valid; invalid.Fps = fps; invalid.Ready(); });
+            foreach (uint bitrate in new uint[] { 999999, 40000001 }) Reject(delegate { MediaInfo invalid = valid; invalid.Bitrate = bitrate; invalid.Ready(); });
+            Reject(delegate { MediaInfo invalid = valid; invalid.HardwareEncoder = 0; invalid.Ready(); });
+            Reject(delegate { MediaInfo invalid = valid; invalid.DesktopWidth = 1920; invalid.Ready(); });
+            sharp.Width = 16;
+            Check(MediaQualityProfile.Sharp4K.Config.Width == 3840);
+        }
         private static void ProtocolChecks()
         {
             Check(NativeProtocol.IsPrivate(IPAddress.Parse("10.2.3.4")));

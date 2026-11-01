@@ -25,13 +25,16 @@ namespace Knot.NativePreview
         private readonly bool fixtureMode;
         private readonly Action<string> fixtureTrace;
         private readonly ComboBox addresses = new ComboBox();
+        private readonly ComboBox qualityProfiles = new ComboBox();
+        private readonly CheckBox legacyMode = new CheckBox();
+        private readonly Label enrollmentCode = new Label();
         private readonly PreviewButton share, copy, stop, approve, decline, desktopNavigation, helpNavigation, networkDisclosure, compactDesktopNavigation, compactHelpNavigation;
         private readonly TextBox status = new TextBox(), pin = new TextBox();
         private readonly Label headerTitle, headerSubtitle, badge, stateStep, stateTitle, stateDescription, requestName, requestAddress, requestWarning, networkValue, privacy, trustTitle;
         private readonly Panel scroll = new Panel();
         private readonly TableLayoutPanel body, helpBody, networkSettings, shell, header;
         private readonly FlowLayoutPanel actions, compactNavigation;
-        private readonly PreviewCard taskCard, networkCard;
+        private readonly PreviewCard taskCard, networkCard, qualityCard;
         private readonly Panel main, rail, footer;
         private readonly TableLayoutPanel requestPanel;
         private readonly PreviewTrustPanel trustPanel;
@@ -49,6 +52,7 @@ namespace Knot.NativePreview
         private HostViewPhase phase;
         private HostViewSnapshot fixture;
         private string rawStatus = "";
+        private string fixtureCode = "";
         private bool closing, helpVisible, networkExpanded, settingWrapWidths, invitationAvailable, responsiveLayout, compactMode, densityApplied;
 
         internal PreviewForm() : this(PrivateAddresses(), false, null, 1f) { }
@@ -83,7 +87,7 @@ namespace Knot.NativePreview
             helpNavigation = ActionButton("연결 안내", PreviewButtonKind.Navigation);
             compactDesktopNavigation = ActionButton("이 PC 공유", PreviewButtonKind.Navigation);
             compactHelpNavigation = ActionButton("연결 안내", PreviewButtonKind.Navigation);
-            networkDisclosure = ActionButton("연결 경로 변경", PreviewButtonKind.Secondary);
+            networkDisclosure = ActionButton("연결 세부정보", PreviewButtonKind.Secondary);
             SetOwnedFont(networkDisclosure, PreviewStyle.Type(9, FontStyle.Regular, scale));
             networkDisclosure.MinimumSize = new Size(0, P(34));
 
@@ -122,6 +126,13 @@ namespace Knot.NativePreview
             stateDescription = MakeLabel("", 10.5f, FontStyle.Regular);
             stateDescription.Margin = new Padding(0, 0, 0, P(20)); taskCard.Content.Controls.Add(stateDescription);
 
+            enrollmentCode.Dock = DockStyle.Top; enrollmentCode.AutoSize = false; enrollmentCode.Height = P(60);
+            enrollmentCode.TextAlign = ContentAlignment.MiddleCenter; enrollmentCode.BackColor = PreviewStyle.Surface;
+            enrollmentCode.ForeColor = PreviewStyle.Ink; enrollmentCode.Margin = new Padding(0, 0, 0, P(20));
+            SetOwnedFont(enrollmentCode, new Font("Consolas", 30 * scale, FontStyle.Bold));
+            enrollmentCode.AccessibleName = "8자리 일회용 연결번호";
+            taskCard.Content.Controls.Add(enrollmentCode);
+
             requestPanel = Column(); requestPanel.Dock = DockStyle.Top;
             requestName = MakeLabel("", 13, FontStyle.Bold); requestName.Margin = new Padding(0, 0, 0, P(4));
             requestAddress = MakeLabel("", 10.5f, FontStyle.Regular); requestAddress.Margin = new Padding(0, 0, 0, P(6));
@@ -143,6 +154,18 @@ namespace Knot.NativePreview
             actions.Controls.AddRange(new Control[] { share, copy, approve, decline });
             taskCard.Content.Controls.Add(actions);
 
+            qualityCard = new PreviewCard(scale); qualityCard.Dock = DockStyle.Top; body.Controls.Add(qualityCard);
+            Label qualityTitle = MakeLabel("화질", 9, FontStyle.Bold);
+            qualityTitle.Margin = new Padding(0, 0, 0, P(8)); qualityCard.Content.Controls.Add(qualityTitle);
+            qualityProfiles.DropDownStyle = ComboBoxStyle.DropDownList; qualityProfiles.FlatStyle = FlatStyle.Flat;
+            qualityProfiles.Dock = DockStyle.Top; qualityProfiles.DropDownWidth = P(650);
+            qualityProfiles.AccessibleName = "공유를 시작할 화면 화질";
+            SetOwnedFont(qualityProfiles, PreviewStyle.Type(10, FontStyle.Regular, scale));
+            qualityProfiles.Items.AddRange(new object[] { MediaQualityProfile.Sharp4K, MediaQualityProfile.Smooth4K, MediaQualityProfile.Compatible1080 });
+            qualityProfiles.SelectedIndex = 0; qualityCard.Content.Controls.Add(qualityProfiles);
+            Label qualityHint = MakeLabel("Windows 원본을 최대 4K로 전송해요. 원본보다 확대하지 않으며, GPU가 지원해야 해요. 문제가 있으면 호환 모드로 다시 시작하세요.", 9, FontStyle.Regular);
+            qualityHint.Margin = new Padding(0, P(10), 0, 0); qualityCard.Content.Controls.Add(qualityHint);
+
             networkCard = new PreviewCard(scale); networkCard.Dock = DockStyle.Top; body.Controls.Add(networkCard);
             TableLayoutPanel networkHeading = Column(); networkHeading.ColumnCount = 2; networkHeading.ColumnStyles.Clear();
             networkHeading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); networkHeading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -158,7 +181,11 @@ namespace Knot.NativePreview
             addresses.AccessibleName = "화면 공유에 사용할 네트워크"; addresses.Margin = new Padding(0, P(8), 0, 0);
             foreach (AdapterChoice choice in choices) addresses.Items.Add(choice);
             if (addresses.Items.Count > 0) addresses.SelectedIndex = 0;
-            networkSettings.Controls.Add(addresses); SetViewVisible(networkSettings, false); networkCard.Content.Controls.Add(networkSettings);
+            networkSettings.Controls.Add(addresses);
+            legacyMode.Text = "고급: 긴 연결코드와 Windows 승인 사용"; legacyMode.AutoSize = true; legacyMode.Dock = DockStyle.Top;
+            legacyMode.Margin = new Padding(0, P(12), 0, 0); legacyMode.AccessibleName = "기존 긴 연결코드 방식";
+            SetOwnedFont(legacyMode, PreviewStyle.Type(9, FontStyle.Regular, scale)); networkSettings.Controls.Add(legacyMode);
+            SetViewVisible(networkSettings, false); networkCard.Content.Controls.Add(networkSettings);
 
             privacy = MakeLabel("허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.", 9, FontStyle.Regular);
             privacy.Margin = new Padding(P(2), 0, P(2), P(12)); body.Controls.Add(privacy);
@@ -168,7 +195,8 @@ namespace Knot.NativePreview
             helpNavigation.Click += delegate { ShowHelp(true); };
             compactDesktopNavigation.Click += delegate { ShowHelp(false); };
             compactHelpNavigation.Click += delegate { ShowHelp(true); };
-            networkDisclosure.Click += delegate { networkExpanded = !networkExpanded; SetViewVisible(networkSettings, networkExpanded); ApplyResponsiveLayout(); UpdateWrapWidths(); };
+            networkDisclosure.Click += delegate { networkExpanded = !networkExpanded; SetViewVisible(networkSettings, networkExpanded); ApplyCurrentPresentation(); };
+            legacyMode.CheckedChanged += delegate { if (server == null) ApplyCurrentPresentation(); };
             addresses.SelectedIndexChanged += delegate { UpdateNetwork(); };
             SizeChanged += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
             Shown += delegate
@@ -199,6 +227,7 @@ namespace Knot.NativePreview
             FormClosing += delegate
             {
                 closing = true; lifecycleTimer.Stop();
+                enrollmentCode.Text = ""; enrollmentCode.AccessibleName = "8자리 일회용 연결번호";
                 if (server != null) { presentation.Clear(server.Identity); pin.Clear(); server.Dispose(); server = null; }
             };
             FormClosed += delegate
@@ -278,9 +307,9 @@ namespace Knot.NativePreview
             TableLayoutPanel help = Column(); help.Padding = new Padding(P(32), 0, P(32), P(20));
             PreviewCard steps = new PreviewCard(scale); steps.Dock = DockStyle.Top;
             Label title = MakeLabel("세 단계로 연결하세요", 17, FontStyle.Bold); title.Margin = new Padding(0, 0, 0, P(20)); steps.Content.Controls.Add(title);
-            AddHelpStep(steps.Content, "01  이 PC에서 공유 시작", "‘화면 공유 시작’을 누르고 연결 코드를 복사하세요.");
-            AddHelpStep(steps.Content, "02  Mac에서 코드 확인", "Knot Native Preview에 코드를 붙여 넣고, 두 화면의 인증서 지문이 같은지 확인하세요.");
-            AddHelpStep(steps.Content, "03  이 PC에서 연결 허용", "요청 이름과 주소를 확인한 뒤 연결을 허용하세요. 이름은 인증된 신원이 아니에요.");
+            AddHelpStep(steps.Content, "01  이 PC에서 공유 시작", "‘화면 공유 시작’을 누르면 8자리 연결번호가 표시돼요. 이 번호를 아는 Mac 한 대에 이번 화면·입력 연결을 허용해요.");
+            AddHelpStep(steps.Content, "02  Mac에서 이 PC 선택", "같은 Wi-Fi의 ‘근처 PC’에서 이 PC를 선택하고 8자리 번호를 입력하세요.");
+            AddHelpStep(steps.Content, "03  바로 연결", "번호 확인이 끝나면 화면을 준비해요. Windows에서 다시 허용할 필요는 없어요. ‘공유 중지’로 이번 권한을 없앨 수 있어요.");
             help.Controls.Add(steps);
             PreviewCard scope = new PreviewCard(scale); scope.Dock = DockStyle.Top;
             Label scopeTitle = MakeLabel("이번 미리보기에서 알아둘 점", 12, FontStyle.Bold); scopeTitle.Margin = new Padding(0, 0, 0, P(10)); scope.Content.Controls.Add(scopeTitle);
@@ -350,6 +379,7 @@ namespace Knot.NativePreview
                     SetOwnedFont(requestName, PreviewStyle.Type(compact ? 9.5f : 13, FontStyle.Bold, scale));
                     SetOwnedFont(requestAddress, PreviewStyle.Type(compact ? 9.5f : 10.5f, FontStyle.Regular, scale));
                     SetOwnedFont(trustTitle, PreviewStyle.Type(compact ? 8.5f : 9, FontStyle.Bold, scale));
+                    SetOwnedFont(enrollmentCode, new Font("Consolas", (compact ? 22 : 30) * scale, FontStyle.Bold));
                     SetOwnedFont(stop, PreviewStyle.Type(compact ? 9.5f : 10.5f, FontStyle.Bold, scale));
                     SetOwnedFont(pin, new Font("Consolas", (compact ? 9 : 10) * scale));
                     foreach (PreviewButton action in new PreviewButton[] { share, copy, approve, decline })
@@ -361,13 +391,14 @@ namespace Knot.NativePreview
                     densityApplied = true;
                 }
                 compactMode = compact;
+                enrollmentCode.Height = R(compact ? 46 : 60);
                 SetViewVisible(rail, !compact); shell.ColumnStyles[0].Width = compact ? 0 : R(204);
                 SetViewVisible(compactNavigation, compact); SetViewVisible(headerTitle, !compact); SetViewVisible(headerSubtitle, !compact);
                 header.Padding = compact ? new Padding(R(16), R(8), R(16), R(6)) : new Padding(R(32), R(28), R(32), R(20));
                 badge.Margin = new Padding(0, R(compact ? 4 : 12), 0, 0);
                 body.Padding = helpBody.Padding = new Padding(R(compact ? 16 : 32), 0, R(compact ? 16 : 32), R(compact ? 12 : 20));
-                taskCard.Padding = networkCard.Padding = new Padding(R(compact ? 12 : 24));
-                taskCard.Margin = networkCard.Margin = new Padding(0, 0, 0, R(compact ? 12 : 16));
+                taskCard.Padding = networkCard.Padding = qualityCard.Padding = new Padding(R(compact ? 12 : 24));
+                taskCard.Margin = networkCard.Margin = qualityCard.Margin = new Padding(0, 0, 0, R(compact ? 12 : 16));
                 foreach (Control control in helpBody.Controls)
                 {
                     PreviewCard card = control as PreviewCard;
@@ -437,8 +468,9 @@ namespace Knot.NativePreview
         {
             if (fixtureMode && fixture != null) return fixture;
             ApprovalMetadata approval = presentation.Approval;
-            return new HostViewSnapshot(phase, addresses.Items.Count > 0, server != null, presentation.Pin,
-                approval == null ? "" : approval.ClaimedViewerLabel, approval == null ? "" : approval.ObservedRemoteIPv4, PreviewCopy.Status(rawStatus), invitationAvailable);
+                return new HostViewSnapshot(phase, addresses.Items.Count > 0, server != null, presentation.Pin,
+                approval == null ? "" : approval.ClaimedViewerLabel, approval == null ? "" : approval.ObservedRemoteIPv4,
+                PreviewCopy.Status(rawStatus), invitationAvailable, server == null ? !legacyMode.Checked : server.UsesEnrollment);
         }
         private void ApplyCurrentPresentation() { ApplyPresentation(CurrentSnapshot()); }
         private void ApplyPresentation(HostViewSnapshot view)
@@ -449,17 +481,36 @@ namespace Knot.NativePreview
             stateStep.Text = view.Phase == HostViewPhase.Failed ? "공유 준비 확인" : idle ? "01  화면 공유" : view.Phase == HostViewPhase.Invitation ? "02  Mac에 코드 보내기" : "03  연결 확인";
             stateTitle.Text = view.Phase == HostViewPhase.Failed ? "공유 준비를 확인해주세요" : view.Phase == HostViewPhase.Stopped ? "새 코드로 다시 연결하세요" : idle ? "Mac에서 이 화면을 사용하세요" : view.Phase == HostViewPhase.Invitation ? "연결 코드를 Mac에 보내세요" : view.Phase == HostViewPhase.Request ? "이 Mac의 연결을 허용할까요?" : view.Phase == HostViewPhase.Sharing ? "Windows 화면을 전송하고 있어요" : view.Phase == HostViewPhase.Stopping ? "화면 공유를 마치고 있어요" : "Windows 화면을 준비하고 있어요";
             stateDescription.Text = view.Phase == HostViewPhase.Failed ? view.Status : view.Phase == HostViewPhase.Stopped ? "이전 연결의 권한은 끝났어요.\r\n공유를 시작하면 새 연결 코드가 만들어져요." : idle ? "공유를 시작하면 연결 코드가 만들어져요.\r\nMac에서 코드를 확인한 뒤 이 PC에서 연결을 허용해주세요." : view.Phase == HostViewPhase.Invitation ? "Mac의 Knot Native Preview에 붙여 넣으세요.\r\n연결 코드는 2분 동안 한 번만 사용할 수 있어요." : view.Phase == HostViewPhase.Request ? "직접 연결을 요청한 Mac인지 이름과 주소를 확인해주세요." : view.Phase == HostViewPhase.Sharing ? "이 PC의 화면과 입력이 공유 중이에요.\r\n다시 연결하려면 새 연결 코드가 필요해요." : view.Phase == HostViewPhase.Stopping ? "이번 연결의 권한을 종료하고 있어요. 정리가 끝나면 새 코드를 만들 수 있어요." : "연결은 허용됐어요. 인코더와 전송 준비가 끝날 때까지 잠시 기다려주세요.";
+            if (view.EnrollmentMode)
+            {
+                if (idle)
+                {
+                    stateTitle.Text = view.Phase == HostViewPhase.Failed ? "공유 준비를 확인해주세요" : view.Phase == HostViewPhase.Stopped ? "새 번호로 다시 연결하세요" : "Mac에서 이 화면을 사용하세요";
+                    if (view.Phase != HostViewPhase.Failed) stateDescription.Text = "공유를 시작하면 8자리 번호가 만들어져요.\r\n번호를 아는 Mac 한 대에 이번 화면·입력 연결을 허용해요.";
+                }
+                else if (view.Phase == HostViewPhase.Invitation)
+                {
+                    stateStep.Text = "02  Mac에서 번호 입력"; stateTitle.Text = "Mac에서 8자리 번호를 입력하세요";
+                    stateDescription.Text = "‘근처 PC’에서 이 PC를 선택하세요.\r\n번호는 2분 동안 한 번만 사용할 수 있어요.";
+                }
+            }
             SetViewVisible(requestPanel, view.ViewerLabel.Length > 0 && (view.Phase == HostViewPhase.Request || view.Phase == HostViewPhase.Preparing || view.Phase == HostViewPhase.Sharing));
             requestName.Text = view.ViewerLabel + "  ·  확인되지 않은 이름";
             requestAddress.Text = "연결 주소  " + view.ObservedAddress;
-            SetViewVisible(trustPanel, view.Pin.Length != 0);
+            SetViewVisible(trustPanel, view.Pin.Length != 0 && (!view.EnrollmentMode || networkExpanded));
             if (pin.Text != view.Pin) pin.Text = view.Pin;
+            string code = view.EnrollmentMode && view.Phase == HostViewPhase.Invitation ? (fixtureMode ? fixtureCode : server == null ? "" : server.EnrollmentCode) : "";
+            enrollmentCode.Text = code.Length == 8 ? code.Substring(0, 4) + " " + code.Substring(4) : "";
+            enrollmentCode.AccessibleName = code.Length == 8 ? "연결번호 " + string.Join(" ", Array.ConvertAll<char, string>(code.ToCharArray(), delegate(char c) { return c.ToString(); })) : "8자리 일회용 연결번호";
+            SetViewVisible(enrollmentCode, view.EnrollmentMode && view.Phase == HostViewPhase.Invitation);
             SetViewVisible(share, idle); share.Enabled = idle && view.HasAddress && !view.RunPresent;
-            SetViewVisible(copy, view.Phase == HostViewPhase.Invitation); copy.Enabled = view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
-            SetViewVisible(approve, view.Phase == HostViewPhase.Request); SetViewVisible(decline, view.Phase == HostViewPhase.Request);
-            approve.Enabled = decline.Enabled = view.Phase == HostViewPhase.Request && view.RunPresent;
+            SetViewVisible(copy, !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation); copy.Enabled = !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
+            SetViewVisible(approve, !view.EnrollmentMode && view.Phase == HostViewPhase.Request); SetViewVisible(decline, !view.EnrollmentMode && view.Phase == HostViewPhase.Request);
+            approve.Enabled = decline.Enabled = !view.EnrollmentMode && view.Phase == HostViewPhase.Request && view.RunPresent;
             SetViewVisible(stop, view.RunPresent); stop.Enabled = view.RunPresent && view.Phase != HostViewPhase.Stopping;
-            addresses.Enabled = networkDisclosure.Enabled = !view.RunPresent;
+            addresses.Enabled = legacyMode.Enabled = !view.RunPresent; networkDisclosure.Enabled = true;
+            qualityProfiles.Enabled = !view.RunPresent;
+            SetViewVisible(qualityCard, idle && !view.RunPresent);
             if (status.Text != view.Status) status.Text = view.Status;
             ApplyResponsiveLayout(); UpdateWrapWidths();
         }
@@ -469,6 +520,13 @@ namespace Knot.NativePreview
             fixture = snapshot; ShowHelp(showHelp); ApplyCurrentPresentation();
         }
         internal bool FixtureMode { get { return fixtureMode; } }
+        internal void SetFixtureEnrollmentCode(string code)
+        {
+            if (!fixtureMode || code == null || code.Length != 8) throw new InvalidOperationException("Synthetic code requires the inert fixture.");
+            foreach (char c in code) if (c < '0' || c > '9') throw new InvalidOperationException("Invalid synthetic code.");
+            fixtureCode = code;
+        }
+        internal string DisplayedEnrollmentCode { get { return enrollmentCode.Text; } }
         internal bool HelpVisible { get { return helpVisible; } }
         internal string DisplayedPin { get { return pin.Text; } }
         internal bool ApprovalVisible { get { return approve.Visible; } }
@@ -480,6 +538,8 @@ namespace Knot.NativePreview
         internal bool ApprovalEnabled { get { return approve.Visible && approve.Enabled && decline.Visible && decline.Enabled; } }
         internal bool FixtureBrandPainted { get { return brandMark != null && brandMark.Visible && brandMark.DrawCalls > 0 || compactBrandMark != null && compactBrandMark.Visible && compactBrandMark.DrawCalls > 0; } }
         internal bool FixtureCompactMode { get { return compactMode; } }
+        internal bool FixtureQualityEditable { get { return qualityProfiles.Enabled; } }
+        internal MediaQualityProfile SelectedQuality { get { return qualityProfiles.SelectedItem as MediaQualityProfile ?? MediaQualityProfile.Sharp4K; } }
         internal float FixtureLogicalWidth { get { return ClientSize.Width / CurrentLayoutScale; } }
         private static Rectangle BoundsWithin(Control child, Control ancestor)
         {
@@ -504,6 +564,10 @@ namespace Knot.NativePreview
                     scroll.ClientRectangle.Contains(BoundsWithin(requestAddress, scroll)) && scroll.ClientRectangle.Contains(BoundsWithin(approve, scroll)) &&
                     scroll.ClientRectangle.Contains(BoundsWithin(decline, scroll));
             }
+        }
+        internal bool FixtureEnrollmentCodeFits
+        {
+            get { return !enrollmentCode.Visible || scroll.ClientRectangle.Contains(BoundsWithin(enrollmentCode, scroll)) && enrollmentCode.ClientSize.Height >= enrollmentCode.Font.GetHeight(96f); }
         }
         internal void PrepareFixtureLayout()
         {
@@ -560,7 +624,8 @@ namespace Knot.NativePreview
             if (server != null || selected == null) return;
             try
             {
-                HostServer run = new HostServer(selected.Address, 48631, new WindowsMediaFactory(), new WindowsInputSink(), false, null);
+                HostServer run = new HostServer(selected.Address, 48631, new WindowsMediaFactory(SelectedQuality), new WindowsInputSink(), false, null,
+                    !legacyMode.Checked, System.Diagnostics.Stopwatch.GetTimestamp, null);
                 server = run; presentation.Bind(run.Identity); phase = HostViewPhase.Invitation; invitationAvailable = true;
                 run.StatusChanged = delegate(string text)
                 {
@@ -569,6 +634,7 @@ namespace Knot.NativePreview
                         if (server != run || !presentation.IsCurrent(run.Identity)) return;
                         rawStatus = text;
                         if (run.IsActive) phase = HostViewPhase.Sharing;
+                        else if (run.EnrollmentReady && phase != HostViewPhase.Stopping) phase = HostViewPhase.Preparing;
                         ApplyCurrentPresentation();
                     });
                 };
@@ -578,6 +644,15 @@ namespace Knot.NativePreview
                     {
                         if (server != run || !presentation.PublishApproval(run.Identity, metadata)) return;
                         invitationAvailable = false; phase = HostViewPhase.Request; ShowHelp(false); ApplyCurrentPresentation();
+                    });
+                };
+                run.ClaimAccepted = delegate(ApprovalMetadata metadata)
+                {
+                    if (!run.UsesEnrollment) return;
+                    OnUi(delegate
+                    {
+                        if (server != run || !presentation.PublishApproval(run.Identity, metadata)) return;
+                        invitationAvailable = false; phase = HostViewPhase.Preparing; ShowHelp(false); ApplyCurrentPresentation();
                     });
                 };
                 run.Finished = delegate
@@ -590,20 +665,20 @@ namespace Knot.NativePreview
                         ApplyCurrentPresentation();
                     });
                 };
-                rawStatus = "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";
+                rawStatus = run.UsesEnrollment ? "Mac에서 이 PC를 선택하고 8자리 번호를 입력하세요. 이 번호로 한 번의 화면·입력 연결을 허용해요." : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";
                 ShowHelp(false); ApplyCurrentPresentation(); lifecycleTimer.Start(); run.Start();
             }
             catch (Exception)
             {
                 if (server != null) { presentation.Clear(server.Identity); server.Dispose(); server = null; }
                 lifecycleTimer.Stop(); phase = HostViewPhase.Failed; invitationAvailable = false;
-                rawStatus = "화면 공유를 시작하지 못했어요. 선택한 네트워크와 포트 48631을 사용할 수 있는지 확인해주세요.";
+                rawStatus = "화면 공유를 시작하지 못했어요. 선택한 네트워크와 TCP 48631·48632, UDP 48633의 연결 허용 여부를 확인해주세요.";
                 ApplyCurrentPresentation();
             }
         }
         private void Decide(bool allowed)
         {
-            if (server == null || !presentation.IsCurrent(server.Identity) || phase != HostViewPhase.Request) return;
+            if (server == null || server.UsesEnrollment || !presentation.IsCurrent(server.Identity) || phase != HostViewPhase.Request) return;
             phase = allowed ? HostViewPhase.Preparing : HostViewPhase.Stopping;
             server.RespondToApproval(allowed);
             rawStatus = allowed ? "연결을 허용했어요. Windows 화면과 인코더를 준비하고 있어요." : "연결 요청을 거절했어요. 이번 연결 권한을 종료하고 있어요.";

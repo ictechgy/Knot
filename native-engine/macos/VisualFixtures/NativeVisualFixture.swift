@@ -11,6 +11,7 @@ struct NativeVisualFixture {
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
+        let effects = FixtureEnrollmentEffects()
         let cases: [(String, String, Int, Int, Bool)] = [
             ("idle", "idle", 1200, 760, false),
             ("reviewed", "reviewed", 1200, 760, false),
@@ -27,16 +28,33 @@ struct NativeVisualFixture {
             ("reviewed-compact", "reviewed", 880, 620, false),
             ("streaming-compact", "streaming", 880, 620, false),
             ("dark", "idle", 1200, 760, true),
-            ("reviewed-dark", "reviewed", 1200, 760, true)
+            ("reviewed-dark", "reviewed", 1200, 760, true),
+            ("fullscreen", "streaming", 1920, 1080, false),
+            ("fullscreen-controls", "streaming", 1920, 1080, false),
+            ("fullscreen-4k", "streaming", 3840, 2160, false),
+            ("fullscreen-4k-controls", "streaming", 3840, 2160, false),
+            ("nearby", "nearby", 1200, 760, false),
+            ("number", "number", 1200, 760, false),
+            ("number-working", "number-working", 1200, 760, false),
+            ("number-error", "number-error", 1200, 760, false),
+            ("manual-address", "manual-address", 1200, 760, false)
         ]
         var images: [[String: Any]] = []
         for (name, state, width, height, dark) in cases {
             let model = try makeModel(state)
-            let simulated = AnyView(model.phase == .streaming ? AnyView(SyntheticDesktop()) : AnyView(Color(white: 0.045)))
-            let content = PreviewWindow(model: model, simulatedDesktop: simulated, initialHelp: state == "help")
-                .environment(\.colorScheme, dark ? .dark : .light)
-                .environment(\.controlActiveState, .key)
-                .frame(width: CGFloat(width), height: CGFloat(height))
+            let enrollment = try makeEnrollment(state, effects: effects)
+            let immersive = name.hasPrefix("fullscreen")
+            let revealed = name.hasSuffix("controls")
+            if name.contains("4k") { model.videoSize = CGSize(width: 3840, height: 2160) }
+            model.showFullscreenControls = revealed
+            // Allocate the real inert presenter below new synthetic pixels. No
+            // channel, capture, real input event or shown window is involved.
+            let simulated = AnyView(NativeDesktop(model: model).overlay {
+                if model.phase == .streaming { SyntheticDesktop() }
+                else { Color(white: 0.045) }
+            })
+            let content = root(model: model, enrollment: enrollment, simulated: simulated, help: state == "help", manual: state == "manual-address", fullscreen: immersive,
+                width: width, height: height, dark: dark)
             let view = NSHostingView(rootView: content)
             let rect = NSRect(x: 0, y: 0, width: width, height: height)
             let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -49,6 +67,23 @@ struct NativeVisualFixture {
             RunLoop.main.run(until: Date().addingTimeInterval(0.15))
             view.layoutSubtreeIfNeeded()
             view.displayIfNeeded()
+            if immersive { try requireFullCanvas(model: model, root: view, width: width, height: height) }
+            var stablePresenter: Bool?
+            if name == "streaming" {
+                guard let presenter = model.surface else { throw FixtureError.presenter }
+                let identity = ObjectIdentifier(presenter)
+                for (full, controls) in [(true, false), (true, true), (false, false)] {
+                    model.showFullscreenControls = controls
+                    view.rootView = root(model: model, enrollment: enrollment, simulated: simulated, help: false, manual: false, fullscreen: full,
+                        width: width, height: height, dark: dark)
+                    view.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+                    view.layoutSubtreeIfNeeded()
+                    guard let current = model.surface, ObjectIdentifier(current) == identity else { throw FixtureError.presenter }
+                    if full { try requireFullCanvas(model: model, root: view, width: width, height: height) }
+                }
+                stablePresenter = model.surface.map { ObjectIdentifier($0) == identity } == true
+            }
+
             guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { throw FixtureError.bitmap }
@@ -57,10 +92,15 @@ struct NativeVisualFixture {
             guard let png = bitmap.representation(using: .png, properties: [:]) else { throw FixtureError.bitmap }
             let file = "mac-" + name + ".png"
             try png.write(to: output.appendingPathComponent(file), options: .atomic)
-            images.append(["name": file, "width": width, "height": height, "state": state, "dark": dark])
+            images.append(["name": file, "width": width, "height": height, "state": state, "dark": dark,
+                "immersiveFullscreen": immersive, "controlsRevealed": revealed,
+                "desktopFrame": frameDictionary(model: model, root: view),
+                "presenterTransitionChecks": name == "streaming" ? 3 : 0,
+                "stablePresenterAcrossFullscreen": stablePresenter.map { $0 as Any } ?? NSNull()])
             window.close()
             print("Rendered " + file)
         }
+        guard effects.count == 0 else { throw FixtureError.effects }
         let result: [String: Any] = [
             "schema": 1, "renderMethod": "offscreen NSHostingView cacheDisplay into owned bitmap; no shown window or screen capture",
             "controlActiveState": "key, explicit synthetic view environment",
@@ -68,10 +108,51 @@ struct NativeVisualFixture {
             "productionEntryInvoked": false, "networkInvoked": false,
             "clipboardInvoked": false, "certificateCreationInvoked": false,
             "captureInvoked": false, "actualInputInvoked": false, "screenCaptureInvoked": false,
-            "freshSyntheticOnly": true, "images": images
+            "freshSyntheticOnly": true, "enrollmentAdaptersInvoked": effects.count, "images": images
         ]
         try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
             .write(to: output.appendingPathComponent("render-result.json"), options: .atomic)
+    }
+
+    @MainActor private static func root(model: SessionModel, enrollment: EnrollmentModel, simulated: AnyView, help: Bool,
+                                        manual: Bool, fullscreen: Bool, width: Int, height: Int, dark: Bool) -> some View {
+        PreviewWindow(model: model, simulatedDesktop: simulated, initialHelp: help, simulatedFullscreen: fullscreen,
+            enrollment: enrollment, initialManualAddress: manual)
+            .environment(\.colorScheme, dark ? .dark : .light)
+            .environment(\.controlActiveState, .key)
+            .frame(width: CGFloat(width), height: CGFloat(height))
+    }
+
+    @MainActor private static func desktopFrame(model: SessionModel, root: NSView) -> CGRect {
+        guard let desktop = model.surface as? DesktopView else { return .zero }
+        return desktop.convert(desktop.bounds, to: root)
+    }
+    @MainActor private static func frameDictionary(model: SessionModel, root: NSView) -> [String: Double] {
+        let frame = desktopFrame(model: model, root: root)
+        return ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height]
+    }
+    @MainActor private static func requireFullCanvas(model: SessionModel, root: NSView, width: Int, height: Int) throws {
+        let frame = desktopFrame(model: model, root: root)
+        guard abs(frame.minX) < 0.5, abs(frame.minY) < 0.5,
+              abs(frame.width - Double(width)) < 0.5, abs(frame.height - Double(height)) < 0.5 else {
+            throw FixtureError.geometry(frame, CGSize(width: width, height: height))
+        }
+    }
+
+    @MainActor private static func makeEnrollment(_ state: String, effects: FixtureEnrollmentEffects) throws -> EnrollmentModel {
+        let first = try EnrollmentCandidate(address: "192.168.50.24", port: 48632, slot: Data(repeating: 1, count: 16), name: "작업용 Windows")
+        let second = try EnrollmentCandidate(address: "192.168.50.25", port: 48632, slot: Data(repeating: 2, count: 16), name: "개발용 PC")
+        let values = state == "nearby" ? [first, second] : ["number", "number-working", "number-error"].contains(state) ? [first] : []
+        let phase: EnrollmentModel.Phase = state == "number-working" ? .authenticating : state == "number-error" ? .failed : .idle
+        let status = state == "number-working" ? "8자리 번호를 확인하고 연결 정보를 안전하게 받고 있어요…" :
+            state == "number-error" ? "8자리 번호를 확인해주세요. 번호가 바뀌었다면 Windows에서 공유를 다시 시작하세요." :
+            values.isEmpty ? nil : "Windows에 표시된 8자리 번호를 입력하세요. 기기 이름과 주소는 아직 인증되지 않았어요."
+        let model = EnrollmentModel(makeDiscovery: { effects.mark(); return FixtureEmptyDiscovery() },
+            makeClient: { _, _ in effects.mark(); throw EnrollmentFailure.cancelled },
+            initialCandidates: values, initialPhase: phase, initialStatus: status)
+        if state == "number" { model.code = "12345678" }
+        if state == "manual-address" { model.manualAddress = "100.100.10.12" }
+        return model
     }
 
     @MainActor private static func makeModel(_ state: String) throws -> SessionModel {
@@ -112,7 +193,18 @@ struct NativeVisualFixture {
     }
 }
 
-enum FixtureError: Error { case arguments, bitmap }
+enum FixtureError: Error { case arguments, bitmap, presenter, effects, geometry(CGRect, CGSize) }
+
+private final class FixtureEnrollmentEffects: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func mark() { lock.lock(); value += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+}
+private final class FixtureEmptyDiscovery: EnrollmentDiscovering, @unchecked Sendable {
+    func discover(address: String?) async throws -> [EnrollmentCandidate] { [] }
+    func close() {}
+}
 
 /// Newly authored synthetic pixels, not a captured desktop or user document.
 struct SyntheticDesktop: View {

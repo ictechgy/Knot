@@ -61,6 +61,21 @@ func strictJSON(_ text: String) { #expect(throws: (any Error).self) { try Strict
     }
 }
 
+@Test func readyAccepts4KAndRejectsUnsafeVideoBounds() throws {
+    func bytes(_ width: Int, _ height: Int, _ fps: Int = 30, _ bitrate: Int = 40_000_000) -> Data {
+        Data("{\"v\":1,\"codec\":\"h264-annexb\",\"width\":\(width),\"height\":\(height),\"fps\":\(fps),\"bitrate\":\(bitrate),\"hardwareEncoder\":true}".utf8)
+    }
+    let ready = try Ready(bytes(3840, 2160))
+    #expect(ready.width == 3840 && ready.height == 2160 && ready.fps == 30 && ready.bitrate == 40_000_000)
+    #expect(try Ready(bytes(3840, 2160, 60)).fps == 60)
+    for (width, height) in [(3842, 2160), (3840, 2162), (3839, 2160), (3840, 2159), (15, 16), (Int.max, Int.max)] {
+        #expect(!VideoLimits.accepts(width: width, height: height))
+        #expect(throws: (any Error).self) { try Ready(bytes(width, height)) }
+    }
+    #expect(throws: (any Error).self) { try Ready(bytes(3840, 2160, 61)) }
+    #expect(throws: (any Error).self) { try Ready(bytes(3840, 2160, 30, 40_000_001)) }
+}
+
 @Test func annexBConversionAndMalformedNALs() throws {
     let unit = try AccessUnit(annexB: Data([0,0,0,1,0x67,1,2,0,0,1,0x68,3,0,0,1,0x65,4]))
     #expect(unit.isIDR && unit.sps.count == 1 && unit.pps.count == 1)

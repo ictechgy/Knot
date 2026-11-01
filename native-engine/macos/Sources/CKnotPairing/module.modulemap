@@ -1,0 +1,4 @@
+module CKnotPairing [system] {
+    header "shim.h"
+    export *
+}

@@ -18,11 +18,6 @@ struct Session {
     knot::Clock::time_point lastProgress = knot::Clock::now();
     int32_t failure = 0;
 };
-bool ValidConfig(const KnMediaConfig& c) {
-    return c.width >= 16 && c.width <= 1920 && c.height >= 16 && c.height <= 1080 &&
-        (c.width & 1U) == 0 && (c.height & 1U) == 0 && c.fps >= 1 && c.fps <= 60 &&
-        c.bitrate >= 1000000 && c.bitrate <= 40000000;
-}
 int32_t CaptureStatus(HRESULT hr) {
     if (hr == DXGI_ERROR_UNSUPPORTED || hr == E_ACCESSDENIED || hr == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE ||
         hr == DXGI_ERROR_SESSION_DISCONNECTED) return KN_MEDIA_UNSUPPORTED_DISPLAY;
@@ -34,7 +29,7 @@ extern "C" KN_MEDIA_API void* KN_MEDIA_CALL kn_media_create(const KnMediaConfig*
     KnMediaInfo* info, int32_t* error) {
     if (error) *error = KN_MEDIA_INVALID_ARGUMENT;
     if (info) *info = {};
-    if (!config || !info || !error || !ValidConfig(*config)) return nullptr;
+    if (!config || !info || !error || !knot::ValidMediaConfig(*config)) return nullptr;
     try {
         auto session = std::make_unique<Session>();
         HRESULT hr = session->runtime.Start();

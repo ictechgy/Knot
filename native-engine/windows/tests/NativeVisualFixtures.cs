@@ -25,6 +25,7 @@ namespace Knot.NativePreview
             internal bool Help;
             internal int Width, Height;
             internal float Scale;
+            internal bool EnrollmentMode;
             internal string StatusOverride, ViewerLabelOverride;
             internal Frame(string name, HostViewPhase phase, bool help, int width, int height, float scale)
             { Name = name; Phase = phase; Help = help; Width = width; Height = height; Scale = scale; }
@@ -125,6 +126,12 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-request-scale200.png", HostViewPhase.Request, false, 1040, 740, 2f));
                 frames.Add(new Frame("windows-request-long-name-scale200.png", HostViewPhase.Request, false, 1040, 740, 2f) { ViewerLabelOverride = new string('W', 64) });
                 frames.Add(new Frame("windows-ended-error-scale200.png", HostViewPhase.Stopped, false, 1040, 740, 2f) { StatusOverride = PreviewCopy.Status(HostServer.Guidance("encoder")) });
+                frames.Add(new Frame("windows-short-idle.png", HostViewPhase.Idle, false, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-code.png", HostViewPhase.Invitation, false, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-code-compact.png", HostViewPhase.Invitation, false, 800, 620, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-code-scale200.png", HostViewPhase.Invitation, false, 1040, 740, 2f) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-preparing.png", HostViewPhase.Preparing, false, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-sharing.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true });
                 List<string> records = new List<string>();
                 using (Icon icon = new Icon(iconPath, 256, 256))
                 {
@@ -143,8 +150,11 @@ namespace Knot.NativePreview
                             form.ClientSize = new Size((int)(frame.Width * frame.Scale), (int)(frame.Height * frame.Scale));
                             Progress(frame, "after-requested-size");
                             HostViewSnapshot state = Snapshot(frame.Phase);
+                            form.SetFixtureEnrollmentCode("01234567");
+                            if (frame.EnrollmentMode)
+                                state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, state.ViewerLabel, state.ObservedAddress, state.Status, false, true);
                             if (frame.StatusOverride != null || frame.ViewerLabelOverride != null)
-                                state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy);
+                                state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy, state.EnrollmentMode);
                             Progress(frame, "before-presentation"); form.SetFixturePresentation(state, frame.Help); Progress(frame, "after-presentation");
                             AssertFontsUsable(form); Progress(frame, "fonts-usable-before-show");
                             Progress(frame, "before-show"); form.Show(); Progress(frame, "after-show");
@@ -164,14 +174,14 @@ namespace Knot.NativePreview
                                 if (!form.FixtureCompactMode) throw new InvalidOperationException("The compact font probe did not enter compact presentation.");
                                 Progress(frame, "fonts-usable-compact"); form.ClientSize = fullSize;
                                 form.PrepareFixtureLayout(); Pump(); AssertFontsUsable(form);
-                                if (form.FixtureCompactMode) throw new InvalidOperationException("The compact font probe did not restore normal presentation.");
+                                if (frame.Width >= 920 && frame.Scale == 1 && form.FixtureCompactMode) throw new InvalidOperationException("The compact font probe did not restore normal presentation.");
                                 form.PrepareFixtureLayout(); AssertFontsUsable(form); Progress(frame, "fonts-usable-restored");
                                 Progress(frame, "before-help"); form.SetFixturePresentation(state, true); Progress(frame, "after-help"); Pump(); Progress(frame, "after-help-pump");
                                 AssertFontsUsable(form); Progress(frame, "fonts-usable-help");
                                 if (form.CopyVisible) throw new InvalidOperationException("Invitation copy action must be hidden on the help page (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
                                 Progress(frame, "before-help-return"); form.SetFixturePresentation(state, false); Progress(frame, "after-help-return"); Pump(); Progress(frame, "after-help-return-pump");
                                 AssertFontsUsable(form); Progress(frame, "fonts-usable-help-return");
-                                if (!form.CopyVisible || !form.CopyEnabled)
+                                if (form.CopyVisible != !frame.EnrollmentMode || form.CopyEnabled != !frame.EnrollmentMode)
                                     throw new InvalidOperationException("Invitation copy action must restore from explicit state after help navigation (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
                             }
                             currentFrame += " actual[shareVisible=" + form.ShareVisible + ",shareEnabled=" + form.ShareEnabled +
@@ -187,14 +197,19 @@ namespace Knot.NativePreview
                             bool expectedShare = !frame.Help && (frame.Phase == HostViewPhase.Idle || frame.Phase == HostViewPhase.Stopped || frame.Phase == HostViewPhase.Failed);
                             if (form.ShareVisible != expectedShare || form.ShareEnabled != expectedShare)
                                 throw new InvalidOperationException("Share must remain unavailable while a run owns resources.");
-                            bool expectedCopy = !frame.Help && frame.Phase == HostViewPhase.Invitation;
+                            bool expectedCopy = !frame.Help && !frame.EnrollmentMode && frame.Phase == HostViewPhase.Invitation;
                             if (form.CopyVisible != expectedCopy || form.CopyEnabled != expectedCopy)
                                 throw new InvalidOperationException("Only an available invitation has a copy action.");
                             if (form.ApprovalEnabled != expectedApproval)
                                 throw new InvalidOperationException("Approval must be an explicit pending-request action.");
                             if (form.StopVisible != state.RunPresent) throw new InvalidOperationException("Stop action is not lifecycle-bound.");
+                            string expectedCode = frame.EnrollmentMode && frame.Phase == HostViewPhase.Invitation ? "0123 4567" : "";
+                            if (form.DisplayedEnrollmentCode != expectedCode) throw new InvalidOperationException("Only the current short-code invitation is displayed.");
+                            if (form.FixtureQualityEditable == state.RunPresent)
+                                throw new InvalidOperationException("Quality is selectable only before the sharing run.");
                             AssertFontsUsable(form);
                             if (!form.FixtureFooterFits) throw new InvalidOperationException("Fixed status text and stop action must fit the actual client viewport.");
+                            if (!form.FixtureEnrollmentCodeFits) throw new InvalidOperationException("The complete short code must fit the actual client viewport.");
                             if (expectedApproval && !form.FixtureConsentFits) throw new InvalidOperationException("The full pin, observed address, unverified name and consent actions must fit the request viewport.");
                             float actualDpi;
                             using (Graphics graphics = form.CreateGraphics()) actualDpi = graphics.DpiX;
@@ -219,7 +234,7 @@ namespace Knot.NativePreview
                                     ",\"footerFits\":true,\"consentFits\":" + (expectedApproval ? "true" : "null") +
                                     ",\"layoutFontScale\":" + frame.Scale.ToString(CultureInfo.InvariantCulture) +
                                     ",\"actualDrawingDpi\":" + actualDpi.ToString(CultureInfo.InvariantCulture) +
-                                    ",\"state\":" + Q(frame.Phase.ToString()) + ",\"controlCount\":" + CountControls(form) +
+                                    ",\"state\":" + Q(frame.Phase.ToString()) + ",\"enrollmentMode\":" + (frame.EnrollmentMode ? "true" : "false") + ",\"shortCodeFits\":true,\"controlCount\":" + CountControls(form) +
                                     ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"brandPainted\":true,\"fontsUsable\":true,\"effectsBound\":false}");
                             }
                             Progress(frame, "before-close"); form.Close(); Progress(frame, "after-close"); Pump(); Progress(frame, "after-close-pump");

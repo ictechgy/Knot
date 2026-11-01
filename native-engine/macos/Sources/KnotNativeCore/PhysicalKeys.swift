@@ -17,6 +17,7 @@ public struct PhysicalKeyOwnership: Sendable {
     private var down: Set<UInt16> = []
     public init() {}
     public var count: Int { down.count }
+    public func owns(_ keyCode: UInt16) -> Bool { down.contains(keyCode) }
     public func routesDown(_ keyCode: UInt16, textMode: Bool, shortcutModifier: Bool) -> Bool {
         WindowsScanCodes.map[keyCode] != nil && (!textMode || shortcutModifier || down.contains(keyCode))
     }

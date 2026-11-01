@@ -1,6 +1,7 @@
 // The exact production CapturePacer::Pump and MediaTimeline, with fresh fake
 // readiness and pixels. No Windows, capture, input, codec, files, or UI APIs.
 #include "media_pacing.h"
+#include "media_limits.h"
 #include <iostream>
 #include <vector>
 
@@ -24,6 +25,34 @@ bool PendingReadback() {
         submitted.back().at != 17666 || submitted.back().pixels != 3 || !submitted.back().fresh) return false;
     // Pending did not advance the 16.666ms frame period or submit old pixels.
     if (submit(18000, CaptureReadiness::Unchanged) || polls != 3) return false;
+    return true;
+}
+
+bool VideoBounds() {
+    if (!knot::ValidMediaConfig({3840, 2160, 30, 40000000}) ||
+        !knot::ValidMediaConfig({3840, 2160, 60, 40000000}) ||
+        !knot::ValidMediaConfig({1920, 1080, 60, 20000000})) return false;
+    for (const KnMediaConfig invalid : {
+        KnMediaConfig{3842, 2160, 30, 40000000}, {3840, 2162, 30, 40000000},
+        {3839, 2160, 30, 40000000}, {3840, 2159, 30, 40000000},
+        {0xffffffffU, 0xffffffffU, 30, 40000000}, {3840, 2160, 0, 40000000},
+        {3840, 2160, 61, 40000000}, {3840, 2160, 30, 40000001}}) {
+        if (knot::ValidMediaConfig(invalid)) return false;
+    }
+    const KnMediaConfig fourK{3840, 2160, 30, 40000000};
+    uint32_t width = 0, height = 0;
+    if (!knot::ScaleVideoToBounds(3840, 2160, fourK, width, height) || width != 3840 || height != 2160 ||
+        !knot::ScaleVideoToBounds(1920, 1080, fourK, width, height) || width != 1920 || height != 1080 ||
+        !knot::ScaleVideoToBounds(3840, 2400, fourK, width, height) || width != 3456 || height != 2160 ||
+        knot::ScaleVideoToBounds(0xffffffffU, 2160, fourK, width, height)) return false;
+    uint32_t capacity = 0;
+    const uint32_t wireLimit = static_cast<uint32_t>(knot::kMaxAccessUnit);
+    const KnMediaConfig hd{1920, 1080, 60, 20000000};
+    if (!knot::CodecOutputScratch(hd, 0, capacity) || capacity != wireLimit ||
+        knot::CodecOutputScratch(hd, wireLimit + 1, capacity) ||
+        !knot::CodecOutputScratch(fourK, 12441600, capacity) || capacity != 12441600 ||
+        knot::CodecOutputScratch(fourK, 12441601, capacity) ||
+        knot::CodecOutputScratch({0xffffffffU, 0xffffffffU, 30, 40000000}, 0, capacity)) return false;
     return true;
 }
 
@@ -169,7 +198,7 @@ bool StaticToActiveDuration() {
 }
 
 int main() {
-    if (!PendingReadback() || !StartupAndBackpressure() || !PendingLiveness() || !StaticCadenceAndTimeline() ||
+    if (!VideoBounds() || !PendingReadback() || !StartupAndBackpressure() || !PendingLiveness() || !StaticCadenceAndTimeline() ||
         !KeyframeDeadlineOverridesIdle() || !ExplicitFixtureTimeline() || !StaticToActiveDuration()) {
         std::cerr << "FAIL: production media pacing/timeline policy\n"; return 1;
     }

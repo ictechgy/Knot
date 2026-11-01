@@ -1,5 +1,15 @@
 # Native preview changes
 
+## 0.1.0-native.5
+
+- Lift capture/Ready/SPS admission to3840×2160 and8,294,400pixels. Offer4K30/40Mbps,4K60/40Mbps and1080p60/20Mbps compatibility profiles. Preserve aspect and never upscale a smaller physical source.
+- Retain encode/decode queues and compressed frame/NAL limits. Bound MFT scratch separately to one validated4K NV12 frame(12,441,600bytes), with an additional six-frame actual software-MFT-to-VideoToolbox4K fixture.
+- Give native fullscreen the complete desktop canvas. Floating controls reveal actual received dimensions and retain disconnect/exit without reserving chrome height or replacing the presenter.
+- Default ordinary typing to the Mac input method. Keep Caps Lock local, physical shortcuts/navigation and matching key-ups intact, cancel revoked composition and reject late commits.
+- Use private-LAN discovery and an eight-digit120second PAKE slot for normal enrollment. Directional authenticated encryption transfers a fresh one-use30second media grant; media still uses a separate full-pin OS TLS connection. Windows Share explicitly authorizes one code holder. Legacy mode is a separate approval-required run.
+- Build one pinned BoringSSL revision behind an owned ABI on both platforms, preserve complete source/license provenance and run upstream plus owned crypto checks. No runtime download, saved pairing or automatic reconnect is claimed.
+- Advance numeric PE version to0.1.0.5 and Mac bundle revision to5. Build/synthetic acceptance remains separate from actual device and trusted-signing acceptance.
+
 ## 0.1.0-native.4
 
 - Rebuild both native interfaces around the approved Quiet Sidebar design: the actual Knot mark, calm surfaces, readable type, Korean guidance and a single task-focused primary action.

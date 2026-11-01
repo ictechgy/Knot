@@ -80,11 +80,8 @@ HRESULT DesktopCapture::Start(const KnMediaConfig& bounds, KnMediaInfo& info, Kn
     const LONG sourceHeight = display_.DesktopCoordinates.bottom - display_.DesktopCoordinates.top;
     if (sourceWidth < 16 || sourceHeight < 16 || sourceWidth > 16384 || sourceHeight > 16384)
         return DXGI_ERROR_UNSUPPORTED;
-    const double scale = std::min({1.0, static_cast<double>(bounds.width) / sourceWidth,
-        static_cast<double>(bounds.height) / sourceHeight});
-    width_ = static_cast<uint32_t>(sourceWidth * scale) & ~1U;
-    height_ = static_cast<uint32_t>(sourceHeight * scale) & ~1U;
-    if (width_ < 16 || height_ < 16) return DXGI_ERROR_UNSUPPORTED;
+    if (!ScaleVideoToBounds(static_cast<uint32_t>(sourceWidth), static_cast<uint32_t>(sourceHeight),
+        bounds, width_, height_)) return DXGI_ERROR_UNSUPPORTED;
     actual = {width_, height_, bounds.fps, bounds.bitrate};
     info = {width_, height_, bounds.fps, bounds.bitrate,
         display_.DesktopCoordinates.left, display_.DesktopCoordinates.top, sourceWidth, sourceHeight, 0};

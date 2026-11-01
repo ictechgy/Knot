@@ -3,6 +3,7 @@
 #define NOMINMAX
 #endif
 #include "kn_media.h"
+#include "media_limits.h"
 #include "h264.h"
 #include "media_pacing.h"
 #include "media_activation.h"
@@ -56,6 +57,7 @@ struct AccessUnit {
 
 class Encoder {
 public:
+    static constexpr uint32_t Capacity = 2;
     Encoder() = default;
     Encoder(const Encoder&) = delete;
     Encoder& operator=(const Encoder&) = delete;
@@ -63,13 +65,15 @@ public:
     // softwareOnly is reachable only by the separately linked synthetic test.
     HRESULT Start(const KnMediaConfig& config, bool softwareOnly);
     HRESULT Poll();
-    bool CanSubmit() const { return inFlight_ < 2 && (!async_ || inputReady_ != 0); }
+    bool CanSubmit() const { return inFlight_ < Capacity && (!async_ || inputReady_ != 0); }
     bool KeyframeDue(uint64_t presentationMicros) const { return timeline_.KeyframeDue(presentationMicros); }
     HRESULT Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros, uint64_t presentationMicros);
     HRESULT Receive(AccessUnit& output); // S_FALSE = no output yet
     HRESULT Drain();
     bool Hardware() const { return hardware_; }
     uint32_t InFlight() const { return inFlight_; }
+    uint32_t PeakOutputScratch() const { return peakOutputScratch_; }
+    uint32_t LastOutputMinimum() const { return outputMinimum_; }
 private:
     HRESULT Configure(IMFActivate* activation, const KnMediaConfig& config, bool hardware);
     HRESULT ReadSequenceHeader();
@@ -84,6 +88,7 @@ private:
     KnMediaConfig config_{};
     bool async_ = false, hardware_ = false, draining_ = false;
     uint32_t inputReady_ = 0, outputReady_ = 0, inFlight_ = 0;
+    uint32_t peakOutputScratch_ = 0, outputMinimum_ = 0;
     MediaTimeline timeline_{1};
     DWORD inputId_ = 0, outputId_ = 0;
     struct Stamp { LONGLONG sampleTime; uint64_t captureMicros; };

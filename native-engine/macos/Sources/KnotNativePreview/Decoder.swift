@@ -91,7 +91,8 @@ final class NativeDecoder {
         } }
         guard status == noErr, let description else { throw NativeFailure.decoder }
         let size = CMVideoFormatDescriptionGetDimensions(description)
-        guard size.width == dimensions.0, size.height == dimensions.1, size.width <= 1920, size.height <= 1080 else { throw NativeFailure.decoder }
+        guard size.width == dimensions.0, size.height == dimensions.1,
+              VideoLimits.accepts(width: Int(size.width), height: Int(size.height)) else { throw NativeFailure.decoder }
         var created: VTDecompressionSession?
         let attributes: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                                           kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any]]

@@ -63,6 +63,8 @@ jobs:
             build/native-engine/macos/*.zip
             build/native-engine/macos/*.tar.gz
             build/native-engine/macos/*.json
+            build/native-engine/macos/*.a
+            build/native-engine/macos/KnotNativePairing-LICENSE.txt
             build/native-engine/macos/SHA256SUMS
             build/native-engine/macos/evidence/
           if-no-files-found: error
@@ -129,6 +131,8 @@ jobs:
           path: |
             build/native-engine/windows/Knot-Native-*.exe
             build/native-engine/windows/KnotNativeMedia.dll
+            build/native-engine/windows/KnotNativePairing.dll
+            build/native-engine/windows/KnotNativePairing-LICENSE.txt
             build/native-engine/windows/*.tar.gz
             build/native-engine/windows/*.json
             build/native-engine/windows/*.h264
@@ -146,4 +150,6 @@ jobs:
             build/native-engine/windows/NATIVE-INPUTS.json
             build/native-engine/windows/synthetic.h264
             build/native-engine/windows/synthetic-codec.json
+            build/native-engine/windows/synthetic-4k.h264
+            build/native-engine/windows/synthetic-codec-4k.json
           if-no-files-found: warn

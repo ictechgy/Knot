@@ -31,6 +31,7 @@ enum NativeCopy {
         "Choose a viewer label of 1–64 UTF-8 bytes without control characters.": "Mac 이름을 짧게 입력해 주세요. 제어 문자 없이 64바이트까지 사용할 수 있어요.",
         "Verifying the host certificate…": "선택한 Windows PC의 인증서를 확인하고 있어요.",
         "Certificate verified. Waiting for host approval and native encoder startup…": "Windows에서 연결 요청을 허용해 주세요. 승인 후 화면을 준비해요.",
+        "Number verified. Preparing the host desktop…": "번호를 확인했어요. Windows 화면과 인코더를 준비해요.",
         "Host approved and encoder ready. Waiting for the first decoded image…": "Windows가 연결을 허용했어요. 첫 화면이 도착하기를 기다려요.",
         "The native decoder stopped. Create a new invitation to reconnect.": "영상 처리가 중단됐어요. Windows에서 새 연결 코드를 만들어 주세요.",
         "The native display stopped. Create a new invitation to reconnect.": "화면 표시가 중단됐어요. Windows에서 새 연결 코드를 만들어 주세요.",

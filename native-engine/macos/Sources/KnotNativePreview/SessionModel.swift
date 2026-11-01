@@ -11,7 +11,9 @@ final class SessionModel: ObservableObject {
     @Published var invitation: Invitation?
     @Published var videoSize = CGSize(width: 1920, height: 1080)
     @Published var inputRecovery = false
-    @Published var textMode = false
+    @Published var textMode = true
+    @Published var showFullscreenControls = false
+    @Published private(set) var numberAuthorized = false
     @Published var viewerLabel = "My Mac"
     weak var surface: (any NativePresenter)? {
         didSet {
@@ -35,6 +37,7 @@ final class SessionModel: ObservableObject {
     private var nextInput = ContinuousClock.now
     private var writerBusy = false
     private var inputEpoch: UInt64 = 0
+    var inputRevision: UInt64 { inputEpoch }
     private var presentationBackpressureSince: ContinuousClock.Instant?
     private var displayBehind = false
     var active: Bool { [.connecting, .approval, .decoding, .streaming].contains(phase) }
@@ -43,10 +46,26 @@ final class SessionModel: ObservableObject {
 
     func review(_ secret: String) {
         guard !active else { return }
+        numberAuthorized = false
         do { invitation = try Invitation(secret); phase = .idle; status = "Review the private address and exact certificate pin below. Trust lasts for this connection only." }
         catch { invitation = nil; phase = .failed; status = "Invalid invitation. Ask the host to create a fresh native invitation." }
     }
     func connect() {
+        guard !active else { return }
+        numberAuthorized = false
+        startConnection()
+    }
+    func connectAuthenticated(_ enrollment: AuthenticatedEnrollment) {
+        guard !active else { return }
+        guard ContinuousClock.now < enrollment.expiresAt, Invitation.validViewerLabel(enrollment.viewerName) else {
+            fail("Invitation was rejected or expired. Create a new invitation."); return
+        }
+        invitation = enrollment.offer.invitation
+        viewerLabel = enrollment.viewerName
+        numberAuthorized = true
+        startConnection()
+    }
+    private func startConnection() {
         guard !active, let invitation else { return }
         let label = viewerLabel
         guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
@@ -66,7 +85,8 @@ final class SessionModel: ObservableObject {
                 self.invitation = nil // one-use token must not become reusable trust
                 self.connectedAt = .now
                 self.lastIncoming = .now
-                self.phase = .approval; self.status = "Certificate verified. Waiting for host approval and native encoder startup…"
+                self.phase = .approval
+                self.status = self.numberAuthorized ? "Number verified. Preparing the host desktop…" : "Certificate verified. Waiting for host approval and native encoder startup…"
                 self.startTicker(id: id)
                 while !Task.isCancelled, self.identity == id {
                     let budget: Duration = self.phase == .approval ? .seconds(65) : .seconds(10)
@@ -236,6 +256,8 @@ final class SessionModel: ObservableObject {
         channel?.close(); channel = nil
         decoder?.stop(); decoder = nil; surface?.onFailure = nil; surface?.clear(); surface?.forgetHeldKeys()
         invitation = nil; input = InputBuffer(); inputRecovery = false
+        showFullscreenControls = false
+        numberAuthorized = false
         presentationBackpressureSince = nil; displayBehind = false
         phase = failed ? .failed : .idle; status = message
     }

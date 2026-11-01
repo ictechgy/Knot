@@ -42,23 +42,25 @@ struct Entry { uint64_t offset; uint32_t length; bool idr; uint64_t timestamp; }
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 4 || (std::wstring(argv[1]) != L"--software" && std::wstring(argv[1]) != L"--hardware")) {
-        std::cerr << "usage: KnotNativeMediaSynthetic.exe --software|--hardware fixture.h264 fixture.json\n";
+    if (argc != 4 || (std::wstring(argv[1]) != L"--software" && std::wstring(argv[1]) != L"--hardware" && std::wstring(argv[1]) != L"--software-4k")) {
+        std::cerr << "usage: KnotNativeMediaSynthetic.exe --software|--hardware|--software-4k fixture.h264 fixture.json\n";
         return 2;
     }
     if (!ParserChecks()) { std::cerr << "H264 parser checks failed\n"; return 1; }
     knot::Runtime runtime;
     if (FAILED(runtime.Start())) { std::cerr << "COM/MF startup failed\n"; return 1; }
     knot::Encoder encoder;
-    const KnMediaConfig config{320, 180, 30, 2000000};
-    const bool software = std::wstring(argv[1]) == L"--software";
+    const bool fourK = std::wstring(argv[1]) == L"--software-4k";
+    const KnMediaConfig config = fourK ? KnMediaConfig{3840, 2160, 30, 40000000} : KnMediaConfig{320, 180, 30, 2000000};
+    const bool software = std::wstring(argv[1]) != L"--hardware";
     HRESULT hr = encoder.Start(config, software);
     if (FAILED(hr)) { std::cerr << "Synthetic MFT initialization failed: " << std::hex << static_cast<unsigned long>(hr) << '\n'; return 1; }
     if (encoder.Hardware() == software) return 1;
     std::ofstream video(argv[2], std::ios::binary | std::ios::trunc);
     if (!video) { std::cerr << "Cannot create synthetic fixture\n"; return 1; }
-    constexpr uint32_t frames = 120;
+    const uint32_t frames = fourK ? 6U : 120U;
     uint32_t submitted = 0;
+    uint32_t peakInFlight = 0;
     uint64_t offset = 0;
     std::vector<Entry> entries;
     std::vector<uint8_t> pixels;
@@ -85,7 +87,10 @@ int wmain(int argc, wchar_t** argv) {
             const uint64_t presentationMicros = static_cast<uint64_t>(submitted) * 1000000ULL / config.fps;
             hr = encoder.Submit(pixels, 1000000ULL + presentationMicros, presentationMicros);
             if (FAILED(hr) && hr != MF_E_NOTACCEPTING) break;
-            if (SUCCEEDED(hr)) ++submitted;
+            if (SUCCEEDED(hr)) {
+                ++submitted; peakInFlight = std::max(peakInFlight, encoder.InFlight());
+                if (peakInFlight > knot::Encoder::Capacity) { hr = E_UNEXPECTED; break; }
+            }
         }
         if (submitted == frames && !drained) {
             hr = encoder.Drain(); if (FAILED(hr)) break; drained = true;
@@ -95,16 +100,21 @@ int wmain(int argc, wchar_t** argv) {
     video.close();
     if (FAILED(hr) || entries.size() != frames || entries.empty() || !entries.front().idr) {
         std::cerr << "Synthetic codec incomplete: " << entries.size() << "/" << frames << " hr="
-            << std::hex << static_cast<unsigned long>(hr) << '\n'; return 1;
+            << std::hex << static_cast<unsigned long>(hr) << std::dec << " outputMinimum=" << encoder.LastOutputMinimum()
+            << " peakScratch=" << encoder.PeakOutputScratch() << '\n'; return 1;
     }
     uint32_t keyframes = 0;
     for (const auto& entry : entries) if (entry.idr) ++keyframes;
-    if (keyframes < 2) { std::cerr << "Periodic IDR missing\n"; return 1; }
+    if (keyframes < (fourK ? 1U : 2U)) { std::cerr << "Required IDR missing\n"; return 1; }
     std::ofstream manifest(argv[3], std::ios::trunc);
     manifest << "{\"v\":1,\"synthetic\":true,\"captureInvoked\":false,\"codec\":\"h264-annexb\","
-        "\"width\":320,\"height\":180,\"fps\":30,\"bitrate\":2000000,\"hardwareEncoder\":"
+        "\"width\":" << config.width << ",\"height\":" << config.height << ",\"fps\":" << config.fps
+        << ",\"bitrate\":" << config.bitrate << ",\"hardwareEncoder\":"
         << (encoder.Hardware() ? "true" : "false") << ",\"frames\":" << entries.size()
-        << ",\"keyframes\":" << keyframes << ",\"parserChecks\":true,\"accessUnits\":[";
+        << ",\"keyframes\":" << keyframes << ",\"parserChecks\":true";
+    if (fourK) manifest << ",\"peakEncoderInFlight\":" << peakInFlight << ",\"encoderCapacity\":" << knot::Encoder::Capacity
+        << ",\"peakOutputScratchBytes\":" << encoder.PeakOutputScratch();
+    manifest << ",\"accessUnits\":[";
     for (size_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
         if (i != 0) manifest << ',';
@@ -114,7 +124,9 @@ int wmain(int argc, wchar_t** argv) {
     manifest << "]}\n";
     manifest.close();
     if (!manifest) return 1;
-    std::cout << "PASS: 120 fresh synthetic frames through actual " << (software ? "software" : "hardware")
-        << " MFT; capture never linked; IDR=" << keyframes << '\n';
+    std::cout << "PASS: " << frames << " fresh synthetic frames through actual " << (software ? "software" : "hardware")
+        << " MFT; capture never linked; ";
+    if (fourK) std::cout << "size=" << config.width << 'x' << config.height << "; ";
+    std::cout << "IDR=" << keyframes << '\n';
     return 0;
 }

@@ -2,55 +2,59 @@
 
 This experimental host/viewer uses **no Sunshine, Moonlight, Glimmer, browser, OpenSSH, relay service or external media executable**. It is a separate `Knot Native Preview` app so the existing Knot product remains available for comparison.
 
-The Windows host uses DXGI Desktop Duplication and D3D11 SDR/NV12 processing, followed by an asynchronous **hardware-only Media Foundation H.264 encoder**. The macOS viewer owns its TLS transport, packet parser, VideoToolbox decoder and native AppKit/SwiftUI fullscreen/input surface. System frameworks, the .NET Framework and OS crypto/TLS implementations are reused. The Windows GPU path currently performs a readback before feeding hardware encoding; this is not a zero-copy claim.
+Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardware-only Media Foundation H.264 encoder**. Mac owns its OS TLS transport, strict parser, VideoToolbox decoder and native AppKit/SwiftUI desktop. A pinned, vendored BoringSSL crypto library provides short-code enrollment; it is compiled into the app, never downloaded at startup. Windows currently reads back GPU pixels before hardware encoding; this is not a zero-copy claim.
 
 ## Scope
 
-- Windows11 x64, including Home, logged-in unlocked **primary SDR landscape display**; supported hardware H.264 MFT required.
-- AppleSilicon macOS26+ viewer; native fullscreen Space, keyboard/mouse and committed Unicode text.
-- One peer, one display and one viewer window, bounded H.264/TLS-TCP stream, explicit host approval and temporary invitation trust.
-- Existing production desktop/files/reverse/Linux apps are not modified or selected as an automatic fallback.
+- Windows11 x64/Home, logged-in unlocked primary SDR landscape display; supported hardware H.264 MFT required.
+- AppleSilicon macOS26+ viewer; one peer, one display, one window and bounded H.264/TLS-TCP.
+- Windows Share authorizes one holder of the current short code. Advanced legacy invitation mode retains its separate approval step.
+- Native fullscreen, pointer/keyboard input and committed Mac input-method text. Source aspect ratio is preserved.
 
-This is not the finished replacement for the current product. **Audio, files, saved pairing, automatic reconnect/update, headless displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays are out of scope.** The host cursor's separate DXGI overlay is not composited in v1. Fullscreen/input/IME, actual WindowsHome/GPU/driver and Wi-Fi performance require two-device acceptance. Hardware or TLS failure is not permission to silently switch to a weaker path.
+**Audio, files, saved pairing, automatic reconnect/update, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
 
 ## Connect
 
-Use only a private network or an already configured Tailscale connection.
+Use a private network or an already configured Tailscale connection. The Korean interface follows the Quiet Sidebar design, with advanced settings and help secondary.
 
-The native preview uses a Korean task-focused interface. Mac separates invitation entry, target/pin review and the active desktop; Windows separates starting a share, copying its code and approving a request. Network changes, device naming and general help are secondary controls. The actual Knot brand and Quiet Sidebar layout are shared, while each platform keeps native controls.
+1. Open `Knot Native Preview` on Windows and start sharing. The eight-digit number lasts120seconds and authorizes one matching Mac for screen/input. Quality is frozen for that run: maximum4K/30fps/40Mbps by default, optional maximum4K/60fps/40Mbps or1080p/60fps/20Mbps compatibility mode.
+2. On Mac, find nearby PCs, select the candidate, enter the number and connect. Discovery names/addresses are unverified context. PAKE and directional authenticated encryption transfer the complete secret invitation; the Mac then opens a **new** existing TLS connection with its exact full DER pin and OS certificate checks. The provisioning socket never becomes media.
+3. This explicitly preauthorized code-holder path requires no second Windows approval. Capture/input still starts only after the valid, unused T2 claim on pinned TLS, and Mac reports streaming only after a decoded image is presented.
+4. Stop, disconnect, window close or timeout revokes this permission and requests release of owned injected input. Windows can refuse release during desktop transitions; retries are bounded. Reconnect with a new number. There is no saved pairing or silent certificate repair.
 
-1. Install/open `Knot Native Preview` on Windows. Select its LAN/Tailscale address, click **Share**, then **Copy invitation**. Sharing creates a temporary identity and a secret invitation valid120seconds. It does not create a Sunshine account or start capture immediately.
-2. Open the Mac native preview. Paste the invitation, review its address, compare the exact certificate pin with the Windows sharing window, and explicitly connect.
-3. On Windows, review the observed peer address and claimed viewer label, then click **Approve**. The label and IP are context, not authenticated identity; keep the invitation secret. Native capture/input starts only after valid pinnedTLS, an unused invitation and this approval. The Mac reports streaming only after a decoded frame reaches its display surface.
-4. **Stop / revoke all**, disconnect, window close or timeout ends this temporary permission and requests release of injected keys/buttons. Windows can refuse release during a desktop transition; retries are bounded, so successful OS cleanup is not guaranteed. Reconnection needs a new invitation; no old pairing or certificate is imported, reset or persisted.
+LAN broadcast does not discover devices across Tailscale. A secondary explicit private/Tailscale IPv4 entry can send a bounded unicast discovery query. Advanced legacy mode starts a distinct new Windows run: copy its full invitation, review address/pin on Mac, then explicitly approve on Windows. Changing modes cancels the prior slot/grant; old legacy tokens are never preapproved.
 
-The invitation is a secret capability, unlike the current product's address-only QR links. Copying it is an explicit user action. The apps do not automatically read the clipboard. Never put an actual invitation in an issue or log. [Wire and security contract](PROTOCOL.md).
+The number and invitation are secret capabilities. Neither is advertised or logged; clipboard copy is explicit and neither app automatically reads the clipboard. Copy requests Windows clipboard-history/cloud exclusions, which cannot prevent other software reading the current clipboard. [Media contract](PROTOCOL.md), [enrollment contract](ENROLLMENT.md).
 
-The Windows Copy action requests the documented clipboard-history/cloud exclusions. This does not prevent other software from reading the current clipboard. Adapter choices show their names and LAN/private-overlay context, with a usable gateway-backed LAN preferred over a virtual adapter by default.
+A received frame may reach3840×2160 without upscaling a lower-resolution source. True4K therefore requires a4K Windows desktop; the app does not change display modes or create a virtual monitor. Actual GPU4K/60 support is device-dependent and unsupported hardware fails honestly.
 
-Normal Windows execution requires no elevation. Windows networking/application-control prompts may still apply. No firewall, port-forwarding, system security setting or existing service is changed by the app. Packages are development previews: Windows unsigned, Mac ad-hoc/unnotarized. Engine independence does not confer trusted platform signing.
+Fullscreen removes reserved toolbar/footer height. Floating controls provide disconnect, native fullscreen exit and actual received dimensions. One desktop/presenter remains mounted; genuine source/viewer ratio differences still letterbox. Ordinary typing uses the Mac input method by default, preserving local Caps Lock language/capitalization behavior. Physical-keyboard fallback is secondary. Focus loss/revocation cancels composition and rejects late commits; physical shortcuts and owned key-ups remain separate from Unicode text.
+
+Normal Windows execution needs no elevation. OS private-network/application-control prompts may apply; the app changes no firewall, forwarding or system-security setting. Media TCP48631, enrollment TCP48632 and discovery UDP48633 remain private-network services. Packages are development previews: Windows unsigned, Mac ad-hoc/unnotarized.
 
 ## Build
 
-Build from a committed clean checkout; the builder verifies exact source/archive bytes before compiling. Output is confined to its owned `build/native-engine/<platform>` directory.
+Use a committed clean checkout. The builder checks source/archive parity and confines output to its owned `build/native-engine/<platform>` directory.
 
 ```sh
 python3 scripts/build_native_engine.py --platform macos
 ```
 
-macOS needs Xcode command-line tools/Swift6 and the macOS26SDK or newer. The independent Swift package has no external package dependencies. Only synthetic/core/TLS checks run; the GUI is packaged but never launched by the builder.
+Mac needs Xcode/Swift6, macOS26SDK+ and CMake3.22+. `KNOT_NATIVE_CMAKE` selects a trusted CMake executable if it is not on PATH. The builder compiles pinned vendored crypto first and supplies its owned static-library directory; no external Swift packages are fetched. The production GUI is packaged, never launched by the builder.
 
-On Windows, install VisualStudio C++x64 tools/WindowsSDK, .NET Framework4.8 reference assemblies/compiler, and InnoSetup. The optional `INNO_COMPILER` environment variable selects ISCC. Then:
+Windows needs VisualStudio C++x64 tools/WindowsSDK, CMake3.22+, .NET Framework4.8 compiler/reference assemblies and InnoSetup (`INNO_COMPILER` may select ISCC):
 
 ```powershell
 python scripts/build_native_engine.py --platform windows
 ```
 
-The C++DLL, x64 managed host, native codec fixture and managed tests are compiled from source. Full builds inspect the setup's PE resources without running it: the product version must contain the full preview suffix and the numeric file/product revision must match this build. The result is recorded in `native-installer-metadata.json`. `--media-only` is a diagnostic mode that proves only DLL compilation and synthetic codec behavior. It is never a full host/app result.
+Both native DLLs, the C#5 host and fresh test executables are built from source. Setup PE resources are inspected without execution: full preview version and numeric revision must match. `--media-only` is diagnostic, never complete app acceptance.
 
-The separate `Build independent native engine preview` workflow builds Windows first and supplies its **fresh software-MFT synthetic H.264 fixture and exported public test certificate** to the Mac tests. The Mac must decode all120frames using the actual independent VideoToolbox decoder, including bounded burst admission, and evaluate that Windows-generated certificate using its actual pin/trust implementation. No test private key is transferred. Test software encoding is never exposed as a normal host fallback. Both jobs run portable H.264 parser, pacing and activation-ownership harnesses; the Mac runs them with AddressSanitizer/UndefinedBehaviorSanitizer. Native Windows release media uses MSVC optimization.
+The native CI workflow builds Windows first, then Mac. It transfers fresh software-MFT fixtures and a public test DER certificate, never a private key. Actual VideoToolbox tests decode the existing120-frame burst and an additional six-frame3840×2160 fixture within their slot bounds. Software encoding exists only in the separate synthetic executable, not as a runtime fallback. Both platforms run native crypto known-answer/state/authentication checks and upstream SPAKE2 tests. Portable H.264 parser/pacing/resolution/activation checks use ASan/UBSan on Mac; native Windows release media is optimized.
 
 ## Evidence and limits
+The encoder retains at most two in-flight samples and the decoder three outstanding images. MFT output scratch is distinct from compressed size: one validated4K NV12 frame permits at most12,441,600 scratch bytes when requested, while the compressed wire envelope remains4MiB and existing NAL limits still apply. This is not permission for larger wire frames or unbounded queues.
+
 
 `NATIVE-INPUTS.json` records inputs only. A completed successful build writes `NATIVE-BUILD.json`, per-command stdout/stderr/argv, source manifest, product hashes and `SHA256SUMS`. Exact compiler and synthetic checks are distinguished from device acceptance. A green compile/codec/TLS fixture does not establish real hardware capture, input injection, Home runtime or end-to-end quality.
 
@@ -66,4 +70,4 @@ The protocol does not compare host/client monotonic timestamps as latency; indep
 
 ## License
 
-This experiment follows the repository's GPL-3.0-only license. Corresponding source is supplied with the previews. It does not link the existing vendored streaming engine. OS/platform codec capabilities and capture/input permissions remain required.
+The app follows the repository GPL-3.0-only license. Corresponding source includes the exact pinned BoringSSL source and its Apache-2.0/support-code notices. It does not link the existing vendored streaming engine. OS codec capabilities and capture/input permissions remain required.

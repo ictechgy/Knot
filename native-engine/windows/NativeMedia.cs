@@ -15,9 +15,10 @@ namespace Knot.NativePreview
         internal CaptureRectangle Rectangle { get { return new CaptureRectangle(Left, Top, DesktopWidth, DesktopHeight); } }
         internal byte[] Ready()
         {
-            if (Width < 16 || Width > 1920 || Height < 16 || Height > 1080 || Width % 2 != 0 || Height % 2 != 0 ||
+            if (!MediaLimits.ValidDimensions(Width, Height) ||
                 Fps < 1 || Fps > 60 || Bitrate < 1000000 || Bitrate > 40000000 || HardwareEncoder != 1 ||
                 DesktopWidth < 1 || DesktopWidth > 32768 || DesktopHeight < 1 || DesktopHeight > 32768 ||
+                Width > DesktopWidth || Height > DesktopHeight ||
                 Math.Abs((long)Left) > 65536 || Math.Abs((long)Top) > 65536) throw new ProtocolException("encoder");
             return StrictJson.Utf8.GetBytes(string.Format(System.Globalization.CultureInfo.InvariantCulture,
                 "{{\"v\":1,\"codec\":\"h264-annexb\",\"width\":{0},\"height\":{1},\"fps\":{2},\"bitrate\":{3},\"hardwareEncoder\":true}}", Width, Height, Fps, Bitrate));
@@ -40,7 +41,14 @@ namespace Knot.NativePreview
 
     internal sealed class WindowsMediaFactory : IMediaFactory
     {
-        public IMediaSource Open() { return new WindowsMediaSource(); }
+        private readonly MediaQualityProfile quality;
+        internal WindowsMediaFactory() : this(MediaQualityProfile.Sharp4K) { }
+        internal WindowsMediaFactory(MediaQualityProfile quality)
+        {
+            if (quality == null) throw new ArgumentNullException("quality");
+            this.quality = quality;
+        }
+        public IMediaSource Open() { return new WindowsMediaSource(quality.Config); }
     }
 
     // The owned DLL is resolved by absolute application path with dependency search
@@ -67,8 +75,10 @@ namespace Knot.NativePreview
             if (p == IntPtr.Zero) throw new ProtocolException("capture");
             return Marshal.GetDelegateForFunctionPointer(p, typeof(T)) as T;
         }
-        internal WindowsMediaSource()
+        internal WindowsMediaSource() : this(MediaQualityProfile.Sharp4K.Config) { }
+        internal WindowsMediaSource(MediaConfig config)
         {
+            if (!MediaLimits.ValidConfig(config)) throw new ProtocolException("encoder");
             ownerThread = System.Threading.Thread.CurrentThread.ManagedThreadId;
             if (System.Threading.Thread.CurrentThread.GetApartmentState() != System.Threading.ApartmentState.MTA) throw new ProtocolException("capture");
             try
@@ -79,7 +89,6 @@ namespace Knot.NativePreview
                 CreateDelegate create = Export<CreateDelegate>("kn_media_create");
                 read = Export<ReadDelegate>("kn_media_read");
                 close = Export<CloseDelegate>("kn_media_close");
-                MediaConfig config = new MediaConfig { Width = 1920, Height = 1080, Fps = 60, Bitrate = 12000000 };
                 int error;
                 media = create(ref config, out info, out error);
                 if (media == IntPtr.Zero) throw NativeMediaErrors.ForStatus(error);

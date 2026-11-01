@@ -11,6 +11,15 @@ struct KnotNativePreviewApp: App {
     var body: some Scene {
         Window("Knot Native Preview", id: "main") { PreviewWindow(model: model) }
             .defaultSize(width: 1200, height: 760)
-            .commands { CommandGroup(replacing: .newItem) {} }
+            .commands {
+                CommandGroup(replacing: .newItem) {}
+                CommandMenu("연결") {
+                    Button("연결 제어 보기/접기") {
+                        model.releaseInput(); model.showFullscreenControls.toggle()
+                    }.keyboardShortcut("k", modifiers: [.control, .option, .command]).disabled(!model.active)
+                    Button("연결 종료") { model.disconnect() }
+                        .keyboardShortcut("d", modifiers: [.control, .option, .command]).disabled(!model.active)
+                }
+            }
     }
 }
