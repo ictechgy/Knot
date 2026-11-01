@@ -1,0 +1,82 @@
+name: Build independent native engine preview
+on:
+  workflow_dispatch:
+    inputs:
+      media_only:
+        description: "Compile native Windows media and run synthetic codec only"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - 'native-engine/**'
+      - 'scripts/build_native_engine.py'
+      - '.github/workflows/native-engine.yml'
+permissions:
+  contents: read
+concurrency:
+  group: native-engine-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  mac-native:
+    if: github.event_name != 'workflow_dispatch' || !inputs.media_only
+    needs: windows-native
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: python3 scripts/check_source_checkout.py
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: native-windows-preview
+          path: build/native-engine/windows-fixtures
+      - run: python3 scripts/build_native_engine.py --platform macos
+        env:
+          KNOT_NATIVE_WINDOWS_FIXTURES: ${{ github.workspace }}/build/native-engine/windows-fixtures
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-macos-preview
+          path: |
+            build/native-engine/macos/*.dmg
+            build/native-engine/macos/*.zip
+            build/native-engine/macos/*.tar.gz
+            build/native-engine/macos/*.json
+            build/native-engine/macos/SHA256SUMS
+            build/native-engine/macos/evidence/
+          if-no-files-found: error
+  windows-native:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: python scripts/check_source_checkout.py
+      - name: Install pinned Inno Setup compiler on the disposable build runner
+        if: github.event_name != 'workflow_dispatch' || !inputs.media_only
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $download = Join-Path $env:RUNNER_TEMP 'knot-native-inno-7.1.0.exe'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $download
+          if ((Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f') { throw 'Native compiler installer SHA256 mismatch' }
+          $process = Start-Process -FilePath $download -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Native compiler installation failed' }
+      - if: github.event_name != 'workflow_dispatch' || !inputs.media_only
+        run: python scripts/build_native_engine.py --platform windows
+      - if: github.event_name == 'workflow_dispatch' && inputs.media_only
+        run: python scripts/build_native_engine.py --platform windows --media-only
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-windows-preview
+          path: |
+            build/native-engine/windows/Knot-Native-*.exe
+            build/native-engine/windows/KnotNativeMedia.dll
+            build/native-engine/windows/*.tar.gz
+            build/native-engine/windows/*.json
+            build/native-engine/windows/*.h264
+            build/native-engine/windows/SHA256SUMS
+            build/native-engine/windows/evidence/
+          if-no-files-found: error
