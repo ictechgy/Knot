@@ -21,6 +21,18 @@ $productParts = @($info.ProductMajorPart, $info.ProductMinorPart, $info.ProductB
 if ($info.ProductName -cne 'Knot Native Preview' -or
     $info.ProductVersion -cne $ExpectedVersion -or $info.FileVersion -cne $ExpectedNumericVersion -or
     ($fileParts -join '.') -cne $ExpectedNumericVersion -or ($productParts -join '.') -cne $ExpectedNumericVersion) {
+    # Only public build metadata is reported; no installer execution or user state.
+    [ordered]@{
+        status = 'failed'
+        productName = $info.ProductName
+        productVersion = $info.ProductVersion
+        fileVersion = $info.FileVersion
+        fileParts = $fileParts
+        productParts = $productParts
+        expectedVersion = $ExpectedVersion
+        expectedNumericVersion = $ExpectedNumericVersion
+        installerExecuted = $false
+    } | ConvertTo-Json -Depth 4 -Compress | Write-Output
     throw 'Native installer PE version metadata does not match this preview.'
 }
 [ordered]@{

@@ -77,7 +77,10 @@ namespace Knot.NativePreview
                         break;
                     case 0x24:
                         if (p.Length != 0) throw new ProtocolException("protocol");
-                        Release(); break;
+                        // A failed revocation must end input delivery. Retained
+                        // owned downs are retried by Close during host teardown.
+                        if (!Release()) throw new ProtocolException("input");
+                        break;
                     case 0x25:
                         if (p.Length != 0) throw new ProtocolException("protocol");
                         break;

@@ -43,6 +43,7 @@ namespace Knot.NativePreview
                 stage = "tls-wrong-token"; TlsWrongToken(); stage = "tls-disconnect"; TlsDisconnect(false); stage = "tls-malformed-input"; TlsDisconnect(true);
                 stage = "tls-delayed-approval"; TlsDelayedApproval();
                 stage = "tls-approved-before-blocking-open-stop-race"; TlsApprovedBeforeBlockingOpen();
+                stage = "tls-release-failure-stop"; TlsReleaseFailureStopsInput();
                 Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
                 return 0;
             }
@@ -234,6 +235,37 @@ namespace Knot.NativePreview
             Reject(delegate { validation.Accept(Key(1, 129)); }); validation.Close();
             Check(WindowsInputSink.Normalize(-1920, -1920, 3840) == 0);
             Check(WindowsInputSink.Normalize(1919, -1920, 3840) == 65535);
+            ReleaseFailureChecks();
+        }
+        private static void ReleaseFailureChecks()
+        {
+            // Exercise each release category and combined partial failure. A
+            // successful up is removed from ownership and must not be retried.
+            foreach (int failures in new int[] { 1, 2, 4, 7 })
+            {
+                FakeInput sink = new FakeInput();
+                sink.KeyUpFailures = (failures & 1) != 0 ? 1 : 0;
+                sink.ButtonReleaseFailures = (failures & 2) != 0 ? 1 : 0;
+                sink.UnicodeReleaseFailures = (failures & 4) != 0 ? 1 : 0;
+                InputSession session = new InputSession(sink, new CaptureRectangle(0, 0, 1920, 1080));
+                session.Accept(Key(0, 31)); // An unowned physical key is never released.
+                session.Accept(Key(1, 30));
+                session.Accept(new Packet(0x22, new byte[] { 1, 0, 0, 0, 0 }));
+                bool inputFailure = false;
+                try { session.Accept(new Packet(0x24, new byte[0])); }
+                catch (ProtocolException error) { inputFailure = error.Code == "input"; }
+                Check(inputFailure);
+                session.Close();
+                Check(sink.KeyUpAttempts == ((failures & 1) != 0 ? 2 : 1));
+                Check(sink.ButtonReleaseAttempts == ((failures & 2) != 0 ? 2 : 1));
+                Check(sink.UnicodeReleaseAttempts == 2);
+                Check(sink.Events.Contains("key:30:up") && sink.Events.Contains("pointer:2"));
+                Check(!sink.Events.Contains("key:31:up"));
+                int before = sink.Events.Count;
+                Reject(delegate { session.Accept(Key(1, 31)); });
+                session.Close();
+                Check(sink.Events.Count == before && !sink.Events.Contains("key:31:down"));
+            }
         }
         private static void HostPolicyChecks()
         {
@@ -579,6 +611,35 @@ namespace Knot.NativePreview
                 }
             }
         }
+        private static void TlsReleaseFailureStopsInput()
+        {
+            FakeMediaFactory media = new FakeMediaFactory();
+            FakeInput sink = new FakeInput(); sink.KeyUpFailures = sink.ButtonReleaseFailures = sink.UnicodeReleaseFailures = 1;
+            using (HostServer server = Server(media, sink, null))
+            {
+                server.ApprovalRequested = delegate { server.RespondToApproval(true); };
+                string token = Token(server), pin = server.Pin; server.Start();
+                using (TlsClient client = new TlsClient(server, pin))
+                {
+                    client.Send(1, Hello(token)); Check(client.ReadNonHeartbeat().Kind == 2);
+                    client.Send(0x20, Key(1, 30).Payload); Check(sink.Down.WaitOne(3000));
+                    // Queue a button down, ReleaseAll and another key down in one
+                    // TLS write. Failed revocation must stop the reader before
+                    // it can accept the already-queued later input packet.
+                    byte[] queued = {
+                        0x22, 0, 0, 0, 5, 1, 0, 0, 0, 0,
+                        0x24, 0, 0, 0, 0,
+                        0x20, 0, 0, 0, 4, 1, 0, 31, 0
+                    };
+                    client.Stream.Write(queued, 0, queued.Length);
+                    Check(server.WaitStopped(4000));
+                    Check(!server.IsActive && media.Closed == 1 && media.SameThread);
+                    Check(sink.KeyUpAttempts == 2 && sink.ButtonReleaseAttempts == 2 && sink.UnicodeReleaseAttempts == 2);
+                    Check(sink.Events.Contains("key:30:up") && sink.Events.Contains("pointer:2"));
+                    Check(!sink.Events.Contains("key:31:down") && !sink.Events.Contains("key:31:up"));
+                }
+            }
+        }
         private static void TlsApprovedBeforeBlockingOpen()
         {
             using (BlockingMediaFactory media = new BlockingMediaFactory())
@@ -614,18 +675,41 @@ namespace Knot.NativePreview
             internal readonly ManualResetEvent Down = new ManualResetEvent(false);
             internal string LastText;
             internal ushort FailScan;
+            internal int KeyUpFailures, ButtonReleaseFailures, UnicodeReleaseFailures;
+            internal int KeyUpAttempts, ButtonReleaseAttempts, UnicodeReleaseAttempts;
             public bool Key(ushort scan, bool extended, bool down)
             {
                 lock (Events)
                 {
                     if (scan == FailScan) return false;
+                    if (!down)
+                    {
+                        ++KeyUpAttempts;
+                        if (KeyUpFailures > 0) { --KeyUpFailures; return false; }
+                    }
                     Events.Add("key:" + scan + (down ? ":down" : ":up")); if (down) Down.Set(); return true;
                 }
             }
             public bool Text(string text) { LastText = text; lock (Events) Events.Add("text"); return true; }
-            public bool ReleaseUnicode() { return true; }
+            public bool ReleaseUnicode()
+            {
+                lock (Events)
+                {
+                    ++UnicodeReleaseAttempts;
+                    if (UnicodeReleaseFailures > 0) { --UnicodeReleaseFailures; return false; }
+                    return true;
+                }
+            }
             public bool Pointer(byte action, ushort x, ushort y, CaptureRectangle rectangle) { lock (Events) Events.Add("pointer:" + action); return true; }
-            public bool ReleaseButton(byte button) { lock (Events) Events.Add("pointer:" + (button * 2)); return true; }
+            public bool ReleaseButton(byte button)
+            {
+                lock (Events)
+                {
+                    ++ButtonReleaseAttempts;
+                    if (ButtonReleaseFailures > 0) { --ButtonReleaseFailures; return false; }
+                    Events.Add("pointer:" + (button * 2)); return true;
+                }
+            }
             public bool Wheel(int vertical, int horizontal) { lock (Events) Events.Add("wheel"); return true; }
         }
         private sealed class FakeMediaFactory : IMediaFactory
