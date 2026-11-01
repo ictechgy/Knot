@@ -37,7 +37,7 @@ namespace Knot.NativePreview
         private readonly RunPresentation presentation = new RunPresentation();
         private readonly Timer lifecycleTimer = new Timer();
         private Icon ownedIcon;
-        private Image brandImage;
+        private KnotBrandMark brandMark;
         private HostServer server;
         private HostViewPhase phase;
         private HostViewSnapshot fixture;
@@ -60,7 +60,7 @@ namespace Knot.NativePreview
             {
                 string installedIcon = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AppIcon.ico");
                 ownedIcon = fixtureIcon != null ? (Icon)fixtureIcon.Clone() : System.IO.File.Exists(installedIcon) ? new Icon(installedIcon, 256, 256) : System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                if (ownedIcon != null) { Icon = ownedIcon; brandImage = ownedIcon.ToBitmap(); }
+                if (ownedIcon != null) Icon = ownedIcon;
             }
             catch (ArgumentException) { }
             catch (System.Runtime.InteropServices.ExternalException) { }
@@ -179,7 +179,6 @@ namespace Knot.NativePreview
             FormClosed += delegate
             {
                 lifecycleTimer.Dispose();
-                if (brandImage != null) { brandImage.Dispose(); brandImage = null; }
                 if (ownedIcon != null) { ownedIcon.Dispose(); ownedIcon = null; }
             };
             phase = addresses.Items.Count > 0 ? HostViewPhase.Idle : HostViewPhase.Failed;
@@ -204,8 +203,8 @@ namespace Knot.NativePreview
         {
             Panel rail = new Panel { Dock = DockStyle.Fill, BackColor = PreviewStyle.Rail, Margin = Padding.Empty, Padding = new Padding(P(18), P(28), P(18), P(22)) };
             TableLayoutPanel top = Column(); top.Dock = DockStyle.Top;
-            PictureBox mark = new PictureBox { Image = brandImage, SizeMode = PictureBoxSizeMode.Zoom, Width = P(40), Height = P(40), Margin = new Padding(P(8), 0, 0, P(12)), AccessibleName = "Knot 로고" };
-            top.Controls.Add(mark);
+            brandMark = new KnotBrandMark(ownedIcon) { Width = P(40), Height = P(40), MinimumSize = new Size(P(40), P(40)), Margin = new Padding(P(8), 0, 0, P(12)) };
+            top.Controls.Add(brandMark);
             Label name = MakeLabel("Knot", 21, FontStyle.Bold); name.Margin = new Padding(P(8), 0, 0, P(3)); top.Controls.Add(name);
             Label preview = MakeLabel(fixtureMode ? "미리보기 · 합성 화면" : "Native Preview", 8.5f, FontStyle.Regular);
             preview.Margin = new Padding(P(8), 0, 0, P(34)); top.Controls.Add(preview);
@@ -301,9 +300,9 @@ namespace Knot.NativePreview
             trustPanel.Visible = view.Pin.Length != 0;
             if (pin.Text != view.Pin) pin.Text = view.Pin;
             share.Visible = idle; share.Enabled = idle && view.HasAddress && !view.RunPresent;
-            copy.Visible = view.Phase == HostViewPhase.Invitation; copy.Enabled = copy.Visible && view.CanCopy && view.RunPresent;
+            copy.Visible = view.Phase == HostViewPhase.Invitation; copy.Enabled = view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
             approve.Visible = decline.Visible = view.Phase == HostViewPhase.Request;
-            approve.Enabled = decline.Enabled = approve.Visible && view.RunPresent;
+            approve.Enabled = decline.Enabled = view.Phase == HostViewPhase.Request && view.RunPresent;
             stop.Visible = view.RunPresent; stop.Enabled = view.RunPresent && view.Phase != HostViewPhase.Stopping;
             addresses.Enabled = networkDisclosure.Enabled = !view.RunPresent;
             if (status.Text != view.Status) status.Text = view.Status;
@@ -324,6 +323,7 @@ namespace Knot.NativePreview
         internal bool CopyVisible { get { return copy.Visible; } }
         internal bool CopyEnabled { get { return copy.Visible && copy.Enabled; } }
         internal bool ApprovalEnabled { get { return approve.Visible && approve.Enabled && decline.Visible && decline.Enabled; } }
+        internal bool FixtureBrandPainted { get { return brandMark != null && brandMark.Visible && brandMark.DrawCalls > 0; } }
 
         private void BindActions()
         {

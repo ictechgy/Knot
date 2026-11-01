@@ -6,6 +6,35 @@ using System.Windows.Forms;
 
 namespace Knot.NativePreview
 {
+    // Paint the actual packaged icon through GDI+ instead of converting its
+    // PNG-compressed ICO frame to a PictureBox bitmap. Used by production too.
+    internal sealed class KnotBrandMark : Control
+    {
+        private readonly Icon icon;
+        internal int DrawCalls { get; private set; }
+        internal KnotBrandMark(Icon source)
+        {
+            icon = source == null ? null : (Icon)source.Clone();
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent; TabStop = false;
+            AccessibleRole = AccessibleRole.Graphic; AccessibleName = "Knot 로고";
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (icon == null || Width < 1 || Height < 1) return;
+            int edge = Math.Min(Width, Height);
+            e.Graphics.DrawIcon(icon, new Rectangle((Width - edge) / 2, (Height - edge) / 2, edge, edge));
+            ++DrawCalls;
+        }
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing && icon != null) icon.Dispose();
+        }
+    }
+
     internal static class PreviewStyle
     {
         internal static Color Canvas { get { return SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(246, 247, 249); } }

@@ -16,6 +16,7 @@ namespace Knot.NativePreview
 {
     internal static class NativeVisualFixtures
     {
+        private static string currentFrame = "initialization";
         private sealed class Frame
         {
             internal string Name;
@@ -23,6 +24,7 @@ namespace Knot.NativePreview
             internal bool Help;
             internal int Width, Height;
             internal float Scale;
+            internal string StatusOverride;
             internal Frame(string name, HostViewPhase phase, bool help, int width, int height, float scale)
             { Name = name; Phase = phase; Help = help; Width = width; Height = height; Scale = scale; }
         }
@@ -51,7 +53,7 @@ namespace Knot.NativePreview
                 phase == HostViewPhase.Preparing || phase == HostViewPhase.Sharing || phase == HostViewPhase.Stopping;
             bool named = phase == HostViewPhase.Request || phase == HostViewPhase.Preparing || phase == HostViewPhase.Sharing;
             string status = phase == HostViewPhase.Failed ?
-                "하드웨어 인코더를 사용할 수 없어요. 그래픽 드라이버를 확인한 뒤 다시 시도해주세요." :
+                "화면 공유를 시작하지 못했어요. 선택한 네트워크와 포트 48631을 사용할 수 있는지 확인해주세요." :
                 phase == HostViewPhase.Sharing ? "화면을 전송하고 있어요. 중지하면 이번 연결의 권한이 끝나요." :
                 phase == HostViewPhase.Request ? "연결할 Mac을 확인해주세요. 아직 화면과 입력은 공유되지 않았어요." :
                 phase == HostViewPhase.Preparing ? "연결을 허용했어요. Windows 화면과 인코더를 준비하고 있어요." :
@@ -89,11 +91,13 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-preparing.png", HostViewPhase.Preparing, false, 1040, 740, 1));
                 frames.Add(new Frame("windows-sharing.png", HostViewPhase.Sharing, false, 1040, 740, 1));
                 frames.Add(new Frame("windows-failure.png", HostViewPhase.Failed, false, 1040, 740, 1));
+                frames.Add(new Frame("windows-ended-error.png", HostViewPhase.Stopped, false, 1040, 740, 1) { StatusOverride = PreviewCopy.Status(HostServer.Guidance("encoder")) });
                 frames.Add(new Frame("windows-help.png", HostViewPhase.Idle, true, 1040, 740, 1));
                 frames.Add(new Frame("windows-idle-compact.png", HostViewPhase.Idle, false, 800, 620, 1));
                 frames.Add(new Frame("windows-request-compact.png", HostViewPhase.Request, false, 800, 620, 1));
                 frames.Add(new Frame("windows-sharing-compact.png", HostViewPhase.Sharing, false, 800, 620, 1));
                 frames.Add(new Frame("windows-help-compact.png", HostViewPhase.Idle, true, 800, 620, 1));
+                frames.Add(new Frame("windows-ended-error-compact.png", HostViewPhase.Stopped, false, 800, 620, 1) { StatusOverride = PreviewCopy.Status(HostServer.Guidance("encoder")) });
                 frames.Add(new Frame("windows-request-scale150.png", HostViewPhase.Request, false, 1040, 740, 1.5f));
                 frames.Add(new Frame("windows-request-scale200.png", HostViewPhase.Request, false, 1040, 740, 2f));
                 List<string> records = new List<string>();
@@ -101,6 +105,8 @@ namespace Knot.NativePreview
                 {
                     foreach (Frame frame in frames)
                     {
+                        currentFrame = frame.Name + " phase=" + frame.Phase + " help=" + frame.Help +
+                            " layoutScale=" + frame.Scale.ToString(CultureInfo.InvariantCulture);
                         List<AdapterChoice> adapters = new List<AdapterChoice>();
                         adapters.Add(new AdapterChoice(IPAddress.Parse("192.168.50.12"), "Wi-Fi", NetworkInterfaceType.Wireless80211, true));
                         adapters.Add(new AdapterChoice(IPAddress.Parse("100.85.20.16"), "Tailscale", NetworkInterfaceType.Tunnel, false));
@@ -109,8 +115,22 @@ namespace Knot.NativePreview
                             form.StartPosition = FormStartPosition.Manual; form.Location = new Point(20, 20);
                             form.ClientSize = new Size((int)(frame.Width * frame.Scale), (int)(frame.Height * frame.Scale));
                             HostViewSnapshot state = Snapshot(frame.Phase);
+                            if (frame.StatusOverride != null)
+                                state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, state.ViewerLabel, state.ObservedAddress, frame.StatusOverride, state.CanCopy);
                             form.SetFixturePresentation(state, frame.Help);
                             form.Show(); form.PerformLayout(); Pump();
+                            if (frame.Phase == HostViewPhase.Invitation)
+                            {
+                                form.SetFixturePresentation(state, true); Pump();
+                                if (form.CopyVisible) throw new InvalidOperationException("Invitation copy action must be hidden on the help page (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
+                                form.SetFixturePresentation(state, false); Pump();
+                                if (!form.CopyVisible || !form.CopyEnabled)
+                                    throw new InvalidOperationException("Invitation copy action must restore from explicit state after help navigation (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
+                            }
+                            currentFrame += " actual[shareVisible=" + form.ShareVisible + ",shareEnabled=" + form.ShareEnabled +
+                                ",copyVisible=" + form.CopyVisible + ",copyEnabled=" + form.CopyEnabled +
+                                ",approvalVisible=" + form.ApprovalVisible + ",approvalEnabled=" + form.ApprovalEnabled +
+                                ",stopVisible=" + form.StopVisible + ",help=" + form.HelpVisible + "]";
                             if (!form.FixtureMode || !form.Visible || form.HelpVisible != frame.Help)
                                 throw new InvalidOperationException("Synthetic form state is not visible.");
                             if (form.DisplayedPin != state.Pin) throw new InvalidOperationException("Synthetic pin was not retained exactly.");
@@ -131,6 +151,7 @@ namespace Knot.NativePreview
                             using (Bitmap bitmap = new Bitmap(form.Width, form.Height, PixelFormat.Format32bppArgb))
                             {
                                 form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                                if (!form.FixtureBrandPainted) throw new InvalidOperationException("The actual sidebar Knot mark did not paint.");
                                 HashSet<int> sampleColors = new HashSet<int>();
                                 for (int y = 8; y < bitmap.Height; y += 13)
                                     for (int x = 8; x < bitmap.Width; x += 13) sampleColors.Add(bitmap.GetPixel(x, y).ToArgb());
@@ -142,7 +163,7 @@ namespace Knot.NativePreview
                                     ",\"layoutFontScale\":" + frame.Scale.ToString(CultureInfo.InvariantCulture) +
                                     ",\"actualDrawingDpi\":" + actualDpi.ToString(CultureInfo.InvariantCulture) +
                                     ",\"state\":" + Q(frame.Phase.ToString()) + ",\"controlCount\":" + CountControls(form) +
-                                    ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"effectsBound\":false}");
+                                    ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"brandPainted\":true,\"effectsBound\":false}");
                             }
                             form.Close(); Pump();
                         }
@@ -161,7 +182,7 @@ namespace Knot.NativePreview
             catch (Exception error)
             {
                 // Only synthetic fixture diagnostics, without user/service data.
-                Console.Error.WriteLine("Synthetic UI rendering failed: " + error.GetType().Name + ": " + error.Message);
+                Console.Error.WriteLine("Synthetic UI rendering failed [" + currentFrame + "]: " + error.GetType().Name + ": " + error.Message);
                 return 1;
             }
         }
