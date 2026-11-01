@@ -87,6 +87,7 @@ namespace Knot.NativePreview
             Reject(delegate { NativeProtocol.ReadClient(new MemoryStream(new byte[] { 0x21, 0, 0, 0, 0 }), false); });
             using (MemoryStream framed = new MemoryStream(new byte[] { 0x20, 0, 0, 0, 4, 1, 0, 30, 0 }))
             { Packet p = NativeProtocol.ReadClient(framed, false); Check(p.Kind == 0x20 && p.Payload.Length == 4 && framed.Position == framed.Length); }
+            ReusableVideoWriteChecks();
             byte[] accessUnit = { 0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0x12, 0, 0, 1, 0x65, 0x88 };
             AnnexB.Validate(accessUnit, accessUnit.Length, 1); Check(true);
             Reject(delegate { AnnexB.Validate(new byte[] { 0, 0, 1, 0x65, 1 }, 5, 1); });
@@ -107,6 +108,43 @@ namespace Knot.NativePreview
             byte[] parametersOnly = Join(NalFixture(1, 7, 2), NalFixture(1, 8, 2)); Reject(delegate { AnnexB.Validate(parametersOnly, parametersOnly.Length, 0); });
             byte[] audOnly = NalFixture(1, 9, 2); Reject(delegate { AnnexB.Validate(audOnly, audOnly.Length, 0); });
             byte[] paddedAccessUnit = Join(accessUnit, new byte[20]); AnnexB.Validate(paddedAccessUnit, paddedAccessUnit.Length, 1); Check(true);
+        }
+        private static void ReusableVideoWriteChecks()
+        {
+            byte[] reusable = new byte[64];
+            for (int i = 0; i < reusable.Length; ++i) reusable[i] = 0xa5;
+            NativeProtocol.Put64(reusable, 0, 1); NativeProtocol.Put64(reusable, 8, 100); reusable[16] = 0;
+            reusable[17] = 0x41; reusable[18] = 0x11;
+            using (MemoryStream output = new MemoryStream())
+            {
+                NativeProtocol.Write(output, 3, reusable, 19);
+                NativeProtocol.Put64(reusable, 0, 2); reusable[17] = 0x41;
+                NativeProtocol.Write(output, 3, reusable, 18);
+                byte[] framed = output.ToArray();
+                Check(framed.Length == 5 + 19 + 5 + 18);
+                Check(framed[0] == 3 && NativeProtocol.U32(framed, 1) == 19);
+                Check(framed[5 + 7] == 1 && framed[5 + 17] == 0x41 && framed[5 + 18] == 0x11);
+                Check(framed[24] == 3 && NativeProtocol.U32(framed, 25) == 18 && framed[29 + 7] == 2);
+                Check(framed[46] == 0x41); // no old frame tail / sentinel bytes on the wire
+            }
+            foreach (int invalid in new int[] { -1, 65, NativeProtocol.VideoLimit + 1 })
+            {
+                using (MemoryStream output = new MemoryStream())
+                {
+                    Reject(delegate { NativeProtocol.Write(output, 3, reusable, invalid); });
+                    Check(output.Length == 0);
+                }
+            }
+            using (MemoryStream output = new MemoryStream())
+            {
+                Reject(delegate { NativeProtocol.Write(output, 3, reusable, 0); });
+                Reject(delegate { NativeProtocol.Write(output, 4, reusable, 1); });
+                Reject(delegate { NativeProtocol.Write(output, 2, null, 1); });
+                Check(output.Length == 0);
+            }
+            byte[] first = new byte[32], last = new byte[32]; first[0] = 1; last[31] = 1;
+            Check(NativeProtocol.Equal(new byte[32], new byte[32]));
+            Check(!NativeProtocol.Equal(new byte[32], first) && !NativeProtocol.Equal(new byte[32], last));
         }
         private static byte[] Join(byte[] first, byte[] second)
         {

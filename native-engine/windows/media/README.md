@@ -27,6 +27,12 @@ Native read refuses to return a flagged IDR without both SPS and PPS. A stalled
 codec fails the session after two seconds of pending output; no raw/encoded
 queue grows while a network writer is blocked.
 
+The encoder retains the selected `IMFActivate` until teardown, including any
+partially configured candidate until its failure cleanup. Enumeration releases
+only candidates it never activated. Shutdown runs while transform interfaces
+are still alive and owned references are released once. This does not depend
+on the optional `DetachObject` method succeeding.
+
 Capture results distinguish an unchanged desktop from a pending GPU readback.
 The production `CapturePacer::Pump` polls pending readbacks on the next loop
 iteration (normally 1 ms), without submitting old pixels or spending a frame
@@ -71,7 +77,7 @@ require manual hardware acceptance. No such acceptance is implied by CI.
 
 Run from the repository root, with an existing owned output directory. `/MT`
 keeps the CRT static. The integration script owns output-directory creation,
-packaging, and errors. Use explicit source lists because the two test files each
+packaging, and errors. Use explicit source lists because the test files each
 provide their own executable main.
 
 ```bat
@@ -96,6 +102,8 @@ c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-fram
 /tmp/knot-native-h264-parser-test
 c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer native-engine/windows/media/media_pacing_test.cpp -o /tmp/knot-native-media-pacing-test
 /tmp/knot-native-media-pacing-test
+c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer native-engine/windows/media/media_activation_test.cpp -o /tmp/knot-native-media-activation-test
+/tmp/knot-native-media-activation-test
 ```
 
 `media_pacing_test.cpp` calls the actual header-only production pacing and media
@@ -108,6 +116,12 @@ The same production timeline also checks one-Hz static to active-60fps transitio
 and the 120-frame fixture for nominal current-frame duration without inherited
 idle gaps or three-tick rounding overlap.
 
+`media_activation_test.cpp` exercises the exact production activation ownership
+helpers with fresh fake references. It checks candidate failure, enumeration
+cleanup after successful selection, replacement, repeated reset and teardown
+without optional detach support. It uses no Windows, codec, capture or input API;
+the separate synthetic MFT fixture and real hardware acceptance remain distinct.
+
 ## Primary API references
 
 - [Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api)
@@ -115,6 +129,7 @@ idle gaps or three-tick rounding overlap.
 - [Video processor SDR color space](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_video_processor_color_space)
 - [MFT enumeration and hardware category](https://learn.microsoft.com/en-us/windows/win32/api/mfapi/nf-mfapi-mftenumex)
 - [Asynchronous MFT event/lifetime model](https://learn.microsoft.com/en-us/windows/win32/medfound/asynchronous-mfts)
+- [Optional activation detach behavior](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfactivate-detachobject)
 - [H264 encoder types and parameters](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder)
 - [Low-latency property type](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avlowlatencymode)
 - [Force-keyframe property type](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avencvideoforcekeyframe)

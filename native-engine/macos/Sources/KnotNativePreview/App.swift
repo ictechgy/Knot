@@ -9,7 +9,7 @@ import AppKit
 struct KnotNativePreviewApp: App {
     @StateObject private var model = SessionModel()
     var body: some Scene {
-        WindowGroup("Knot Native Preview") { PreviewWindow(model: model) }
+        Window("Knot Native Preview", id: "main") { PreviewWindow(model: model) }
             .defaultSize(width: 1200, height: 760)
             .commands { CommandGroup(replacing: .newItem) {} }
     }

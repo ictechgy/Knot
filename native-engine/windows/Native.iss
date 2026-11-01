@@ -3,15 +3,22 @@
   #error NativeOutput must name the checked native experiment output directory
 #endif
 #ifndef NativeVersion
-  #define NativeVersion "0.1.0-native.1"
+  #error NativeVersion must name the checked native preview version
+#endif
+#ifndef NativeNumericVersion
+  #error NativeNumericVersion must name its four-part numeric file version
 #endif
 [Setup]
 AppId={{17D88B30-1311-463F-A795-EE397E601B39}
 AppName=Knot Native Preview
-AppVersion=0.1.0
+AppVersion={#NativeVersion}
 AppVerName=Knot Native Preview {#NativeVersion}
 AppPublisher=Knot contributors
 VersionInfoProductName=Knot Native Preview
+VersionInfoVersion={#NativeNumericVersion}
+VersionInfoTextVersion={#NativeNumericVersion}
+VersionInfoProductVersion={#NativeNumericVersion}
+VersionInfoProductTextVersion={#NativeVersion}
 VersionInfoDescription=Experimental independent Windows host
 DefaultDirName={localappdata}\Programs\Knot Native Preview
 DefaultGroupName=Knot Native Preview

@@ -74,6 +74,23 @@ func strictJSON(_ text: String) { #expect(throws: (any Error).self) { try Strict
     #expect(throws: (any Error).self) { try AccessUnit(annexB: oversizedSPS) }
 }
 
+@Test func annexBNonzeroIndexSliceRetainsOwnedNALsAndRejectsMalformedSlices() throws {
+    let annexB = Data([0,0,0,1,0x67,1,2,0,0,1,0x68,3,0,0,1,0x65,4])
+    let storage = Data([0xee, 0xee]) + annexB + Data([0xdd])
+    var slice = storage[2..<(2 + annexB.count)]
+    #expect(slice.startIndex == 2)
+    let expected = try AccessUnit(annexB: annexB)
+    let parsed = try AccessUnit(annexB: slice)
+    // Returned NALs must own their bytes after the borrowed source is changed.
+    slice.resetBytes(in: slice.startIndex..<slice.endIndex)
+    #expect(parsed.nals == expected.nals && parsed.sps == expected.sps && parsed.pps == expected.pps)
+    #expect(parsed.isIDR && parsed.avcc == expected.avcc)
+    for bytes: [UInt8] in [[1,2,3], [0,0,1], [0,0,1,0x80], [0,0,1,0x65,1,0,0,1]] {
+        let backing = Data([0xee, 0xee]) + Data(bytes) + Data([0xdd])
+        #expect(throws: (any Error).self) { try AccessUnit(annexB: backing[2..<(2 + bytes.count)]) }
+    }
+}
+
 @Test func inputCoalescingSaturationAndExplicitRecovery() throws {
     var buffer = InputBuffer()
     for x in 0..<1000 { try buffer.append(Input.pointer(action: 0, x: UInt16(x), y: 0)) }

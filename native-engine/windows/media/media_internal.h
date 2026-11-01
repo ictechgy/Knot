@@ -5,6 +5,7 @@
 #include "kn_media.h"
 #include "h264.h"
 #include "media_pacing.h"
+#include "media_activation.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_6.h>
@@ -75,6 +76,7 @@ private:
     HRESULT SetUInt(const GUID& key, ULONG value, bool required = false);
     HRESULT SetBool(const GUID& key, bool value, bool required = false);
     void Reset();
+    ActivationOwner<IMFActivate> activation_;
     ComPtr<IMFTransform> transform_;
     ComPtr<IMFMediaEventGenerator> events_;
     ComPtr<ICodecAPI> codec_;

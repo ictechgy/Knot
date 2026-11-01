@@ -16,7 +16,9 @@ sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.2"
+VERSION = "0.1.0-native.3"
+VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
+NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
 
 def digest(path):
@@ -96,6 +98,11 @@ class Builder:
                  "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                  self.input(media / "media_pacing_test.cpp"), "-o", pacing_checks])
         self.run("native-pacing-checks", [pacing_checks], timeout=60)
+        activation_checks = self.output / "KnotNativeActivationChecks"
+        self.run("compile-native-activation-checks", ["/usr/bin/clang++", "-std=c++17", "-O1", "-g",
+                 "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                 self.input(media / "media_activation_test.cpp"), "-o", activation_checks])
+        self.run("native-activation-checks", [activation_checks], timeout=60)
         cpp_record = self.record_cpp_checks()
         self.run("swift-version", ["/usr/bin/swift", "--version"])
         self.run("swift-build", ["/usr/bin/swift", "build", "--package-path", package,
@@ -118,7 +125,7 @@ class Builder:
         shutil.copy2(self.input(ROOT / "LICENSE"), resources / "LICENSE")
         info = {"CFBundleExecutable": "KnotNativePreview", "CFBundleIdentifier": "org.knot.native-preview",
                 "CFBundleName": "Knot Native Preview", "CFBundleDisplayName": "Knot Native Preview",
-                "CFBundlePackageType": "APPL", "CFBundleVersion": "2", "CFBundleShortVersionString": "0.1.0",
+                "CFBundlePackageType": "APPL", "CFBundleVersion": PREVIEW_BUILD, "CFBundleShortVersionString": VERSION_BASE,
                 "KnotNativeVersion": VERSION, "CFBundleIconFile": "AppIcon", "LSMinimumSystemVersion": "26.0",
                 "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
                 "NSLocalNetworkUsageDescription": "Connect securely to the Windows PC you select and explicitly approve."}
@@ -145,9 +152,9 @@ class Builder:
     def record_cpp_checks(self):
         path = self.output / "native-cpp-checks.json"
         path.write_text(json.dumps({"schema": 1, "status": "passed", "platform": self.platform,
-            "invocationLabels": ["native-parser-checks", "native-pacing-checks"],
+            "invocationLabels": ["native-parser-checks", "native-pacing-checks", "native-activation-checks"],
             "sanitizers": "address,undefined" if self.platform == "macos" else "none",
-            "scope": "Fresh portable parser/pacing checks; no desktop capture, hardware encoder or input"
+            "scope": "Fresh portable parser/pacing/activation ownership checks; no desktop capture, hardware encoder or input"
         }, indent=2) + "\n")
         return path
 
@@ -210,6 +217,10 @@ class Builder:
         self.msvc("compile-native-pacing-checks", [*common, self.input(media / "media_pacing_test.cpp"),
                   "/Fe:" + str(pacing_checks)])
         self.run("native-pacing-checks", [pacing_checks], timeout=60)
+        activation_checks = self.output / "KnotNativeActivationChecks.exe"
+        self.msvc("compile-native-activation-checks", [*common, self.input(media / "media_activation_test.cpp"),
+                  "/Fe:" + str(activation_checks)])
+        self.run("native-activation-checks", [activation_checks], timeout=60)
         cpp_record = self.record_cpp_checks()
         cpp = [media / n for n in ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp"]]
         self.msvc("compile-native-media", [*common, "/LD", "/DKN_MEDIA_EXPORTS", *map(self.input, cpp),
@@ -254,12 +265,25 @@ class Builder:
         if not iscc:
             raise ValueError("Inno Setup compiler is required for the native experiment installer")
         self.run("native-installer", [iscc, "/DNativeOutput=" + str(self.output), "/DNativeVersion=" + VERSION,
+                                       "/DNativeNumericVersion=" + NUMERIC_VERSION,
                                        self.input(ROOT / "native-engine/windows/Native.iss")])
         setup = self.output / ("Knot-Native-" + VERSION + "-windows-x64-setup.exe")
         if not setup.is_file():
             raise ValueError("Native installer output is missing")
+        installer_metadata = self.output / "native-installer-metadata.json"
+        installer_metadata.unlink(missing_ok=True)
+        inspected = json.loads(self.run("native-installer-metadata", ["powershell.exe", "-NoProfile", "-NonInteractive",
+            "-File", self.input(ROOT / "scripts/verify_native_installer.ps1"), "-Installer", setup,
+            "-ExpectedVersion", VERSION, "-ExpectedNumericVersion", NUMERIC_VERSION], timeout=60).decode("utf-8-sig"))
+        expected_parts = [int(part) for part in NUMERIC_VERSION.split(".")]
+        if (inspected.get("status") != "passed" or inspected.get("productName") != "Knot Native Preview" or
+                inspected.get("productVersion") != VERSION or inspected.get("fileVersion") != NUMERIC_VERSION or
+                inspected.get("fileParts") != expected_parts or inspected.get("productParts") != expected_parts or
+                inspected.get("inspectionOnly") is not True or inspected.get("installerExecuted") is not False):
+            raise ValueError("Native installer version metadata differs from the checked preview version")
+        installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
         return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record,
-                self.output / "native-host-checks.json", public_certificate, public_pin, cpp_record]
+                self.output / "native-host-checks.json", public_certificate, public_pin, cpp_record, installer_metadata]
 
     def finish(self, files):
         if source_snapshot(ROOT) != self.sources:

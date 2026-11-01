@@ -117,6 +117,9 @@ namespace Knot.NativePreview
                     }, null, 250, 250);
                     reader = new Thread(ReadInput); reader.IsBackground = true; reader.Name = "Knot native input reader"; reader.Start();
                     byte[] encoded = new byte[NativeProtocol.VideoLimit - 17];
+                    // Synchronous writes finish before the next frame overwrites
+                    // this bounded buffer's valid prefix.
+                    byte[] payload = new byte[NativeProtocol.VideoLimit];
                     ulong sequence = 0;
                     long lastHeartbeat = Stopwatch.GetTimestamp();
                     while (!Stopping)
@@ -130,10 +133,9 @@ namespace Knot.NativePreview
                         {
                             if (written == 0 || written > encoded.Length || sequence == ulong.MaxValue) throw new ProtocolException("encoder");
                             AnnexB.Validate(encoded, (int)written, flags);
-                            byte[] payload = new byte[(int)written + 17];
                             NativeProtocol.Put64(payload, 0, ++sequence); NativeProtocol.Put64(payload, 8, timestamp); payload[16] = (byte)flags;
                             Buffer.BlockCopy(encoded, 0, payload, 17, (int)written);
-                            NativeProtocol.Write(tls, 3, payload);
+                            NativeProtocol.Write(tls, 3, payload, (int)written + 17);
                         }
                         else if (status != 1) throw new ProtocolException("capture");
                         if (Stopwatch.GetTimestamp() - lastHeartbeat >= 2L * Stopwatch.Frequency)

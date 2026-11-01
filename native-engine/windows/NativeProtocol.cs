@@ -183,6 +183,9 @@ namespace Knot.NativePreview
             if (bytes.Length != 32 || Base64Url(bytes) != token) throw new ProtocolException("auth");
             return bytes;
         }
+        // Keep the full equal-length comparison loop intact across JIT versions.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining |
+            System.Runtime.CompilerServices.MethodImplOptions.NoOptimization)]
         internal static bool Equal(byte[] a, byte[] b)
         {
             if (a == null || b == null || a.Length != b.Length) return false;
@@ -214,11 +217,17 @@ namespace Knot.NativePreview
         }
         internal static void Write(Stream stream, byte kind, byte[] bytes)
         {
+            if (bytes == null) throw new ProtocolException("protocol");
+            Write(stream, kind, bytes, bytes.Length);
+        }
+        internal static void Write(Stream stream, byte kind, byte[] bytes, int count)
+        {
             int cap = kind == 2 ? 4096 : kind == 3 ? VideoLimit : kind == 4 ? 0 : kind == 127 ? 128 : -1;
-            if (cap < 0 || bytes.Length > cap || (kind != 4 && bytes.Length == 0)) throw new ProtocolException("protocol");
-            byte[] header = new byte[5]; header[0] = kind; Put32(header, 1, (uint)bytes.Length);
+            if (cap < 0 || bytes == null || count < 0 || count > bytes.Length || count > cap || (kind != 4 && count == 0))
+                throw new ProtocolException("protocol");
+            byte[] header = new byte[5]; header[0] = kind; Put32(header, 1, (uint)count);
             stream.Write(header, 0, header.Length);
-            if (bytes.Length != 0) stream.Write(bytes, 0, bytes.Length);
+            if (count != 0) stream.Write(bytes, 0, count);
         }
         internal static uint U32(byte[] b, int p) { return ((uint)b[p] << 24) | ((uint)b[p + 1] << 16) | ((uint)b[p + 2] << 8) | b[p + 3]; }
         internal static int I32(byte[] b, int p) { return unchecked((int)U32(b, p)); }

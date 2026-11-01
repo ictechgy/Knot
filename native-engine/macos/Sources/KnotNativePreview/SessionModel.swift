@@ -35,6 +35,8 @@ final class SessionModel: ObservableObject {
     private var nextInput = ContinuousClock.now
     private var writerBusy = false
     private var inputEpoch: UInt64 = 0
+    private var presentationBackpressureSince: ContinuousClock.Instant?
+    private var displayBehind = false
     var active: Bool { [.connecting, .approval, .decoding, .streaming].contains(phase) }
 
     init(makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) }) { self.makeChannel = makeChannel }
@@ -50,6 +52,7 @@ final class SessionModel: ObservableObject {
         guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
         let id = UUID(); identity = id; phase = .connecting; status = "Verifying the host certificate…"
         receiveState = ReceiveState(); input = InputBuffer(); inputRecovery = false
+        presentationBackpressureSince = nil; displayBehind = false
         connectedAt = .now; lastIncoming = .now; lastHeartbeat = .now
         reader = Task { [weak self] in
             guard let self, !Task.isCancelled, self.identity == id else { return }
@@ -104,15 +107,25 @@ final class SessionModel: ObservableObject {
             }
         }
     }
-    func presentDecodedImage(_ image: CVPixelBuffer) {
+    func presentDecodedImage(_ image: CVPixelBuffer, now: ContinuousClock.Instant = .now) {
         guard [.decoding, .streaming].contains(phase) else { return }
         switch surface?.display(image) ?? .backpressure {
         case .presented:
+            presentationBackpressureSince = nil; displayBehind = false
             phase = .streaming
-            status = inputRecovery ? "Receiving the host desktop. Input paused; click the desktop to resume." : "Receiving the host desktop. Temporary trust; no saved pairing."
-        case .backpressure: break
+            updateStreamingStatus()
+        case .backpressure:
+            let began = presentationBackpressureSince ?? now
+            presentationBackpressureSince = began
+            if phase == .streaming, now - began >= .seconds(2) {
+                displayBehind = true; updateStreamingStatus()
+            }
         case .failed: presentationFailed()
         }
+    }
+    private func updateStreamingStatus() {
+        let reception = displayBehind ? "Display is behind; still receiving decoded images." : "Receiving the host desktop."
+        status = reception + (inputRecovery ? " Input paused; click the desktop to resume." : " Temporary trust; no saved pairing.")
     }
     private func presentationFailed() {
         guard [.decoding, .streaming].contains(phase) else { return }
@@ -175,12 +188,15 @@ final class SessionModel: ObservableObject {
         guard active else { return }
         inputEpoch &+= 1
         input.revoke(); inputRecovery = true; surface?.forgetHeldKeys(); pumpWriter()
-        if phase == .streaming { status = "Input paused. Click the desktop to resume." }
+        if phase == .streaming {
+            if displayBehind { updateStreamingStatus() }
+            else { status = "Input paused. Click the desktop to resume." }
+        }
     }
     func recoverInput() {
         guard phase == .streaming else { return }
         input.recover(); inputRecovery = false
-        status = "Receiving the host desktop. Temporary trust; no saved pairing."
+        updateStreamingStatus()
     }
     private func pumpWriter() {
         guard !writerBusy, let channel, [.approval, .decoding, .streaming].contains(phase) else { return }
@@ -220,6 +236,7 @@ final class SessionModel: ObservableObject {
         channel?.close(); channel = nil
         decoder?.stop(); decoder = nil; surface?.onFailure = nil; surface?.clear(); surface?.forgetHeldKeys()
         invitation = nil; input = InputBuffer(); inputRecovery = false
+        presentationBackpressureSince = nil; displayBehind = false
         phase = failed ? .failed : .idle; status = message
     }
 }

@@ -1,5 +1,15 @@
 # Native preview changes
 
+## 0.1.0-native.3
+
+- Scan H.264 access units through borrowed bytes instead of an extra full-buffer array copy; NAL data remains independently owned and all parser limits are unchanged. Sliced-data regression checks cover nonzero source indices and lifetime independence.
+- Reuse one bounded Windows video payload buffer, writing only its valid prefix. Consecutive different-size frame checks reject stale trailing bytes and invalid lengths before an envelope is emitted. Authentication comparison explicitly retains its full-length loop across JIT optimization/inlining.
+- Retain each selected Media Foundation activation until encoder teardown, without depending on the optional `DetachObject` method. A portable production-policy fixture checks failed candidates, successful selection, replacement and repeated cleanup; real hardware acceptance remains separate.
+- Use one Mac window for the one-session/one-surface preview. Sustained presentation backpressure gets a status message after two seconds, clears after successful display and preserves the input recovery state.
+- Windows installation metadata now shows the full preview version; numeric PE versions and the Mac bundle revision advance together. The Windows builder reads the newly built setup's version resources and rejects mismatches without executing the installer.
+
+These are source, synthetic-fixture and build changes. Parser microbenchmarks do not measure actual streaming latency or hardware performance. The v1 wire format and temporary consent/trust model are unchanged; the device and signing gates below still apply.
+
 ## 0.1.0-native.2
 
 - Decoder admission waits within its three-slot bound, including decoded images awaiting MainActor delivery. Cancellation wakes the reader; documented dropped-frame completions retire safely. The Windows-generated120-frame synthetic fixture now also exercises burst submission.

@@ -308,6 +308,32 @@ private func syntheticPresentationPixel() throws -> CVPixelBuffer {
     #expect(model.phase == .failed && transport.closeCount() == 1 && presenter.onFailure == nil)
 }
 
+@Test @MainActor func sustainedPresentationBackpressureReportsAndRecoversWithoutRevoking() async throws {
+    let transport = InertChannel()
+    let presenter = InertPresenter([.presented, .backpressure, .backpressure, .backpressure, .presented, .backpressure])
+    let model = beginInert(transport, presenter: presenter)
+    try await approveInert(transport, model)
+    let image = try syntheticPresentationPixel(), start = ContinuousClock.now
+    model.presentDecodedImage(image, now: start)
+    try #require(model.phase == .streaming)
+    model.presentDecodedImage(image, now: start + .milliseconds(100))
+    model.presentDecodedImage(image, now: start + .seconds(1))
+    #expect(!model.status.contains("Display is behind"))
+    model.presentDecodedImage(image, now: start + .milliseconds(2100))
+    #expect(model.phase == .streaming && model.status.contains("Display is behind"))
+    #expect(transport.closeCount() == 0)
+    model.releaseInput()
+    #expect(model.inputRecovery && model.status.contains("Display is behind") && model.status.contains("click"))
+    model.recoverInput()
+    #expect(!model.inputRecovery && model.status.contains("Display is behind"))
+    model.presentDecodedImage(image, now: start + .milliseconds(2200))
+    #expect(model.phase == .streaming && !model.status.contains("Display is behind"))
+    model.presentDecodedImage(image, now: start + .seconds(4))
+    #expect(!model.status.contains("Display is behind")) // a new short stall gets its own budget
+    model.disconnect()
+    #expect(model.phase == .idle && transport.closeCount() == 1 && !model.status.contains("Display is behind"))
+}
+
 @Test @MainActor func startupUsesStageBudgetsAndSurvivesVirtualElevenSecondInitialization() async throws {
     let transport = InertChannel(), presenter = InertPresenter([.presented])
     let model = beginInert(transport, presenter: presenter)

@@ -7,8 +7,9 @@ struct Activations {
     UINT32 count = 0;
     ~Activations() {
         for (UINT32 i = 0; i < count; ++i) {
-            values[i]->ShutdownObject(); // Successful transform was detached.
-            values[i]->Release();
+            // Every attempted candidate is transferred to Encoder before it is
+            // activated. Remaining entries have never created a transform.
+            ReleaseUnactivated(values[i]);
         }
         CoTaskMemFree(values);
     }
@@ -29,9 +30,10 @@ void Encoder::Reset() {
     if (transform_) {
         transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
         transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-        ComPtr<IMFShutdown> shutdown;
-        if (SUCCEEDED(transform_.As(&shutdown))) shutdown->Shutdown();
     }
+    // The activation owns shutdown, including partially configured candidates.
+    // Keep all transform interfaces alive until that shutdown has completed.
+    activation_.Reset();
     events_.Reset(); codec_.Reset(); outputType_.Reset(); transform_.Reset();
     async_ = hardware_ = draining_ = false;
     inputReady_ = outputReady_ = inFlight_ = 0;
@@ -62,12 +64,10 @@ HRESULT Encoder::Start(const KnMediaConfig& config, bool softwareOnly) {
     if (FAILED(hr)) return hr;
     hr = MF_E_TOPO_CODEC_NOT_FOUND;
     for (UINT32 i = 0; i < activations.count; ++i) {
-        if (FAILED(hr)) {
-            Reset();
-            hr = Configure(activations.values[i], config, !softwareOnly);
-            if (FAILED(hr)) activations.values[i]->ShutdownObject();
-            else activations.values[i]->DetachObject(); // Session now owns shutdown.
-        }
+        Reset();
+        activation_.Take(activations.values[i]);
+        hr = Configure(activation_.Get(), config, !softwareOnly);
+        if (SUCCEEDED(hr)) break;
     }
     if (FAILED(hr)) Reset();
     return hr;

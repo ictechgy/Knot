@@ -12,6 +12,7 @@ on:
     paths:
       - 'native-engine/**'
       - 'scripts/build_native_engine.py'
+      - 'scripts/verify_native_installer.ps1'
       - 'scripts/build_snapshot.py'
       - 'scripts/check_source_checkout.py'
       - 'scripts/tests/test_build_snapshot.py'

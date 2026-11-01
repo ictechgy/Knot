@@ -30,10 +30,10 @@ class NativeRebuildTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "core.autocrlf", "false")
         for name in ["LICENSE", "INSTALLATION.md", "VERSION", ".gitignore", "fake-iscc",
-                     "Assets/Brand/AppIcon.ico", "native-engine/windows/Native.iss",
+                     "Assets/Brand/AppIcon.ico", "native-engine/windows/Native.iss", "scripts/verify_native_installer.ps1",
                      *["native-engine/windows/media/" + name for name in
                        ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp",
-                        "h264_parser_test.cpp", "media_pacing_test.cpp"]]]:
+                        "h264_parser_test.cpp", "media_pacing_test.cpp", "media_activation_test.cpp"]]]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("build/\n" if name == ".gitignore" else "Fresh inert fixture\n")
@@ -46,7 +46,7 @@ class NativeRebuildTests(unittest.TestCase):
     def git(self, *args, **kwargs):
         return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE, **kwargs)
 
-    def build_with_inert_tools(self, corrupt_public_pin=False):
+    def build_with_inert_tools(self, corrupt_public_pin=False, corrupt_installer_version=False):
         builder = native.Builder("windows", self.output)
         actual_run = builder.run
 
@@ -64,8 +64,20 @@ class NativeRebuildTests(unittest.TestCase):
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
                                        actualCapture=False, actualSendInput=False)).encode()
             elif label == "native-installer":
+                self.assertIn("/DNativeVersion=" + native.VERSION, argv)
+                self.assertIn("/DNativeNumericVersion=" + native.NUMERIC_VERSION, argv)
                 (self.output / ("Knot-Native-" + native.VERSION + "-windows-x64-setup.exe")).write_bytes(b"INERT installer")
-            elif label in ["native-parser-checks", "native-pacing-checks"]:
+            elif label == "native-installer-metadata":
+                self.assertEqual(argv[0:4], ["powershell.exe", "-NoProfile", "-NonInteractive", "-File"])
+                self.assertEqual(argv[5:], ["-Installer", self.output / ("Knot-Native-" + native.VERSION + "-windows-x64-setup.exe"),
+                    "-ExpectedVersion", native.VERSION, "-ExpectedNumericVersion", native.NUMERIC_VERSION])
+                parts = [int(part) for part in native.NUMERIC_VERSION.split(".")]
+                return json.dumps(dict(status="passed", productName="Knot Native Preview",
+                    productVersion="0.1.0" if corrupt_installer_version else native.VERSION,
+                    fileVersion=native.NUMERIC_VERSION, fileParts=parts, productParts=parts,
+                    inspectionOnly=True, installerExecuted=False,
+                    inspector="INERT lifecycle test substitute; no PE inspected")).encode()
+            elif label in ["native-parser-checks", "native-pacing-checks", "native-activation-checks"]:
                 return b"INERT external-tool substitute for lifecycle checks only\n"
             else:
                 return actual_run(label, argv, **kwargs)
@@ -90,6 +102,10 @@ class NativeRebuildTests(unittest.TestCase):
         record = json.loads((self.output / "NATIVE-BUILD.json").read_text())
         self.assertTrue(record["checksPassed"])
         self.assertIn("native-test-public.cer", record["products"])
+        self.assertIn("native-installer-metadata.json", record["products"])
+        metadata = json.loads((self.output / "native-installer-metadata.json").read_text())
+        self.assertEqual(metadata["productVersion"], native.VERSION)
+        self.assertIn("INERT", metadata["inspector"])
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
@@ -105,3 +121,11 @@ class NativeRebuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pin differs from exported public DER"):
             self.build_with_inert_tools(corrupt_public_pin=True)
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+
+    def test_mislabeled_installer_cannot_retain_prior_success_claim(self):
+        self.build_with_inert_tools()
+        with self.assertRaisesRegex(ValueError, "installer version metadata differs"):
+            self.build_with_inert_tools(corrupt_installer_version=True)
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+        self.assertFalse((self.output / "SHA256SUMS").exists())
+        self.assertFalse((self.output / "native-installer-metadata.json").exists())

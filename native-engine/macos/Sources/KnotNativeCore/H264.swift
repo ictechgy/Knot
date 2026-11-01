@@ -6,7 +6,13 @@ public struct AccessUnit: Sendable {
     public let sps: [Data], pps: [Data]
     public init(annexB data: Data) throws {
         guard !data.isEmpty, data.count <= 4_194_287 else { throw NativeFailure.oversized }
-        let bytes = Array(data)
+        let parsed = try data.withUnsafeBytes { bytes in try Self.parse(bytes) }
+        self.nals = parsed.nals; self.isIDR = parsed.isIDR; self.sps = parsed.sps; self.pps = parsed.pps
+    }
+    // The borrowed buffer is zero-based even when Data is a nonzero-index slice.
+    // Only owned NAL copies escape this closure; no whole-access-unit Array copy.
+    private static func parse(_ bytes: UnsafeRawBufferPointer) throws -> (nals: [Data], isIDR: Bool, sps: [Data], pps: [Data]) {
+        guard let base = bytes.baseAddress else { throw NativeFailure.malformed }
         func prefix(_ i: Int) -> Int {
             if i + 3 <= bytes.count, bytes[i] == 0, bytes[i+1] == 0, bytes[i+2] == 1 { return 3 }
             if i + 4 <= bytes.count, bytes[i] == 0, bytes[i+1] == 0, bytes[i+2] == 0, bytes[i+3] == 1 { return 4 }
@@ -25,7 +31,7 @@ public struct AccessUnit: Sendable {
             // Annex B permits trailing_zero_8bits between/after NAL units.
             while end > begin && bytes[end-1] == 0 { end -= 1 }
             guard end > begin, nals.count < 128 else { throw NativeFailure.malformed }
-            let nal = Data(bytes[begin..<end]), type = bytes[begin] & 31
+            let nal = Data(bytes: base.advanced(by: begin), count: end - begin), type = bytes[begin] & 31
             guard bytes[begin] & 128 == 0, (1...23).contains(type) else { throw NativeFailure.malformed }
             if type == 7 || type == 8 {
                 guard nal.count <= 65_536 else { throw NativeFailure.oversized }
@@ -36,7 +42,7 @@ public struct AccessUnit: Sendable {
             nals.append(nal)
         }
         guard hasSlice else { throw NativeFailure.malformed }
-        self.nals = nals; self.isIDR = hasIDR; self.sps = setsSPS; self.pps = setsPPS
+        return (nals, hasIDR, setsSPS, setsPPS)
     }
     public var avcc: Data { var bytes = Data(); for nal in nals { bytes.appendBE(UInt32(nal.count)); bytes.append(nal) }; return bytes }
 }
