@@ -41,6 +41,9 @@ class Builder:
                 raise ValueError("Native build ownership marker differs")
         else:
             marker.write_text(json.dumps({"owner": "KnotNativeBuild", "schema": 1}) + "\n")
+        # A failed rebuild must never leave an earlier success claim in place.
+        for name in ["NATIVE-BUILD.json", "SHA256SUMS"]:
+            (self.output / name).unlink(missing_ok=True)
         self.evidence = self.output / "evidence"
         self.evidence.mkdir(exist_ok=True)
         self.commands = []
@@ -197,6 +200,8 @@ class Builder:
         checks = self.csharp("KnotNativeChecks", sources + sorted((ROOT / "native-engine/windows/tests").glob("*.cs")),
                              "Knot.NativePreview.NativeChecks", "exe")
         public_certificate = self.output / "native-test-public.cer"
+        # NativeChecks deliberately creates only a new, owned fixture file.
+        public_certificate.unlink(missing_ok=True)
         result = self.run("native-host-checks", [checks, "--export-certificate", public_certificate],
                           timeout=180).decode("utf-8-sig").strip()
         parsed = json.loads(result)

@@ -30,6 +30,7 @@ jobs:
           persist-credentials: false
       - run: python3 scripts/check_source_checkout.py
       - run: python3 -B -m unittest discover -s scripts/tests -p test_build_snapshot.py
+      - run: python3 -B -m unittest discover -s scripts/tests -p test_build_native_engine.py
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
         with:
           name: native-windows-preview
@@ -78,7 +79,7 @@ jobs:
         with:
           persist-credentials: false
       - run: python scripts/check_source_checkout.py
-      - run: python -B -m unittest discover -s scripts/tests -p test_build_snapshot.py
+      - run: python -B -m unittest discover -s scripts/tests -p test_build_native_engine.py
       - name: Install pinned Inno Setup compiler on the disposable build runner
         if: github.event_name != 'workflow_dispatch' || !inputs.media_only
         shell: powershell
