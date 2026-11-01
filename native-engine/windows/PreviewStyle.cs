@@ -163,7 +163,8 @@ namespace Knot.NativePreview
             Text = text; Kind = kind; UseMnemonic = false; AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink; FlatStyle = FlatStyle.Flat;
             FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand;
-            Font = PreviewStyle.Type(kind == PreviewButtonKind.Navigation ? 10 : 10.5f, FontStyle.Bold, scale);
+            // The form assigns and tracks the freshly allocated font so equal
+            // values never cause disposal of a font still used by this button.
             Padding = new Padding((int)(18 * scale), (int)(10 * scale), (int)(18 * scale), (int)(10 * scale));
             MinimumSize = new Size(0, (int)(44 * scale));
             Margin = new Padding(0, 0, (int)(10 * scale), 0);

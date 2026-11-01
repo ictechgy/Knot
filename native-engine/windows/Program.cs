@@ -37,6 +37,7 @@ namespace Knot.NativePreview
         private readonly PreviewTrustPanel trustPanel;
         private readonly MonitorIllustration illustration = new MonitorIllustration();
         private readonly List<Label> wrappingLabels = new List<Label>();
+        private readonly Dictionary<Control, Font> ownedFonts = new Dictionary<Control, Font>();
         // Control.Visible includes ancestor visibility. Track the requested local
         // value so hidden pages do not repeatedly invalidate WinForms layout.
         private readonly Dictionary<Control, bool> localVisibility = new Dictionary<Control, bool>();
@@ -61,7 +62,7 @@ namespace Knot.NativePreview
             Text = "Knot Native Preview"; ClientSize = new Size(P(1040), P(740));
             MinimumSize = new Size(P(500), P(360)); StartPosition = FormStartPosition.CenterScreen;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = visualFixture ? AutoScaleMode.None : AutoScaleMode.Dpi;
-            Font = PreviewStyle.Type(10.5f, FontStyle.Regular, scale); BackColor = PreviewStyle.Canvas;
+            SetOwnedFont(this, PreviewStyle.Type(10.5f, FontStyle.Regular, scale)); BackColor = PreviewStyle.Canvas;
             try
             {
                 string installedIcon = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AppIcon.ico");
@@ -83,7 +84,7 @@ namespace Knot.NativePreview
             compactDesktopNavigation = ActionButton("이 PC 공유", PreviewButtonKind.Navigation);
             compactHelpNavigation = ActionButton("연결 안내", PreviewButtonKind.Navigation);
             networkDisclosure = ActionButton("연결 경로 변경", PreviewButtonKind.Secondary);
-            networkDisclosure.Font = PreviewStyle.Type(9, FontStyle.Regular, scale);
+            SetOwnedFont(networkDisclosure, PreviewStyle.Type(9, FontStyle.Regular, scale));
             networkDisclosure.MinimumSize = new Size(0, P(34));
 
             shell = Column(); shell.Dock = DockStyle.Fill; shell.AutoSize = false;
@@ -132,7 +133,7 @@ namespace Knot.NativePreview
             trustTitle = MakeLabel("인증서 지문 · Mac에 표시된 값과 비교해주세요", 9, FontStyle.Bold);
             wrappingLabels.Remove(trustTitle);
             pin.ReadOnly = true; pin.Multiline = true; pin.WordWrap = true; pin.BorderStyle = BorderStyle.None;
-            pin.Font = new Font("Consolas", 10 * scale); pin.BackColor = PreviewStyle.Surface; pin.ForeColor = PreviewStyle.Ink;
+            SetOwnedFont(pin, new Font("Consolas", 10 * scale)); pin.BackColor = PreviewStyle.Surface; pin.ForeColor = PreviewStyle.Ink;
             pin.Height = P(43); pin.Margin = Padding.Empty;
             pin.AccessibleName = "현재 연결의 인증서 SHA-256 지문"; pin.ShortcutsEnabled = true;
             trustPanel = new PreviewTrustPanel(trustTitle, pin) { Dock = DockStyle.Top, Margin = new Padding(0, 0, 0, P(18)) };
@@ -153,7 +154,7 @@ namespace Knot.NativePreview
             networkSettings = Column(); networkSettings.Dock = DockStyle.Top; networkSettings.Margin = new Padding(0, P(14), 0, 0);
             networkSettings.Controls.Add(MakeLabel("같은 Wi-Fi 또는 Tailscale 경로를 선택하세요.", 9, FontStyle.Regular));
             addresses.DropDownStyle = ComboBoxStyle.DropDownList; addresses.FlatStyle = FlatStyle.Flat;
-            addresses.Dock = DockStyle.Top; addresses.DropDownWidth = P(650); addresses.Font = PreviewStyle.Type(10, FontStyle.Regular, scale);
+            addresses.Dock = DockStyle.Top; addresses.DropDownWidth = P(650); SetOwnedFont(addresses, PreviewStyle.Type(10, FontStyle.Regular, scale));
             addresses.AccessibleName = "화면 공유에 사용할 네트워크"; addresses.Margin = new Padding(0, P(8), 0, 0);
             foreach (AdapterChoice choice in choices) addresses.Items.Add(choice);
             if (addresses.Items.Count > 0) addresses.SelectedIndex = 0;
@@ -212,7 +213,12 @@ namespace Knot.NativePreview
 
         private int P(float value) { return (int)Math.Round(value * scale); }
         private void TraceFixture(string stage) { if (fixtureTrace != null) fixtureTrace(stage); }
-        private PreviewButton ActionButton(string text, PreviewButtonKind kind) { return new PreviewButton(text, kind, scale); }
+        private PreviewButton ActionButton(string text, PreviewButtonKind kind)
+        {
+            PreviewButton button = new PreviewButton(text, kind, scale);
+            SetOwnedFont(button, PreviewStyle.Type(kind == PreviewButtonKind.Navigation ? 10 : 10.5f, FontStyle.Bold, scale));
+            return button;
+        }
         private TableLayoutPanel Column()
         {
             TableLayoutPanel panel = new TableLayoutPanel { ColumnCount = 1, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty, BackColor = Color.Transparent };
@@ -220,8 +226,9 @@ namespace Knot.NativePreview
         }
         private Label MakeLabel(string text, float size, FontStyle style)
         {
-            Label label = new Label { Text = text, Font = PreviewStyle.Type(size, style, scale), AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false,
+            Label label = new Label { Text = text, AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false,
                 ForeColor = style == FontStyle.Bold ? PreviewStyle.Ink : PreviewStyle.Muted, BackColor = Color.Transparent, Margin = Padding.Empty, MaximumSize = new Size(P(650), 0) };
+            SetOwnedFont(label, PreviewStyle.Type(size, style, scale));
             wrappingLabels.Add(label); return label;
         }
         private Control BuildSidebar()
@@ -248,7 +255,7 @@ namespace Knot.NativePreview
             Label name = MakeLabel("Knot", 12, FontStyle.Bold); name.Dock = DockStyle.None; name.Margin = new Padding(0, P(5), P(16), 0); navigation.Controls.Add(name);
             foreach (PreviewButton button in new PreviewButton[] { compactDesktopNavigation, compactHelpNavigation })
             {
-                Font old = button.Font; button.Font = PreviewStyle.Type(9, FontStyle.Bold, scale); old.Dispose();
+                SetOwnedFont(button, PreviewStyle.Type(9, FontStyle.Bold, scale));
                 button.Padding = new Padding(P(8), P(5), P(8), P(5)); button.MinimumSize = new Size(0, P(32));
                 button.Margin = new Padding(0, 0, P(6), 0); navigation.Controls.Add(button);
             }
@@ -262,7 +269,7 @@ namespace Knot.NativePreview
             row.RowCount = 1; row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             status.ReadOnly = true; status.Multiline = true; status.WordWrap = true; status.BorderStyle = BorderStyle.None;
-            status.BackColor = PreviewStyle.Canvas; status.ForeColor = PreviewStyle.Muted; status.Font = PreviewStyle.Type(9.5f, FontStyle.Regular, scale);
+            status.BackColor = PreviewStyle.Canvas; status.ForeColor = PreviewStyle.Muted; SetOwnedFont(status, PreviewStyle.Type(9.5f, FontStyle.Regular, scale));
             status.Dock = DockStyle.Fill; status.Margin = new Padding(0, P(3), P(18), 0); status.AccessibleName = "현재 공유 상태";
             stop.Margin = Padding.Empty; row.Controls.Add(status, 0, 0); row.Controls.Add(stop, 1, 0); footer.Controls.Add(row); return footer;
         }
@@ -307,9 +314,20 @@ namespace Knot.NativePreview
             localVisibility[control] = visible;
             control.Visible = visible;
         }
-        private static void SetOwnedFont(Control control, Font next)
+        private void SetOwnedFont(Control control, Font next)
         {
-            Font previous = control.Font; control.Font = next; previous.Dispose();
+            // All callers supply a newly allocated font. WinForms may ignore a
+            // value-equal assignment and retain the previous font instance.
+            Font previous = control.Font;
+            if (ReferenceEquals(previous, next)) return;
+            if (previous.Equals(next)) { next.Dispose(); return; }
+            Font owned;
+            bool mayRetire = ownedFonts.TryGetValue(control, out owned) && ReferenceEquals(owned, previous) &&
+                !previous.IsSystemFont && (control.Parent == null || !ReferenceEquals(previous, control.Parent.Font));
+            control.Font = next;
+            if (!ReferenceEquals(control.Font, next)) { next.Dispose(); return; }
+            ownedFonts[control] = next;
+            if (mayRetire) previous.Dispose();
         }
         private int StatusTextHeight(int width)
         {

@@ -52,6 +52,14 @@ namespace Knot.NativePreview
             foreach (Control child in root.Controls) count += CountControls(child);
             return count;
         }
+        private static void AssertFontsUsable(Control root)
+        {
+            // GetHeight(dpi) consults the native font; Font.Height may be cached.
+            float height = root.Font.GetHeight(96f);
+            if (float.IsNaN(height) || float.IsInfinity(height) || height <= 0)
+                throw new InvalidOperationException("A synthetic control has an unusable active font: " + root.GetType().Name);
+            foreach (Control child in root.Controls) AssertFontsUsable(child);
+        }
         private static void Pump()
         {
             // This dispatches only the fresh fixture's layout/paint messages.
@@ -138,6 +146,7 @@ namespace Knot.NativePreview
                             if (frame.StatusOverride != null || frame.ViewerLabelOverride != null)
                                 state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy);
                             Progress(frame, "before-presentation"); form.SetFixturePresentation(state, frame.Help); Progress(frame, "after-presentation");
+                            AssertFontsUsable(form); Progress(frame, "fonts-usable-before-show");
                             Progress(frame, "before-show"); form.Show(); Progress(frame, "after-show");
                             form.PerformLayout(); Progress(frame, "after-initial-layout"); Pump(); Progress(frame, "after-initial-pump");
                             for (int layoutPass = 0; layoutPass < 3; ++layoutPass)
@@ -147,9 +156,21 @@ namespace Knot.NativePreview
                             }
                             if (frame.Phase == HostViewPhase.Invitation)
                             {
+                                // Same-form normal/compact/normal transitions
+                                // exercise both replacement and equal-value paths.
+                                Size fullSize = form.ClientSize;
+                                Progress(frame, "before-compact-font-probe"); form.ClientSize = new Size(800, 620);
+                                form.PrepareFixtureLayout(); Pump(); AssertFontsUsable(form);
+                                if (!form.FixtureCompactMode) throw new InvalidOperationException("The compact font probe did not enter compact presentation.");
+                                Progress(frame, "fonts-usable-compact"); form.ClientSize = fullSize;
+                                form.PrepareFixtureLayout(); Pump(); AssertFontsUsable(form);
+                                if (form.FixtureCompactMode) throw new InvalidOperationException("The compact font probe did not restore normal presentation.");
+                                form.PrepareFixtureLayout(); AssertFontsUsable(form); Progress(frame, "fonts-usable-restored");
                                 Progress(frame, "before-help"); form.SetFixturePresentation(state, true); Progress(frame, "after-help"); Pump(); Progress(frame, "after-help-pump");
+                                AssertFontsUsable(form); Progress(frame, "fonts-usable-help");
                                 if (form.CopyVisible) throw new InvalidOperationException("Invitation copy action must be hidden on the help page (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
                                 Progress(frame, "before-help-return"); form.SetFixturePresentation(state, false); Progress(frame, "after-help-return"); Pump(); Progress(frame, "after-help-return-pump");
+                                AssertFontsUsable(form); Progress(frame, "fonts-usable-help-return");
                                 if (!form.CopyVisible || !form.CopyEnabled)
                                     throw new InvalidOperationException("Invitation copy action must restore from explicit state after help navigation (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
                             }
@@ -172,6 +193,7 @@ namespace Knot.NativePreview
                             if (form.ApprovalEnabled != expectedApproval)
                                 throw new InvalidOperationException("Approval must be an explicit pending-request action.");
                             if (form.StopVisible != state.RunPresent) throw new InvalidOperationException("Stop action is not lifecycle-bound.");
+                            AssertFontsUsable(form);
                             if (!form.FixtureFooterFits) throw new InvalidOperationException("Fixed status text and stop action must fit the actual client viewport.");
                             if (expectedApproval && !form.FixtureConsentFits) throw new InvalidOperationException("The full pin, observed address, unverified name and consent actions must fit the request viewport.");
                             float actualDpi;
@@ -198,7 +220,7 @@ namespace Knot.NativePreview
                                     ",\"layoutFontScale\":" + frame.Scale.ToString(CultureInfo.InvariantCulture) +
                                     ",\"actualDrawingDpi\":" + actualDpi.ToString(CultureInfo.InvariantCulture) +
                                     ",\"state\":" + Q(frame.Phase.ToString()) + ",\"controlCount\":" + CountControls(form) +
-                                    ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"brandPainted\":true,\"effectsBound\":false}");
+                                    ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"brandPainted\":true,\"fontsUsable\":true,\"effectsBound\":false}");
                             }
                             Progress(frame, "before-close"); form.Close(); Progress(frame, "after-close"); Pump(); Progress(frame, "after-close-pump");
                         }
