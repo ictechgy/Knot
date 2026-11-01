@@ -94,6 +94,10 @@ namespace Knot.NativePreview
                     throw new IOException("Synthetic output must be new or empty.");
                 Directory.CreateDirectory(output);
                 progressPath = Path.Combine(output, "fixture-progress.log");
+                // This separate renderer must fail, never wait on the default
+                // WinForms ThreadException dialog in unattended Windows CI.
+                // Configure before creating any control or native window handle.
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                 Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
                 List<Frame> frames = new List<Frame>();
                 frames.Add(new Frame("windows-idle.png", HostViewPhase.Idle, false, 1040, 740, 1));
@@ -206,6 +210,7 @@ namespace Knot.NativePreview
                     "\"certificateCreationInvoked\":false,\"captureInvoked\":false,\"actualInputInvoked\":false," +
                     "\"screenCaptureInvoked\":false,\"existingUserUIRead\":false,\"syntheticWindowsShown\":true," +
                     "\"visualAcceptance\":\"manual-review-required\",\"renderMethod\":\"Owned fresh fixture Form.DrawToBitmap after Show and finite DoEvents; no screen capture\"," +
+                    "\"uiExceptionPolicy\":\"ThrowException\"," +
                     "\"scaleScope\":\"layout/font geometry simulation only; actual drawing DPI recorded; not a per-monitor DPI acceptance test\"," +
                     "\"brandIconSHA256\":" + Q(Digest(iconPath)) + ",\"images\":[" + string.Join(",", records.ToArray()) + "]}";
                 File.WriteAllText(Path.Combine(output, "visual-checks.json"), report + Environment.NewLine, new UTF8Encoding(false));
@@ -214,7 +219,14 @@ namespace Knot.NativePreview
             catch (Exception error)
             {
                 // Only synthetic fixture diagnostics, without user/service data.
-                Console.Error.WriteLine("Synthetic UI rendering failed [" + currentFrame + " stage=" + currentStage + "]: " + error.GetType().Name + ": " + error.Message);
+                string diagnostic = "Synthetic UI rendering failed [" + currentFrame + " stage=" + currentStage + "]: " + error;
+                Console.Error.WriteLine(diagnostic);
+                if (progressPath != null)
+                {
+                    try { File.AppendAllText(progressPath, diagnostic + Environment.NewLine, new UTF8Encoding(false)); }
+                    catch (IOException) { Console.Error.WriteLine("The synthetic failure log could not be persisted."); }
+                    catch (UnauthorizedAccessException) { Console.Error.WriteLine("The synthetic failure log could not be persisted."); }
+                }
                 return 1;
             }
         }
