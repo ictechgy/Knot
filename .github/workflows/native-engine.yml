@@ -1,5 +1,7 @@
 name: Build independent native engine preview
 on:
+  push:
+    branches: ['knot-native-engine-*']
   workflow_dispatch:
     inputs:
       media_only:
