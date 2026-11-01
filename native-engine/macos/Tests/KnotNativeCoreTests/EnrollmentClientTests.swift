@@ -189,3 +189,24 @@ private final class StopBeforeNetworkChannel: NativeChannel, @unchecked Sendable
     media.connectAuthenticated(result)
     #expect(recorder.value == nil && media.phase == .failed && !media.numberAuthorized)
 }
+
+private final class RejectedEnrollment: EnrollmentAuthenticating, @unchecked Sendable {
+    func authenticate(name: String) async throws -> AuthenticatedEnrollment { throw EnrollmentFailure.authentication }
+    func close() {}
+}
+
+@Test @MainActor func wrongNumberKeepsTheUnverifiedCandidateForAnExplicitFreshRetry() async throws {
+    let candidate = try testCandidate()
+    let model = EnrollmentModel(makeDiscovery: { DelayedDiscovery() },
+        makeClient: { _, _ in RejectedEnrollment() }, initialCandidates: [candidate])
+    var completed = 0
+    for _ in 0..<2 {
+        model.code = "00001234"
+        let operation = try #require(model.connect(name: "Fixture Mac") { _ in completed += 1 })
+        await operation.value
+        #expect(model.phase == .failed && model.selected == candidate && model.candidates == [candidate])
+        #expect(model.code.isEmpty && completed == 0)
+    }
+    model.cancel()
+    #expect(model.candidates.isEmpty && model.selected == nil)
+}

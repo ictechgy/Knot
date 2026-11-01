@@ -16,7 +16,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     private let video = AVSampleBufferDisplayLayer()
     private var statusObservation: NSKeyValueObservation?
     var onFailure: (() -> Void)?
-    private var observers: [NSObjectProtocol] = []
+    private var notifications: NativeWindowNotifications?
     private var heldModifiers: Set<UInt16> = []
     private var localModifiers = KeyboardModifierState()
     private var physicalKeys = PhysicalKeyOwnership()
@@ -48,13 +48,15 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        for observer in observers { NotificationCenter.default.removeObserver(observer) }; observers = []
+        notifications = nil
         guard let window else { model?.releaseInput(); return }
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.acceptsMouseMovedEvents = true
-        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.releaseInput() } })
-        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.disconnect() } })
-        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.releaseInput() } })
+        notifications = NativeWindowNotifications([
+            NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.releaseInput() } },
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.disconnect() } },
+            NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model?.releaseInput() } }
+        ])
     }
     func display(_ image: CVPixelBuffer) -> PresentationResult {
         let renderer = video.sampleBufferRenderer

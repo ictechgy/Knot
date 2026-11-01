@@ -3,7 +3,7 @@ import Combine
 import SwiftUI
 
 /// Tokens are immutable; NotificationCenter removal is safe from deinit's thread.
-private final class NativeWindowNotifications: @unchecked Sendable {
+final class NativeWindowNotifications: @unchecked Sendable {
     let tokens: [NSObjectProtocol]
     init(_ tokens: [NSObjectProtocol]) { self.tokens = tokens }
     deinit { for token in tokens { NotificationCenter.default.removeObserver(token) } }

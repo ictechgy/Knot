@@ -87,7 +87,8 @@ final class EnrollmentModel: ObservableObject {
                     authenticated(result)
                 } catch {
                     guard let self, self.generation == id, !Task.isCancelled else { return }
-                    self.fail(error as? EnrollmentFailure ?? .transport)
+                    let failure = error as? EnrollmentFailure ?? .transport
+                    self.fail(failure, keepCandidates: failure == .authentication || failure == .invalidCode)
                 }
             }
         } catch { fail(error as? EnrollmentFailure ?? .authentication); return nil }
