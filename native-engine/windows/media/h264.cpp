@@ -72,13 +72,15 @@ bool NormalizeH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out) 
 }
 
 bool AnalyzeH264(const std::vector<uint8_t>& bytes, bool& idr, bool& sps,
-    bool& pps, std::vector<uint8_t>* parameterSets) {
+    bool& pps, std::vector<uint8_t>* parameterSets, bool* hasSlice) {
     idr = sps = pps = false;
+    if (hasSlice) *hasSlice = false;
     if (parameterSets) parameterSets->clear();
     std::vector<Nal> nals;
     if (!Split(bytes.data(), bytes.size(), nals)) return false;
     for (const auto& n : nals) {
         const uint8_t type = bytes[n.begin] & 31U;
+        if (hasSlice && (type == 1 || type == 5)) *hasSlice = true;
         idr = idr || type == 5;
         sps = sps || type == 7;
         pps = pps || type == 8;

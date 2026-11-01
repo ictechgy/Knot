@@ -13,7 +13,9 @@ struct Session {
     DWORD owner = GetCurrentThreadId();
     std::vector<uint8_t> latest;
     uint64_t captureTime = 0;
-    knot::Clock::time_point nextFrame{}, lastProgress = knot::Clock::now();
+    knot::CapturePacer pacer{1};
+    uint64_t streamStartMicros = 0;
+    knot::Clock::time_point lastProgress = knot::Clock::now();
     int32_t failure = 0;
 };
 bool ValidConfig(const KnMediaConfig& c) {
@@ -46,6 +48,8 @@ extern "C" KN_MEDIA_API void* KN_MEDIA_CALL kn_media_create(const KnMediaConfig*
             *error = KN_MEDIA_NO_HARDWARE_ENCODER; return nullptr;
         }
         result.hardwareEncoder = 1;
+        session->pacer = knot::CapturePacer(session->config.fps);
+        session->streamStartMicros = knot::MonotonicMicros();
         *info = result; *error = KN_MEDIA_SAMPLE;
         return session.release();
     } catch (...) { *error = KN_MEDIA_ERROR; return nullptr; }
@@ -72,32 +76,41 @@ extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* opaque, uint8_
                 session->lastProgress = knot::Clock::now();
                 if (unit.bytes.size() > capacity) return session->failure = KN_MEDIA_INVALID_ARGUMENT;
                 // Every flagged IDR must contain its decoder configuration.
-                bool idr = false, sps = false, pps = false;
-                if (!knot::AnalyzeH264(unit.bytes, idr, sps, pps, nullptr) ||
+                bool idr = false, sps = false, pps = false, hasSlice = false;
+                if (!knot::AnalyzeH264(unit.bytes, idr, sps, pps, nullptr, &hasSlice) || !hasSlice ||
                     (idr && (!sps || !pps))) return session->failure = KN_MEDIA_DEVICE_FAILURE;
                 std::memcpy(buffer, unit.bytes.data(), unit.bytes.size());
                 *written = static_cast<uint32_t>(unit.bytes.size()); *flags = idr ? 1U : 0U;
                 *timestampMicros = unit.timestamp;
+                session->pacer.OutputObserved();
                 return KN_MEDIA_SAMPLE;
             }
             const auto now = knot::Clock::now();
             if (session->encoder.InFlight() != 0 && now - session->lastProgress > std::chrono::seconds(2))
                 return session->failure = KN_MEDIA_DEVICE_FAILURE;
-            if (session->encoder.CanSubmit() && now >= session->nextFrame) {
-                hr = session->capture.Read(session->latest, session->captureTime, deadline);
-                if (FAILED(hr)) return session->failure = CaptureStatus(hr);
-                // A static desktop may be repeated only after a genuine capture.
-                // Repeats retain the original capture timestamp, never fake one.
-                if (!session->latest.empty()) {
+            HRESULT captureStatus = S_OK, submitStatus = S_OK;
+            const uint64_t pacingNow = knot::MonotonicMicros();
+            session->pacer.Pump(pacingNow, session->encoder.CanSubmit(), !session->latest.empty(),
+                session->encoder.KeyframeDue(pacingNow - session->streamStartMicros),
+                [&]() {
+                    const auto result = session->capture.Read(session->latest, session->captureTime, deadline);
+                    captureStatus = result.status;
+                    return result.readiness;
+                },
+                [&](bool) {
                     const bool wasEmpty = session->encoder.InFlight() == 0;
-                    hr = session->encoder.Submit(session->latest, session->captureTime);
-                    if (FAILED(hr) && hr != MF_E_NOTACCEPTING) return session->failure = KN_MEDIA_DEVICE_FAILURE;
-                    if (SUCCEEDED(hr)) {
-                        if (wasEmpty) session->lastProgress = now;
-                        session->nextFrame = now + std::chrono::microseconds(1000000U / session->config.fps);
-                    }
-                }
-            }
+                    // Cached pixels keep their real capture timestamp. Media
+                    // time advances independently for pacing and IDR requests.
+                    submitStatus = session->encoder.Submit(session->latest, session->captureTime,
+                        knot::MonotonicMicros() - session->streamStartMicros);
+                    if (SUCCEEDED(submitStatus) && wasEmpty) session->lastProgress = knot::Clock::now();
+                    return SUCCEEDED(submitStatus);
+                });
+            if (FAILED(captureStatus)) return session->failure = CaptureStatus(captureStatus);
+            if (session->pacer.PendingTimedOut(knot::MonotonicMicros()))
+                return session->failure = KN_MEDIA_DEVICE_FAILURE;
+            if (FAILED(submitStatus) && submitStatus != MF_E_NOTACCEPTING)
+                return session->failure = KN_MEDIA_DEVICE_FAILURE;
             Sleep(1);
         }
         return KN_MEDIA_TRY_AGAIN;

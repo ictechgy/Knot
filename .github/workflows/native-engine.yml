@@ -12,6 +12,12 @@ on:
     paths:
       - 'native-engine/**'
       - 'scripts/build_native_engine.py'
+      - 'scripts/build_snapshot.py'
+      - 'scripts/check_source_checkout.py'
+      - 'scripts/tests/test_build_snapshot.py'
+      - 'scripts/tests/test_build_native_engine.py'
+      - 'Assets/Brand/**'
+      - 'LICENSE'
       - '.github/workflows/native-engine.yml'
 permissions:
   contents: read
@@ -107,6 +113,7 @@ jobs:
             build/native-engine/windows/*.json
             build/native-engine/windows/*.h264
             build/native-engine/windows/*.cer
+            build/native-engine/windows/*.sha256
             build/native-engine/windows/SHA256SUMS
             build/native-engine/windows/evidence/
           if-no-files-found: error

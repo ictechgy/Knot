@@ -12,6 +12,7 @@ final class SessionModel: ObservableObject {
     @Published var videoSize = CGSize(width: 1920, height: 1080)
     @Published var inputRecovery = false
     @Published var textMode = false
+    @Published var viewerLabel = "My Mac"
     weak var surface: (any NativePresenter)? {
         didSet {
             oldValue?.onFailure = nil
@@ -45,6 +46,8 @@ final class SessionModel: ObservableObject {
     }
     func connect() {
         guard !active, let invitation else { return }
+        let label = viewerLabel
+        guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
         let id = UUID(); identity = id; phase = .connecting; status = "Verifying the host certificate…"
         receiveState = ReceiveState(); input = InputBuffer(); inputRecovery = false
         connectedAt = .now; lastIncoming = .now; lastHeartbeat = .now
@@ -55,18 +58,19 @@ final class SessionModel: ObservableObject {
                 try await transport.start()
                 guard self.identity == id, !Task.isCancelled else { transport.close(); return }
                 // This write completes before the sole post-Hello writer starts.
-                try await transport.send(invitation.hello())
+                try await transport.send(invitation.hello(name: label))
                 guard self.identity == id, !Task.isCancelled else { transport.close(); return }
                 self.invitation = nil // one-use token must not become reusable trust
                 self.connectedAt = .now
                 self.lastIncoming = .now
-                self.phase = .approval; self.status = "Certificate verified. Waiting for the host’s explicit approval…"
+                self.phase = .approval; self.status = "Certificate verified. Waiting for host approval and native encoder startup…"
                 self.startTicker(id: id)
                 while !Task.isCancelled, self.identity == id {
-                    let header = try await transport.readExactly(5)
+                    let budget: Duration = self.phase == .approval ? .seconds(65) : .seconds(10)
+                    let header = try await transport.readExactly(5, timeout: budget)
                     guard self.identity == id, !Task.isCancelled else { return }
                     let (kind, size) = try Packet.serverHeader(header)
-                    let bytes = try await transport.readExactly(size)
+                    let bytes = try await transport.readExactly(size, timeout: budget)
                     guard self.identity == id, !Task.isCancelled else { return }
                     self.lastIncoming = .now
                     let packet = Packet(kind: kind, payload: bytes)
@@ -88,7 +92,7 @@ final class SessionModel: ObservableObject {
                         self.armPresentationFailure()
                         self.readyAt = .now
                         self.status = "Host approved and encoder ready. Waiting for the first decoded image…"
-                    case .video: if let video { try self.decoder?.decode(video.accessUnit) }
+                    case .video: if let video { try await self.decoder?.decode(video.accessUnit) }
                     case .error:
                         let code = try StrictJSON.object(bytes, keys: ["code"], limit: 128).string("code")
                         self.fail(Self.message(code)); return
@@ -105,7 +109,7 @@ final class SessionModel: ObservableObject {
         switch surface?.display(image) ?? .backpressure {
         case .presented:
             phase = .streaming
-            if !inputRecovery { status = "Receiving the host desktop. Temporary trust; no saved pairing." }
+            status = inputRecovery ? "Receiving the host desktop. Input paused; click the desktop to resume." : "Receiving the host desktop. Temporary trust; no saved pairing."
         case .backpressure: break
         case .failed: presentationFailed()
         }
@@ -148,7 +152,8 @@ final class SessionModel: ObservableObject {
     /// indefinitely extend approval or the first decoded-image deadline.
     func checkDeadlines(now: ContinuousClock.Instant) -> Bool {
         guard active else { return false }
-        guard now - lastIncoming < .seconds(10), phase != .approval || now - connectedAt < .seconds(60) else {
+        let silence: Duration = phase == .approval ? .seconds(65) : .seconds(10)
+        guard now - lastIncoming < silence, phase != .approval || now - connectedAt < .seconds(125) else {
             fail("The peer or host approval timed out. Create a new invitation."); return false
         }
         guard phase != .decoding || now - readyAt < .seconds(15) else {
@@ -156,12 +161,14 @@ final class SessionModel: ObservableObject {
         }
         return true
     }
-    func send(_ packet: Packet) {
-        guard phase == .streaming, !inputRecovery else { return }
-        do { try input.append(packet); pumpWriter() }
+    @discardableResult func send(_ packet: Packet) -> Bool {
+        guard phase == .streaming, !inputRecovery else { return false }
+        do { try input.append(packet); pumpWriter(); return true }
         catch {
             inputEpoch &+= 1
+            surface?.forgetHeldKeys()
             inputRecovery = true; status = "Input paused after queue saturation. Click the desktop to resume."; pumpWriter()
+            return false
         }
     }
     func releaseInput() {
@@ -185,7 +192,7 @@ final class SessionModel: ObservableObject {
                 while !Task.isCancelled, self.identity == id {
                     let packet: Packet
                     let epoch = self.inputEpoch
-                    if ContinuousClock.now - self.lastHeartbeat >= .seconds(2) { packet = Packet(kind: .heartbeat); self.lastHeartbeat = .now }
+                    if ContinuousClock.now - self.lastHeartbeat >= .seconds(2) { packet = Packet(kind: .heartbeat) }
                     else if let pending = self.input.pop() { packet = pending }
                     else { break }
                     if ContinuousClock.now < self.nextInput { try await Task.sleep(until: self.nextInput) }
@@ -193,6 +200,7 @@ final class SessionModel: ObservableObject {
                     guard self.inputEpoch == epoch else { continue }
                     try await channel.send(packet)
                     guard self.identity == id, !Task.isCancelled else { return }
+                    if packet.kind == .heartbeat { self.lastHeartbeat = .now }
                     self.nextInput = .now + .milliseconds(2) // <=500 input envelopes/second
                 }
                 if self.identity == id { self.writerBusy = false }

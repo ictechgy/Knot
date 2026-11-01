@@ -35,7 +35,7 @@ void Encoder::Reset() {
     events_.Reset(); codec_.Reset(); outputType_.Reset(); transform_.Reset();
     async_ = hardware_ = draining_ = false;
     inputReady_ = outputReady_ = inFlight_ = 0;
-    submitted_ = 0; stamps_.clear(); parameterSets_.clear();
+    timeline_ = MediaTimeline(1); stamps_.clear(); parameterSets_.clear();
 }
 HRESULT Encoder::SetUInt(const GUID& key, ULONG value, bool required) {
     if (!codec_) return required ? E_NOINTERFACE : S_OK;
@@ -76,7 +76,7 @@ HRESULT Encoder::Start(const KnMediaConfig& config, bool softwareOnly) {
 HRESULT Encoder::Configure(IMFActivate* activation, const KnMediaConfig& config, bool hardware) {
     HRESULT hr = activation->ActivateObject(IID_PPV_ARGS(&transform_));
     if (FAILED(hr)) return hr;
-    config_ = config; hardware_ = hardware;
+    config_ = config; hardware_ = hardware; timeline_ = MediaTimeline(config.fps);
     ComPtr<IMFAttributes> attrs;
     hr = transform_->GetAttributes(&attrs);
     if (FAILED(hr)) return hr;
@@ -188,10 +188,12 @@ HRESULT Encoder::Poll() {
     return S_OK;
 }
 
-HRESULT Encoder::Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros) {
+HRESULT Encoder::Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros, uint64_t presentationMicros) {
     if (!CanSubmit() || draining_) return MF_E_NOTACCEPTING;
     const DWORD size = config_.width * config_.height * 3U / 2U;
     if (nv12.size() != size) return E_INVALIDARG;
+    MediaTiming timing;
+    if (!timeline_.Plan(presentationMicros, timing)) return E_INVALIDARG;
     ComPtr<IMFSample> sample;
     ComPtr<IMFMediaBuffer> buffer;
     HRESULT hr = MFCreateSample(&sample);
@@ -213,18 +215,20 @@ HRESULT Encoder::Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros
     if (FAILED(hr)) return hr;
     hr = sample->AddBuffer(buffer.Get());
     if (FAILED(hr)) return hr;
-    const LONGLONG time = static_cast<LONGLONG>(submitted_ * 10000000ULL / config_.fps);
-    sample->SetSampleTime(time);
-    sample->SetSampleDuration(static_cast<LONGLONG>(10000000ULL / config_.fps));
-    if (submitted_ % (config_.fps * 2U) == 0) {
+    hr = sample->SetSampleTime(timing.sampleTime);
+    if (FAILED(hr)) return hr;
+    hr = sample->SetSampleDuration(timing.duration);
+    if (FAILED(hr)) return hr;
+    if (timing.forceKeyframe) {
         hr = SetUInt(CODECAPI_AVEncVideoForceKeyFrame, 1, hardware_);
         if (FAILED(hr)) return hr;
     }
     hr = transform_->ProcessInput(inputId_, sample.Get(), 0);
     if (FAILED(hr)) return hr;
     if (async_) --inputReady_;
-    ++submitted_; ++inFlight_;
-    stamps_.push_back({time, captureMicros});
+    timeline_.Commit(timing);
+    ++inFlight_;
+    stamps_.push_back({timing.sampleTime, captureMicros});
     return S_OK;
 }
 
@@ -286,9 +290,10 @@ HRESULT Encoder::Receive(AccessUnit& output) {
     const HRESULT unlock = buffer->Unlock();
     if (FAILED(unlock)) return unlock;
     if (!normalized) return MF_E_INVALIDMEDIATYPE;
-    bool sps = false, pps = false;
+    bool sps = false, pps = false, hasSlice = false;
     std::vector<uint8_t> freshSets;
-    if (!AnalyzeH264(output.bytes, output.idr, sps, pps, &freshSets)) return MF_E_INVALIDMEDIATYPE;
+    if (!AnalyzeH264(output.bytes, output.idr, sps, pps, &freshSets, &hasSlice) || !hasSlice)
+        return MF_E_INVALIDMEDIATYPE;
     if (sps && pps) parameterSets_ = std::move(freshSets);
     if (output.idr && (!sps || !pps)) {
         if (parameterSets_.empty()) { hr = ReadSequenceHeader(); if (FAILED(hr)) return hr; }

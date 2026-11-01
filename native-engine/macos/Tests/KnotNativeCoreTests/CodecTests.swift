@@ -67,20 +67,20 @@ private nonisolated func syntheticCompressionOutput(_ context: UnsafeMutableRawP
     var decoded = false, failed = false
     decoder.onImage = { image in decoded = CVPixelBufferGetWidth(image) == 64 && CVPixelBufferGetHeight(image) == 64 }
     decoder.onFailure = { failed = true }
-    try decoder.decode(access)
+    try await decoder.decode(access)
     let deadline = ContinuousClock.now + .seconds(5)
     while !decoded && !failed && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
     #expect(decoded && !failed)
     let stopped = NativeDecoder(width: 64, height: 64)
     var staleFrames = 0
     stopped.onImage = { _ in staleFrames += 1 }
-    try stopped.decode(access); stopped.stop()
+    try await stopped.decode(access); let framesBeforeStop = staleFrames; stopped.stop()
     try await Task.sleep(for: .milliseconds(50))
-    #expect(staleFrames == 0)
+    #expect(staleFrames == framesBeforeStop)
     // The decoder must reject the fixture against a different advertised size.
     let wrongSize = NativeDecoder(width: 128, height: 64)
     defer { wrongSize.stop() }
-    #expect(throws: (any Error).self) { try wrongSize.decode(access) }
+    do { try await wrongSize.decode(access); Issue.record("Wrong dimensions decoded") } catch {}
 }
 
 private struct WindowsCodecFixture: Decodable {
@@ -120,12 +120,11 @@ private struct WindowsCodecFixture: Decodable {
         let access = try AccessUnit(annexB: data.subdata(in: unit.offset..<(unit.offset + unit.length)))
         try #require(access.isIDR == (unit.flags == 1))
         if access.isIDR { keyframes += 1; try #require(!access.sps.isEmpty && !access.pps.isEmpty) }
-        let expected = decoded + 1
-        try decoder.decode(access)
-        let deadline = ContinuousClock.now + .seconds(5)
-        while decoded < expected && !failed && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
-        try #require(decoded == expected && !failed && validDimensions)
+        try await decoder.decode(access)
         sequence = unit.sequence; timestamp = unit.timestampMicros; offset += unit.length
     }
+    try await decoder.waitForPendingFrames()
+    #expect(!failed && validDimensions && decoder.maximumOutstanding <= DecodeAdmission.capacity)
     #expect(offset == data.count && decoded == fixture.frames && keyframes == fixture.keyframes)
+    print("Windows MF burst: decoded=\(decoded), peakOutstanding=\(decoder.maximumOutstanding), cap=\(DecodeAdmission.capacity), keyframes=\(keyframes); no per-frame output wait")
 }

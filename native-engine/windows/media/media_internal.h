@@ -4,6 +4,7 @@
 #endif
 #include "kn_media.h"
 #include "h264.h"
+#include "media_pacing.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_6.h>
@@ -62,7 +63,8 @@ public:
     HRESULT Start(const KnMediaConfig& config, bool softwareOnly);
     HRESULT Poll();
     bool CanSubmit() const { return inFlight_ < 2 && (!async_ || inputReady_ != 0); }
-    HRESULT Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros);
+    bool KeyframeDue(uint64_t presentationMicros) const { return timeline_.KeyframeDue(presentationMicros); }
+    HRESULT Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros, uint64_t presentationMicros);
     HRESULT Receive(AccessUnit& output); // S_FALSE = no output yet
     HRESULT Drain();
     bool Hardware() const { return hardware_; }
@@ -80,7 +82,7 @@ private:
     KnMediaConfig config_{};
     bool async_ = false, hardware_ = false, draining_ = false;
     uint32_t inputReady_ = 0, outputReady_ = 0, inFlight_ = 0;
-    uint64_t submitted_ = 0;
+    MediaTimeline timeline_{1};
     DWORD inputId_ = 0, outputId_ = 0;
     struct Stamp { LONGLONG sampleTime; uint64_t captureMicros; };
     std::deque<Stamp> stamps_;
@@ -90,8 +92,8 @@ private:
 class DesktopCapture {
 public:
     HRESULT Start(const KnMediaConfig& bounds, KnMediaInfo& info, KnMediaConfig& actual);
-    // S_FALSE means desktop did not change or GPU copy is not ready.
-    HRESULT Read(std::vector<uint8_t>& nv12, uint64_t& timestamp, Deadline deadline);
+    struct Result { HRESULT status; CaptureReadiness readiness; };
+    Result Read(std::vector<uint8_t>& nv12, uint64_t& timestamp, Deadline deadline);
 private:
     HRESULT CheckDisplay();
     ComPtr<IDXGIOutput> output_;

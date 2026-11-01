@@ -18,13 +18,31 @@ public enum Input {
         guard (-1200...1200).contains(vertical), (-1200...1200).contains(horizontal) else { throw NativeFailure.malformed }
         var data = Data(); data.appendBE(vertical); data.appendBE(horizontal); return Packet(kind: .wheel, payload: data)
     }
+    /// Explicitly separate AppKit's approximate pixel and line deltas. These
+    /// authored scales are a preview policy, not a universal device calibration.
+    /// Ignore zero/nonfinite events rather than consuming a transport action.
+    public static func scroll(vertical: Double, horizontal: Double, precise: Bool) -> Packet? {
+        guard vertical.isFinite, horizontal.isFinite else { return nil }
+        let scale = precise ? 12.0 : 120.0
+        func ticks(_ value: Double) -> Int32 {
+            // Clamp before multiplication as very large finite input can overflow.
+            Int32((max(-1200 / scale, min(1200 / scale, value)) * scale).rounded())
+        }
+        let verticalTicks = ticks(vertical), horizontalTicks = ticks(horizontal)
+        guard verticalTicks != 0 || horizontalTicks != 0 else { return nil }
+        return try? wheel(vertical: verticalTicks, horizontal: horizontalTicks)
+    }
     /// Full image bounds in view coordinates, including letterboxing. Y is flipped by the caller.
-    public static func point(x: Double, y: Double, viewWidth: Double, viewHeight: Double, imageWidth: Double, imageHeight: Double) -> (UInt16, UInt16)? {
+    /// Clamp is opt-in for a focused, already-held button release; ordinary
+    /// letterbox clicks must retain the default rejection behavior.
+    public static func point(x: Double, y: Double, viewWidth: Double, viewHeight: Double, imageWidth: Double, imageHeight: Double, clamp: Bool = false) -> (UInt16, UInt16)? {
         guard [x,y,viewWidth,viewHeight,imageWidth,imageHeight].allSatisfy(\.isFinite), viewWidth > 0, viewHeight > 0, imageWidth > 0, imageHeight > 0 else { return nil }
         let scale = min(viewWidth / imageWidth, viewHeight / imageHeight), width = imageWidth * scale, height = imageHeight * scale
+        guard scale.isFinite, scale > 0, width.isFinite, height.isFinite, width > 0, height > 0 else { return nil }
         let left = (viewWidth - width) / 2, top = (viewHeight - height) / 2
-        guard x >= left, x <= left + width, y >= top, y <= top + height else { return nil }
-        return (UInt16(((x-left) / width * 65535).rounded()), UInt16(((y-top) / height * 65535).rounded()))
+        guard clamp || (x >= left && x <= left + width && y >= top && y <= top + height) else { return nil }
+        let normalizedX = max(0, min(1, (x-left) / width)), normalizedY = max(0, min(1, (y-top) / height))
+        return (UInt16((normalizedX * 65535).rounded()), UInt16((normalizedY * 65535).rounded()))
     }
 }
 
@@ -37,9 +55,31 @@ public struct InputBuffer: Sendable {
     public mutating func append(_ packet: Packet) throws {
         guard !needsRecovery else { throw NativeFailure.saturated }
         guard [.key, .text, .pointer, .wheel].contains(packet.kind) else { throw NativeFailure.malformed }
+        if packet.kind == .wheel {
+            guard packet.payload.count == 8 else { throw NativeFailure.malformed }
+            let vertical = packet.payload.readBE(Int32.self, at: 0), horizontal = packet.payload.readBE(Int32.self, at: 4)
+            guard (-1200...1200).contains(vertical), (-1200...1200).contains(horizontal) else { throw NativeFailure.malformed }
+            guard vertical != 0 || horizontal != 0 else { return }
+            if let last = queue.last, last.kind == .wheel {
+                let previousVertical = last.payload.readBE(Int32.self, at: 0), previousHorizontal = last.payload.readBE(Int32.self, at: 4)
+                let combinedVertical = previousVertical + vertical, combinedHorizontal = previousHorizontal + horizontal
+                // Reversals can have observable effects at a scroll boundary;
+                // preserve them rather than cancelling away an action barrier.
+                func sameDirection(_ a: Int32, _ b: Int32) -> Bool { a == 0 || b == 0 || a.signum() == b.signum() }
+                if sameDirection(previousVertical, vertical), sameDirection(previousHorizontal, horizontal),
+                   (-1200...1200).contains(combinedVertical), (-1200...1200).contains(combinedHorizontal) {
+                    byteCount -= last.encoded.count; queue.removeLast()
+                    if combinedVertical != 0 || combinedHorizontal != 0 {
+                        let combined = try Input.wheel(vertical: combinedVertical, horizontal: combinedHorizontal)
+                        queue.append(combined); byteCount += combined.encoded.count
+                    }
+                    return
+                }
+            }
+        }
         if packet.kind == .pointer, packet.payload.first == 0,
-           let index = queue.lastIndex(where: { $0.kind == .pointer && $0.payload.first == 0 }) {
-            byteCount -= queue[index].encoded.count; queue.remove(at: index)
+           let last = queue.last, last.kind == .pointer, last.payload.first == 0 {
+            byteCount -= last.encoded.count; queue.removeLast()
         }
         guard queue.count < 256, byteCount + packet.encoded.count <= 16_384 else { revoke(); throw NativeFailure.saturated }
         queue.append(packet); byteCount += packet.encoded.count

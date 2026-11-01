@@ -136,6 +136,7 @@ private final class InertChannel: NativeChannel, @unchecked Sendable {
     private var writes: [Packet] = []
     private var reader: CheckedContinuation<Data, any Error>?
     private var queuedReads: [Data] = []
+    private var budgets: [Duration] = []
     private var pendingWrite: (Packet, CheckedContinuation<Void, any Error>)?
     private var attempts: [Kind] = []
     private let blockedKind: Kind?
@@ -143,9 +144,9 @@ private final class InertChannel: NativeChannel, @unchecked Sendable {
     private var closed = false
     init(blockedKind: Kind? = nil) { self.blockedKind = blockedKind }
     func start() async throws {}
-    func readExactly(_ count: Int) async throws -> Data {
+    func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
         try await withCheckedThrowingContinuation { value in
-            lock.lock()
+            lock.lock(); budgets.append(timeout)
             if closed { lock.unlock(); value.resume(throwing: NativeFailure.transport) }
             else if !queuedReads.isEmpty { let bytes = queuedReads.removeFirst(); lock.unlock(); value.resume(returning: bytes) }
             else { reader = value; lock.unlock() }
@@ -165,6 +166,7 @@ private final class InertChannel: NativeChannel, @unchecked Sendable {
         let pending = reader; reader = nil
         if pending == nil { queuedReads.append(bytes) }; lock.unlock(); pending?.resume(returning: bytes)
     }
+    func recordedBudgets() -> [Duration] { lock.lock(); defer { lock.unlock() }; return budgets }
     func snapshot() -> [Packet] { lock.lock(); defer { lock.unlock() }; return writes }
     func attemptedKinds() -> [Kind] { lock.lock(); defer { lock.unlock() }; return attempts }
     func closeCount() -> Int { lock.lock(); defer { lock.unlock() }; return closeCalls }
@@ -304,4 +306,52 @@ private func syntheticPresentationPixel() throws -> CVPixelBuffer {
     model.presentDecodedImage(try syntheticPresentationPixel()); try #require(model.phase == .streaming)
     presenter.onFailure?()
     #expect(model.phase == .failed && transport.closeCount() == 1 && presenter.onFailure == nil)
+}
+
+@Test @MainActor func startupUsesStageBudgetsAndSurvivesVirtualElevenSecondInitialization() async throws {
+    let transport = InertChannel(), presenter = InertPresenter([.presented])
+    let model = beginInert(transport, presenter: presenter)
+    for _ in 0..<100 { if model.phase == .approval { break }; try await Task.sleep(for: .milliseconds(5)) }
+    try #require(model.phase == .approval)
+    #expect(transport.recordedBudgets().first == .seconds(65))
+    // Virtual elapsed time exercises the real deadline policy without capture,
+    // a real eleven-second delay or a fake claim of hardware startup evidence.
+    #expect(model.checkDeadlines(now: .now + .seconds(11)))
+    model.releaseInput()
+    try await approveInert(transport, model)
+    #expect(transport.recordedBudgets().contains(.seconds(10)))
+    model.presentDecodedImage(try syntheticPresentationPixel())
+    #expect(model.phase == .streaming && model.inputRecovery && model.status.contains("click"))
+    model.disconnect(); #expect(transport.closeCount() == 1)
+}
+
+@Test @MainActor func startupSilenceStillHasBoundedCancellation() async throws {
+    let transport = InertChannel(), model = beginInert(transport)
+    for _ in 0..<100 { if model.phase == .approval { break }; try await Task.sleep(for: .milliseconds(5)) }
+    #expect(!model.checkDeadlines(now: .now + .seconds(66)))
+    #expect(model.phase == .failed && transport.closeCount() == 1)
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"] != nil,
+               "Fresh Windows public certificate fixture path not supplied locally."))
+func freshWindowsCertificateAcceptsExactExportedPinAndRejectsMismatchOrExpired() throws {
+    let root = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"]), isDirectory: true)
+    let bytes = try Data(contentsOf: root.appendingPathComponent("native-test-public.cer"))
+    try #require(bytes.count <= 65_536)
+    let exportedPin = try String(contentsOf: root.appendingPathComponent("native-test-public.sha256"), encoding: .utf8).trimmingCharacters(in: .newlines)
+    try #require(exportedPin.utf8.count == 64)
+    try #require(exportedPin.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) })
+    #expect(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() == exportedPin)
+    let certificate = try #require(SecCertificateCreateWithData(nil, bytes as CFData))
+    func trust(at date: Date? = nil) throws -> SecTrust {
+        var trust: SecTrust?
+        try #require(SecTrustCreateWithCertificates(certificate, SecPolicyCreateSSL(true, "knot-native" as CFString), &trust) == errSecSuccess)
+        let result = try #require(trust)
+        if let date { SecTrustSetVerifyDate(result, date as CFDate) }
+        return result
+    }
+    #expect(TLSChannel.evaluate(try trust(), expectedPin: exportedPin))
+    #expect(!TLSChannel.evaluate(try trust(), expectedPin: String(repeating: "0", count: 64)))
+    #expect(!TLSChannel.evaluate(try trust(at: Date().addingTimeInterval(3 * 86400)), expectedPin: exportedPin))
+    #expect(!TLSChannel.evaluate(try trust(at: Date().addingTimeInterval(-3 * 86400)), expectedPin: exportedPin))
 }

@@ -10,7 +10,9 @@ namespace Knot.NativePreview
     internal sealed class ProtocolException : Exception
     {
         internal readonly string Code;
-        internal ProtocolException(string code) : base(code) { Code = code; }
+        internal readonly string GuidanceCategory;
+        internal ProtocolException(string code) : this(code, code) { }
+        internal ProtocolException(string code, string guidanceCategory) : base(code) { Code = code; GuidanceCategory = guidanceCategory; }
     }
 
     internal sealed class Packet

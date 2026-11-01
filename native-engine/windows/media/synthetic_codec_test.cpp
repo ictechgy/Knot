@@ -82,7 +82,8 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (submitted < frames && encoder.CanSubmit()) {
             Pixels(pixels, config, submitted);
-            hr = encoder.Submit(pixels, 1000000ULL + static_cast<uint64_t>(submitted) * 1000000ULL / config.fps);
+            const uint64_t presentationMicros = static_cast<uint64_t>(submitted) * 1000000ULL / config.fps;
+            hr = encoder.Submit(pixels, 1000000ULL + presentationMicros, presentationMicros);
             if (FAILED(hr) && hr != MF_E_NOTACCEPTING) break;
             if (SUCCEEDED(hr)) ++submitted;
         }

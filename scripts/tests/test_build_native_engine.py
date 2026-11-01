@@ -32,7 +32,8 @@ class NativeRebuildTests(unittest.TestCase):
         for name in ["LICENSE", "INSTALLATION.md", "VERSION", ".gitignore", "fake-iscc",
                      "Assets/Brand/AppIcon.ico", "native-engine/windows/Native.iss",
                      *["native-engine/windows/media/" + name for name in
-                       ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp"]]]:
+                       ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp",
+                        "h264_parser_test.cpp", "media_pacing_test.cpp"]]]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("build/\n" if name == ".gitignore" else "Fresh inert fixture\n")
@@ -45,7 +46,7 @@ class NativeRebuildTests(unittest.TestCase):
     def git(self, *args, **kwargs):
         return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE, **kwargs)
 
-    def build_with_inert_tools(self):
+    def build_with_inert_tools(self, corrupt_public_pin=False):
         builder = native.Builder("windows", self.output)
         actual_run = builder.run
 
@@ -57,10 +58,15 @@ class NativeRebuildTests(unittest.TestCase):
                 self.assertEqual(argv[1], "--export-certificate")
                 with Path(argv[2]).open("xb") as fixture:
                     fixture.write(b"INERT public certificate fixture")
+                pin = "0" * 64 if corrupt_public_pin else native.digest(Path(argv[2]))
+                with Path(argv[2]).with_suffix(".sha256").open("x") as fixture:
+                    fixture.write(pin + "\n")
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
                                        actualCapture=False, actualSendInput=False)).encode()
             elif label == "native-installer":
                 (self.output / ("Knot-Native-" + native.VERSION + "-windows-x64-setup.exe")).write_bytes(b"INERT installer")
+            elif label in ["native-parser-checks", "native-pacing-checks"]:
+                return b"INERT external-tool substitute for lifecycle checks only\n"
             else:
                 return actual_run(label, argv, **kwargs)
             return b""
@@ -94,3 +100,8 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "SHA256SUMS").exists())
         self.assertTrue((self.output / "native-test-public.cer").is_file())
+
+    def test_exported_public_pin_must_match_its_certificate(self):
+        with self.assertRaisesRegex(ValueError, "pin differs from exported public DER"):
+            self.build_with_inert_tools(corrupt_public_pin=True)
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())

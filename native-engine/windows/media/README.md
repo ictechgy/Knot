@@ -27,6 +27,32 @@ Native read refuses to return a flagged IDR without both SPS and PPS. A stalled
 codec fails the session after two seconds of pending output; no raw/encoded
 queue grows while a network writer is blocked.
 
+Capture results distinguish an unchanged desktop from a pending GPU readback.
+The production `CapturePacer::Pump` polls pending readbacks on the next loop
+iteration (normally 1 ms), without submitting old pixels or spending a frame
+period. Reported pending readiness without progress fails the session after two
+seconds; this does not make a wedged OS call interruptible. After the first encoder output, unchanged cached pixels are repeated at
+one frame per second while capture readiness is still checked at the negotiated
+frame rate. Fresh pixels bypass the idle-repeat limit. Startup retains bounded
+full-rate priming until the first output; encoder backpressure still caps samples
+in flight at two. These are source and pure-policy guarantees, not measured GPU
+performance or latency claims.
+
+Encoded media time advances from explicit monotonic stream presentation time,
+independently of the original pixel capture timestamp retained in each video
+packet. Repeated static pixels therefore keep their real capture timestamp while
+their Media Foundation timestamps strictly increase. A keyframe is requested at
+the first accepted sample and every two seconds of media time; a due request can
+override the one-second idle repeat to avoid postponement by a recent update.
+Each current sample uses the configured nominal frame duration, rounded down to
+the whole-microsecond presentation-time grid (333,330 in 100ns units at 30fps).
+The previous static gap is never assigned as a fresh frame's duration.
+The synthetic codec fixture supplies explicit 30fps media times, so running it
+faster than real time still tests 120 frames and the two-second IDR interval.
+Video output must contain a type-1 or type-5 slice, and its keyframe flag is
+derived from actual type-5 IDR content. Parameter-only sequence headers remain
+valid internally. AnnexB trailing zero padding is trimmed before validation.
+
 Read has a 450 ms application polling budget and uses `AcquireNextFrame(0)`,
 `GetEvent(MF_EVENT_FLAG_NO_WAIT)` and `Map(DO_NOT_WAIT)`. COM and driver API calls
 cannot be preempted in-process, so a defective driver can exceed that budget;
@@ -68,7 +94,19 @@ Portable parser check, including deterministic hostile synthetic bytes:
 ```sh
 c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer native-engine/windows/media/h264.cpp native-engine/windows/media/h264_parser_test.cpp -o /tmp/knot-native-h264-parser-test
 /tmp/knot-native-h264-parser-test
+c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer native-engine/windows/media/media_pacing_test.cpp -o /tmp/knot-native-media-pacing-test
+/tmp/knot-native-media-pacing-test
 ```
+
+`media_pacing_test.cpp` calls the actual header-only production pacing and media
+timeline policy with fresh fake capture readiness/pixels. It never links a
+Windows, capture, input or codec implementation. It covers 1ms pending-to-fresh
+progress without stale submission, reduced static encoding cadence, first-frame
+and startup priming, backpressure/retry, monotonic media time and the two-second
+IDR target including the explicit 120-frame fixture timeline.
+The same production timeline also checks one-Hz static to active-60fps transitions
+and the 120-frame fixture for nominal current-frame duration without inherited
+idle gaps or three-tick rounding overlap.
 
 ## Primary API references
 
@@ -80,3 +118,5 @@ c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-fram
 - [H264 encoder types and parameters](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder)
 - [Low-latency property type](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avlowlatencymode)
 - [Force-keyframe property type](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avencvideoforcekeyframe)
+- [Current-sample duration contract](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfsample-setsampleduration)
+- [Media sample timestamp and duration meaning](https://learn.microsoft.com/en-us/windows/win32/medfound/working-with-media-samples)

@@ -28,6 +28,7 @@ struct PreviewWindow: View {
             }
             Text("Experimental · Windows 11 Home SDR → Apple Silicon Mac · session-only trust").font(.caption).foregroundStyle(.secondary)
             if !model.active {
+                TextField("Viewer label shown to host (unverified)", text: $model.viewerLabel).textFieldStyle(.roundedBorder)
                 SecureField("Paste a secret knot-native:v1 invitation", text: $secret).textFieldStyle(.roundedBorder)
                     .onSubmit { review() }
                 HStack {
@@ -48,6 +49,7 @@ struct PreviewWindow: View {
                 .overlay { if model.phase != .streaming { Text(model.phase == .decoding ? "Waiting for decoded image" : "Desktop appears after host approval and decoding").foregroundStyle(.white.opacity(0.7)) } }
             HStack {
                 Toggle("Committed text / local IME", isOn: $model.textMode).toggleStyle(.checkbox)
+                    .help("IME candidates use a local pointer anchor. The remote caret position is unavailable.")
                     .onChange(of: model.textMode) { _,_ in model.releaseInput() }
                 Text("Click desktop to focus. Control-arrow switches Mac Spaces. Command maps to Windows key in physical mode.").font(.caption).foregroundStyle(.secondary)
             }

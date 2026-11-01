@@ -13,7 +13,9 @@ namespace Knot.NativePreview
         internal readonly string OwnedKeyContainerName;
         internal X509Certificate2 Certificate { get; private set; }
         private RSACryptoServiceProvider key;
-        internal RunCertificate()
+        internal RunCertificate() : this("1.3.6.1.5.5.7.3.1") { }
+        internal static RunCertificate CreateSyntheticClientPurpose() { return new RunCertificate("1.3.6.1.5.5.7.3.2"); }
+        private RunCertificate(string purpose)
         {
             OwnedKeyContainerName = "KnotNativePreview_" + Guid.NewGuid().ToString("N");
             CspParameters parameters = Parameters(OwnedKeyContainerName);
@@ -26,12 +28,13 @@ namespace Knot.NativePreview
                 CertificateRequest request = new CertificateRequest(new X500DistinguishedName("CN=knot-native"), key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
                 request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
-                OidCollection purposes = new OidCollection(); purposes.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+                OidCollection purposes = new OidCollection(); purposes.Add(new Oid(purpose));
                 request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(purposes, false));
                 byte[] dns = Encoding.ASCII.GetBytes("knot-native");
                 byte[] san = new byte[dns.Length + 4]; san[0] = 0x30; san[1] = (byte)(dns.Length + 2); san[2] = 0x82; san[3] = (byte)dns.Length; Buffer.BlockCopy(dns, 0, san, 4, dns.Length);
                 request.CertificateExtensions.Add(new X509Extension("2.5.29.17", san, false));
-                Certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(5));
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+                Certificate = request.CreateSelfSigned(now.AddHours(-24), now.AddHours(24));
                 if (!Certificate.HasPrivateKey) throw new CryptographicException("Fresh certificate has no associated key.");
             }
             catch { Dispose(); throw; }
@@ -63,6 +66,8 @@ namespace Knot.NativePreview
         // Used by the synthetic Windows TLS client. A pinned certificate is the sole
         // permitted chain anchor; all name, validity and server-purpose checks remain.
         internal static bool VerifyPinned(X509Certificate certificate, SslPolicyErrors errors, string expectedPin)
+        { return VerifyPinned(certificate, errors, expectedPin, DateTime.UtcNow); }
+        internal static bool VerifyPinned(X509Certificate certificate, SslPolicyErrors errors, string expectedPin, DateTime verificationUtc)
         {
             if (certificate == null || (errors & ~SslPolicyErrors.RemoteCertificateChainErrors) != 0) return false;
             using (X509Certificate2 cert = new X509Certificate2(certificate))
@@ -70,7 +75,7 @@ namespace Knot.NativePreview
             {
                 string pin = BitConverter.ToString(sha.ComputeHash(cert.RawData)).Replace("-", "").ToLowerInvariant();
                 if (!NativeProtocol.Equal(Encoding.ASCII.GetBytes(pin), Encoding.ASCII.GetBytes(expectedPin))) return false;
-                DateTime now = DateTime.UtcNow;
+                DateTime now = verificationUtc.ToUniversalTime();
                 if (now < cert.NotBefore.ToUniversalTime() || now > cert.NotAfter.ToUniversalTime() || cert.GetNameInfo(X509NameType.DnsName, false) != "knot-native") return false;
                 bool hasSan = false, hasPurpose = false;
                 foreach (X509Extension extension in cert.Extensions)
@@ -87,6 +92,7 @@ namespace Knot.NativePreview
                 using (X509Chain chain = new X509Chain())
                 {
                     chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                    chain.ChainPolicy.VerificationTime = now;
                     chain.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
                     chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
                     chain.ChainPolicy.ExtraStore.Add(cert);

@@ -30,11 +30,13 @@ namespace Knot.NativePreview
         private bool isStopped, approved, isClaimed, active, handlesDisposed;
         private long lastRead;
         private string peerName;
+        private ApprovalMetadata approvalMetadata;
+        internal readonly RunIdentity Identity;
         internal Action<string> StatusChanged;
-        internal Action<string> ApprovalRequested;
+        internal Action<ApprovalMetadata> ApprovalRequested;
         internal Action Finished;
         internal int Port { get { return port; } }
-        internal string Pin { get { return certificate.Pin; } }
+        internal string Pin { get { return Identity.Pin; } }
         internal string OwnedKeyContainerName { get { return certificate.OwnedKeyContainerName; } }
         internal bool IsActive { get { lock (gate) return active; } }
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback, Invitation invitation)
@@ -45,6 +47,7 @@ namespace Knot.NativePreview
             this.mediaFactory = mediaFactory; this.inputSink = inputSink;
             this.invitation = invitation ?? new Invitation();
             certificate = new RunCertificate();
+            Identity = new RunIdentity(certificate.Pin);
             listener = new TcpListener(address, port);
             try { listener.Start(1); }
             catch { certificate.Dispose(); throw; }
@@ -58,7 +61,7 @@ namespace Knot.NativePreview
             lock (gate)
             {
                 if (isStopped || isClaimed) throw new ProtocolException("expired");
-                return invitation.Encode(address, Port, certificate.Pin);
+                return invitation.Encode(address, Port, Pin);
             }
         }
         internal void RespondToApproval(bool allow)
@@ -86,15 +89,16 @@ namespace Knot.NativePreview
                     TcpClient accepted = listener.AcceptTcpClient();
                     IPAddress remote = ((IPEndPoint)accepted.Client.RemoteEndPoint).Address;
                     if (!NativeProtocol.IsPrivate(remote) && !(syntheticLoopback && IPAddress.IsLoopback(remote))) { accepted.Close(); continue; }
-                    if (!TryClaim(accepted)) continue;
+                    if (!TryClaim(accepted, remote)) continue;
                     SslStream tls = stream;
                     // A claim consumes this run's invitation even if approval is denied.
                     listener.Stop();
                     Notify("Viewer is waiting for your approval. No capture or input has started.");
-                    Action<string> request = ApprovalRequested;
-                    if (request != null) request(peerName);
+                    Action<ApprovalMetadata> request = ApprovalRequested;
+                    if (request != null) request(approvalMetadata);
                     WaitForApproval(tls);
                     lock (gate) { if (isStopped) return; if (!approved) throw new ProtocolException("declined"); }
+                    NativeProtocol.Write(tls, 4, new byte[0]);
                     Notify("Approved. Initializing the primary SDR display and hardware encoder.");
                     media = mediaFactory.Open(); // create/read/close all stay on this MTA writer.
                     byte[] ready = media.Info.Ready();
@@ -105,7 +109,7 @@ namespace Knot.NativePreview
                     }
                     NativeProtocol.Write(tls, 2, ready);
                     lock (gate) { if (isStopped) return; active = true; }
-                    Notify("Sharing with " + peerName + ". Stop revokes this temporary session.");
+                    Notify("Sharing with claimed viewer label (UNVERIFIED): " + peerName + ". Stop revokes this temporary session.");
                     Interlocked.Exchange(ref lastRead, Stopwatch.GetTimestamp());
                     watchdog = new Timer(delegate
                     {
@@ -121,7 +125,7 @@ namespace Knot.NativePreview
                         ulong timestamp;
                         int status = media.Read(encoded, out written, out flags, out timestamp);
                         if (Stopping) return;
-                        if (status < 0) throw new ProtocolException(status == -3 ? "encoder" : "capture");
+                        if (status < 0) throw NativeMediaErrors.ForStatus(status);
                         if (status == 0)
                         {
                             if (written == 0 || written > encoded.Length || sequence == ulong.MaxValue) throw new ProtocolException("encoder");
@@ -139,12 +143,12 @@ namespace Knot.NativePreview
                     }
                 }
             }
-            catch (ProtocolException error) { SendError(error.Code); Notify(Guidance(error.Code)); }
-            catch (AuthenticationException) { Notify("TLS authentication failed. Create a new invitation."); }
-            catch (IOException) { Notify("Connection ended. Create a new invitation."); }
+            catch (ProtocolException error) { if (!Stopping) { SendError(error.Code); Notify(Guidance(error.GuidanceCategory)); } }
+            catch (AuthenticationException) { if (!Stopping) Notify("TLS authentication failed. Create a new invitation."); }
+            catch (IOException) { if (!Stopping) Notify("Connection ended. Create a new invitation."); }
             catch (SocketException) { if (!Stopping) Notify("Connection ended. Create a new invitation."); }
             catch (ObjectDisposedException) { }
-            catch (Exception) { SendError("capture"); Notify("Native preview could not start. Check the bundled media engine and supported SDR display."); }
+            catch (Exception) { if (!Stopping) { SendError("capture"); Notify("Native preview could not start. Check the bundled media engine and supported SDR display."); } }
             finally
             {
                 Stop();
@@ -179,7 +183,7 @@ namespace Knot.NativePreview
             }
             throw new ProtocolException("closed");
         }
-        private bool TryClaim(TcpClient accepted)
+        private bool TryClaim(TcpClient accepted, IPAddress observedRemote)
         {
             SslStream tls = null;
             bool claimed = false;
@@ -195,8 +199,10 @@ namespace Knot.NativePreview
                 accepted.ReceiveBufferSize = 16384; accepted.SendBufferSize = 262144;
                 tls = new SslStream(accepted.GetStream(), false);
                 lock (gate) { if (isStopped) return false; stream = tls; }
-                // Absolute budget includes all TLS and hello bytes and never extends
-                // the invitation TTL. An unauthenticated visitor cannot consume trust.
+                // Admission policy: one private-source pre-claim connection, no worker
+                // fan-out, and min(10 seconds, remaining invitation TTL) for all TLS
+                // and hello bytes. Repeated private peers can occupy this bounded
+                // window; this is an availability watch, never an approval/trust bypass.
                 int milliseconds = Math.Max(1, Math.Min(10000, invitation.RemainingMilliseconds));
                 using (Timer budget = new Timer(delegate { try { accepted.Close(); } catch { } }, null, milliseconds, Timeout.Infinite))
                 {
@@ -211,6 +217,7 @@ namespace Knot.NativePreview
                     {
                         if (isStopped) return false;
                         isClaimed = true; peerName = name; claimed = true;
+                        approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
                     }
                 }
                 return true;
@@ -238,20 +245,19 @@ namespace Knot.NativePreview
         }
         private void ReadInput()
         {
-            System.Collections.Generic.Queue<long> arrivals = new System.Collections.Generic.Queue<long>();
+            InputRateLimiter rate = new InputRateLimiter();
             try
             {
                 while (!Stopping)
                 {
                     Packet packet = NativeProtocol.ReadClient(stream, false);
                     long now = Stopwatch.GetTimestamp();
-                    while (arrivals.Count > 0 && now - arrivals.Peek() >= Stopwatch.Frequency) arrivals.Dequeue();
-                    if (arrivals.Count >= 500) throw new ProtocolException("input");
-                    arrivals.Enqueue(now);
+                    if (!rate.TryConsume()) throw new ProtocolException("input", "input-rate");
                     Interlocked.Exchange(ref lastRead, now);
                     input.Accept(packet);
                 }
             }
+            catch (ProtocolException error) { if (!Stopping) Notify(Guidance(error.GuidanceCategory)); Stop(); }
             catch (Exception) { Stop(); }
         }
         private void SendError(string code)
@@ -266,9 +272,13 @@ namespace Knot.NativePreview
             {
                 case "expired": return "Invitation expired. Click Share for a fresh invitation.";
                 case "auth": return "Invitation authentication failed. Click Share for a fresh invitation.";
-                case "declined": return "Viewer declined. Click Share for a fresh invitation.";
-                case "encoder": return "A supported hardware H.264 encoder is required. No software fallback is used.";
-                case "capture": return "Capture unavailable. Use a logged-in, unlocked primary SDR display without rotation or HDR.";
+                case "declined": return "Host declined the viewer request. Click Share for a fresh invitation.";
+                case "encoder": return "Hardware H.264 encoding is unavailable or failed. Check the graphics driver and encoder availability; then create a fresh invitation.";
+                case "display": return "Display unsupported. Use a logged-in, unlocked primary SDR display without rotation or HDR.";
+                case "device": return "The graphics device was lost or could not be initialized. Check the display and graphics driver; then create a fresh invitation.";
+                case "capture": return "Desktop capture could not continue. Check that the primary desktop is available; then create a fresh invitation.";
+                case "input-rate": return "Input rate exceeded the bounded allowance (500 envelopes/second average, burst 1000). Sharing stopped; create a fresh invitation.";
+                case "input": return "Remote input could not be applied safely. Sharing stopped; create a fresh invitation.";
                 case "timeout": return "Session timed out. Click Share for a fresh invitation.";
                 default: return "Session stopped. Click Share for a fresh invitation.";
             }

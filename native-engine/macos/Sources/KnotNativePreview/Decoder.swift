@@ -12,24 +12,37 @@ final class NativeDecoder {
     private var dimensions: (Int, Int)
     private var waitingForIDR = true
     private var generation: UInt64 = 0
-    private var inFlight = 0
+    private let admission = DecodeAdmission()
+    private var stopped = false
+    var maximumOutstanding: Int { admission.peak }
+    var outstanding: Int { admission.count }
     var onImage: ((CVPixelBuffer) -> Void)?
     var onFailure: (() -> Void)?
 
     init(width: Int, height: Int) { dimensions = (width, height) }
     func stop() {
         generation &+= 1
+        stopped = true
+        admission.stop()
         if let session { VTDecompressionSessionInvalidate(session) }
-        session = nil; format = nil; sps = []; pps = []; waitingForIDR = true; inFlight = 0
+        session = nil; format = nil; sps = []; pps = []; waitingForIDR = true
     }
 
-    func decode(_ unit: AccessUnit) throws {
+    func decode(_ unit: AccessUnit) async throws {
+        guard !stopped else { throw CancellationError() }
         let nextSPS = unit.sps.isEmpty ? sps : unit.sps, nextPPS = unit.pps.isEmpty ? pps : unit.pps
         let changed = nextSPS != sps || nextPPS != pps
+        // Parameter changes drain prior callbacks before invalidating their
+        // session. They cannot reset accounting while output pixels are queued.
+        let ticket = try await admission.acquire(exclusive: changed)
+        var submitted = false
+        defer { if !submitted { admission.release(ticket) } }
+        try Task.checkCancellation()
+        guard !stopped else { throw CancellationError() }
         if changed {
             // Never retain a stale session when parameter sets change midstream.
             if let session { VTDecompressionSessionInvalidate(session) }
-            session = nil; format = nil; waitingForIDR = true; generation &+= 1; inFlight = 0
+            session = nil; format = nil; waitingForIDR = true; generation &+= 1
             sps = nextSPS; pps = nextPPS
         }
         guard !sps.isEmpty, !pps.isEmpty else { return }
@@ -38,7 +51,6 @@ final class NativeDecoder {
             try createSession(); waitingForIDR = false
         }
         guard let session, let format else { throw NativeFailure.decoder }
-        guard inFlight < 3 else { throw NativeFailure.decoder }
         let bytes = unit.avcc
         var block: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: bytes.count, blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0, dataLength: bytes.count, flags: 0, blockBufferOut: &block) == noErr,
@@ -49,17 +61,23 @@ final class NativeDecoder {
         var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid)
         guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample) == noErr, let sample else { throw NativeFailure.decoder }
         let expectedGeneration = generation
-        inFlight += 1
-        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [._EnableAsynchronousDecompression], infoFlagsOut: nil) { @Sendable [weak self] status, _, image, _, _ in
+        let admission = self.admission
+        let callback = DecodeCallbackToken()
+        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [._EnableAsynchronousDecompression], infoFlagsOut: nil) { @Sendable [weak self] status, flags, image, _, _ in
+            guard callback.claim() else { return }
             let transferred = image.map { PixelTransfer(buffer: $0) }
             Task { @MainActor [weak self] in
-                guard let self, self.generation == expectedGeneration else { return }
-                self.inFlight = max(0, self.inFlight - 1)
-                guard status == noErr, let transferred else { self.onFailure?(); return }
-                self.onImage?(transferred.buffer)
+                guard let self, self.generation == expectedGeneration else { admission.release(ticket); return }
+                DecodeDelivery.finish(ticket: ticket, admission: admission, status: status, frameDropped: flags.contains(.frameDropped), hasImage: transferred != nil,
+                    onImage: { if let transferred { self.onImage?(transferred.buffer) } }, onFailure: { self.onFailure?() })
             }
         }
-        guard status == noErr else { inFlight = max(0, inFlight - 1); throw NativeFailure.decoder }
+        guard status == noErr else { throw NativeFailure.decoder }
+        submitted = true
+    }
+
+    func waitForPendingFrames() async throws {
+        let ticket = try await admission.acquire(exclusive: true); admission.release(ticket)
     }
 
     private func createSession() throws {

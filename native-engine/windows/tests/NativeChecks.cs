@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Net.NetworkInformation;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -34,12 +35,14 @@ namespace Knot.NativePreview
                 if (args.Length == 2 && args[0] == "--export-certificate") certificateExportPath = args[1];
                 else if (args.Length != 0) throw new ArgumentException("Unsupported synthetic check arguments.");
                 ProtocolChecks(); stage = "invitation"; InvitationChecks(); stage = "input"; InputChecks();
+                stage = "host-policy"; HostPolicyChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();
                 stage = "fresh-certificate"; FreshCertificateChecks();
                 stage = "tls-pin-mismatch"; TlsPinMismatch(); stage = "tls-approval-stop"; TlsApprovalStop();
                 stage = "tls-decline"; TlsDecline(); stage = "tls-expired"; TlsExpired(); stage = "tls-single-use"; TlsSingleUse();
                 stage = "tls-wrong-token"; TlsWrongToken(); stage = "tls-disconnect"; TlsDisconnect(false); stage = "tls-malformed-input"; TlsDisconnect(true);
                 stage = "tls-delayed-approval"; TlsDelayedApproval();
+                stage = "tls-approved-before-blocking-open-stop-race"; TlsApprovedBeforeBlockingOpen();
                 Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
                 return 0;
             }
@@ -93,12 +96,23 @@ namespace Knot.NativePreview
             byte[] boundary129 = NalFixture(129, 1, 2); Reject(delegate { AnnexB.Validate(boundary129, boundary129.Length, 0); });
             foreach (byte parameterType in new byte[] { 7, 8 })
             {
-                byte[] eight = NalFixture(8, parameterType, 2); AnnexB.Validate(eight, eight.Length, 0); Check(true);
-                byte[] nine = NalFixture(9, parameterType, 2); Reject(delegate { AnnexB.Validate(nine, nine.Length, 0); });
-                byte[] maxParameter = NalFixture(1, parameterType, 65536); AnnexB.Validate(maxParameter, maxParameter.Length, 0); Check(true);
-                byte[] oversizeParameter = NalFixture(1, parameterType, 65537); Reject(delegate { AnnexB.Validate(oversizeParameter, oversizeParameter.Length, 0); });
+                byte[] eight = WithSlice(NalFixture(8, parameterType, 2)); AnnexB.Validate(eight, eight.Length, 0); Check(true);
+                byte[] nine = WithSlice(NalFixture(9, parameterType, 2)); Reject(delegate { AnnexB.Validate(nine, nine.Length, 0); });
+                byte[] maxParameter = WithSlice(NalFixture(1, parameterType, 65536)); AnnexB.Validate(maxParameter, maxParameter.Length, 0); Check(true);
+                byte[] oversizeParameter = WithSlice(NalFixture(1, parameterType, 65537)); Reject(delegate { AnnexB.Validate(oversizeParameter, oversizeParameter.Length, 0); });
+                byte[] padded = WithSlice(Join(NalFixture(1, parameterType, 65536), new byte[31])); AnnexB.Validate(padded, padded.Length, 0); Check(true);
             }
+            Reject(delegate { AnnexB.Validate(accessUnit, accessUnit.Length, 0); });
+            byte[] nonIdr = WithSlice(NalFixture(1, 7, 2)); Reject(delegate { AnnexB.Validate(nonIdr, nonIdr.Length, 1); });
+            byte[] parametersOnly = Join(NalFixture(1, 7, 2), NalFixture(1, 8, 2)); Reject(delegate { AnnexB.Validate(parametersOnly, parametersOnly.Length, 0); });
+            byte[] audOnly = NalFixture(1, 9, 2); Reject(delegate { AnnexB.Validate(audOnly, audOnly.Length, 0); });
+            byte[] paddedAccessUnit = Join(accessUnit, new byte[20]); AnnexB.Validate(paddedAccessUnit, paddedAccessUnit.Length, 1); Check(true);
         }
+        private static byte[] Join(byte[] first, byte[] second)
+        {
+            byte[] result = new byte[first.Length + second.Length]; Buffer.BlockCopy(first, 0, result, 0, first.Length); Buffer.BlockCopy(second, 0, result, first.Length, second.Length); return result;
+        }
+        private static byte[] WithSlice(byte[] parameters) { return Join(parameters, NalFixture(1, 1, 2)); }
         private static byte[] NalFixture(int count, byte type, int size)
         {
             using (MemoryStream result = new MemoryStream())
@@ -183,6 +197,52 @@ namespace Knot.NativePreview
             Check(WindowsInputSink.Normalize(-1920, -1920, 3840) == 0);
             Check(WindowsInputSink.Normalize(1919, -1920, 3840) == 65535);
         }
+        private static void HostPolicyChecks()
+        {
+            long tick = 0;
+            InputRateLimiter rate = new InputRateLimiter(delegate { return tick; }, 1000);
+            for (int i = 0; i < 1000; ++i) Check(rate.TryConsume());
+            Check(!rate.TryConsume()); tick += 1; Check(!rate.TryConsume()); tick += 1; Check(rate.TryConsume()); Check(!rate.TryConsume());
+            tick += 1000; for (int i = 0; i < 500; ++i) Check(rate.TryConsume()); Check(!rate.TryConsume());
+            tick += 100000; for (int i = 0; i < 1000; ++i) Check(rate.TryConsume()); Check(!rate.TryConsume());
+            --tick; Check(!rate.TryConsume());
+            tick = 0; InputRateLimiter compliant = new InputRateLimiter(delegate { return tick; }, 1000);
+            for (int i = 0; i < 10000; ++i) { Check(compliant.TryConsume()); tick += 2; }
+            tick = 0; InputRateLimiter compressed = new InputRateLimiter(delegate { return tick; }, 1000);
+            for (int batch = 0; batch < 10; ++batch) { for (int i = 0; i < 1000; ++i) Check(compressed.TryConsume()); tick += 2000; }
+
+            RunIdentity oldRun = new RunIdentity(new string('a', 64)), newRun = new RunIdentity(new string('b', 64));
+            RunPresentation view = new RunPresentation(); view.Bind(oldRun); Check(view.Pin == oldRun.Pin);
+            ApprovalMetadata oldRequest = new ApprovalMetadata(oldRun, "Claimed & label", IPAddress.Parse("192.168.5.8"));
+            Check(view.PublishApproval(oldRun, oldRequest)); Check(view.Approval.DisplayText.Contains("UNVERIFIED"));
+            view.Bind(newRun); Check(view.Pin == newRun.Pin && view.Approval == null);
+            Check(!view.PublishApproval(oldRun, oldRequest) && !view.Clear(oldRun) && view.Pin == newRun.Pin);
+            Check(!view.PublishApproval(newRun, oldRequest));
+            Check(view.Clear(newRun) && view.Pin == "" && view.Approval == null);
+            Check(!view.PublishApproval(newRun, new ApprovalMetadata(newRun, "stale", IPAddress.Parse("10.2.3.4"))));
+
+            AdapterChoice lan = new AdapterChoice(IPAddress.Parse("192.168.1.23"), "Wi-Fi", NetworkInterfaceType.Wireless80211, true);
+            AdapterChoice hyperV = new AdapterChoice(IPAddress.Parse("10.0.0.1"), "vEthernet (Default Switch)", NetworkInterfaceType.Ethernet, true);
+            AdapterChoice wsl = new AdapterChoice(IPAddress.Parse("172.23.0.1"), "vEthernet (WSL)", NetworkInterfaceType.Ethernet, false);
+            AdapterChoice tailscale = new AdapterChoice(IPAddress.Parse("100.101.2.3"), "Tailscale", NetworkInterfaceType.Tunnel, false);
+            AdapterChoice direct = new AdapterChoice(IPAddress.Parse("192.168.50.2"), "Direct Ethernet", NetworkInterfaceType.Ethernet, false);
+            List<AdapterChoice> ordered = AdapterChoice.Ordered(new AdapterChoice[] { hyperV, wsl, tailscale, direct, lan });
+            Check(ordered[0] == lan && ordered.Count == 5 && ordered.Contains(tailscale) && ordered.Contains(direct));
+            Check(tailscale.ToString().Contains("Tailscale") && lan.ToString().Contains("Wi-Fi") && lan.ToString().Contains("192.168.1.23"));
+            List<AdapterChoice> reversed = AdapterChoice.Ordered(new AdapterChoice[] { lan, direct, tailscale, wsl, hyperV });
+            for (int i = 0; i < ordered.Count; ++i) Check(ordered[i] == reversed[i]);
+            bool rejectedPublic = false;
+            try { new AdapterChoice(IPAddress.Parse("8.8.8.8"), "Untrusted", NetworkInterfaceType.Ethernet, true); } catch (ArgumentException) { rejectedPublic = true; }
+            Check(rejectedPublic);
+
+            Dictionary<string, byte[]> exclusions = SecretClipboard.ProtectionFormats();
+            Check(exclusions.Count == 3 && exclusions["CanIncludeInClipboardHistory"].Length == 4 && exclusions["CanUploadToCloudClipboard"].Length == 4);
+            foreach (byte[] bytes in exclusions.Values) foreach (byte value in bytes) Check(value == 0);
+            Check(NativeMediaErrors.ForStatus(-2).GuidanceCategory == "display" && NativeMediaErrors.ForStatus(-2).Code == "capture");
+            Check(NativeMediaErrors.ForStatus(-3).GuidanceCategory == "encoder" && NativeMediaErrors.ForStatus(-4).GuidanceCategory == "device");
+            Check(HostServer.Guidance("declined").StartsWith("Host declined", StringComparison.Ordinal));
+            Check(HostServer.Guidance("input-rate").Contains("500") && HostServer.Guidance("input-rate").Contains("1000"));
+        }
         private static void FreshCertificateChecks()
         {
             string owned;
@@ -191,21 +251,38 @@ namespace Knot.NativePreview
                 stage = "fresh-certificate-created";
                 owned = cert.OwnedKeyContainerName;
                 Check(cert.Certificate.HasPrivateKey);
+                DateTime current = DateTime.UtcNow;
+                Check(Math.Abs((current - cert.Certificate.NotBefore.ToUniversalTime()).TotalHours - 24) < 0.02);
+                Check(Math.Abs((cert.Certificate.NotAfter.ToUniversalTime() - current).TotalHours - 24) < 0.02);
                 stage = "fresh-certificate-valid-pin";
                 Check(RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, cert.Pin));
                 stage = "fresh-certificate-name-reject";
                 Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateNameMismatch, cert.Pin));
                 stage = "fresh-certificate-pin-reject";
                 Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, new string('0', 64)));
+                Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, cert.Pin, cert.Certificate.NotAfter.ToUniversalTime().AddSeconds(1)));
+                Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, cert.Pin, cert.Certificate.NotBefore.ToUniversalTime().AddSeconds(-1)));
                 if (certificateExportPath != null)
                 {
                     stage = "fresh-certificate-public-der-export";
                     byte[] der = cert.Certificate.Export(X509ContentType.Cert);
                     Check(der.Length > 0 && der.Length <= 16384);
                     using (FileStream output = new FileStream(certificateExportPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) output.Write(der, 0, der.Length);
+                    byte[] pinBytes = System.Text.Encoding.ASCII.GetBytes(cert.Pin + "\n");
+                    using (FileStream output = new FileStream(Path.ChangeExtension(certificateExportPath, ".sha256"), FileMode.CreateNew, FileAccess.Write, FileShare.None)) output.Write(pinBytes, 0, pinBytes.Length);
                 }
             }
             stage = "fresh-certificate-owned-key-cleanup";
+            AssertOwnedKeyDeleted(owned);
+            using (RunCertificate wrongPurpose = RunCertificate.CreateSyntheticClientPurpose())
+            {
+                owned = wrongPurpose.OwnedKeyContainerName;
+                Check(!RunCertificate.VerifyPinned(wrongPurpose.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, wrongPurpose.Pin));
+            }
+            AssertOwnedKeyDeleted(owned);
+        }
+        private static void AssertOwnedKeyDeleted(string owned)
+        {
             bool deleted = false;
             CspParameters onlyOwned = RunCertificate.Parameters(owned);
             // Generation-only flags must not accompany an existing-key lookup.
@@ -311,10 +388,11 @@ namespace Knot.NativePreview
             FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
             using (HostServer server = Server(media, sink, null))
             {
+                int approvals = 0; server.ApprovalRequested = delegate { ++approvals; };
                 server.Start(); bool failed = false;
                 try { using (TlsClient client = new TlsClient(server, new string('0', 64))) { } }
                 catch (AuthenticationException) { failed = true; } catch (IOException) { failed = true; }
-                Check(failed); server.Stop(); Check(server.WaitStopped(4000)); Check(media.Opened == 0 && sink.Events.Count == 0);
+                Check(failed); server.Stop(); Check(server.WaitStopped(4000)); Check(media.Opened == 0 && sink.Events.Count == 0 && approvals == 0);
             }
         }
         private static void TlsApprovalStop()
@@ -323,11 +401,15 @@ namespace Knot.NativePreview
             using (ManualResetEvent pending = new ManualResetEvent(false))
             using (HostServer server = Server(media, sink, null))
             {
-                server.ApprovalRequested = delegate { pending.Set(); };
+                ApprovalMetadata observed = null;
+                RunPresentation view = new RunPresentation(); view.Bind(server.Identity); Check(view.Pin == server.Pin);
+                server.ApprovalRequested = delegate(ApprovalMetadata metadata) { observed = metadata; Check(view.PublishApproval(server.Identity, metadata)); pending.Set(); };
                 string token = Token(server), pin = server.Pin; server.Start();
                 using (TlsClient client = new TlsClient(server, pin))
                 {
                     client.Send(1, Hello(token)); Check(pending.WaitOne(3000));
+                    Check(observed.ObservedRemoteIPv4 == ((IPEndPoint)client.Client.Client.LocalEndPoint).Address.ToString());
+                    Check(observed.RunId == server.Identity.Id && observed.ClaimedViewerLabel == "Synthetic viewer" && observed.DisplayText.Contains("UNVERIFIED"));
                     Check(media.Opened == 0 && sink.Events.Count == 0 && !server.IsActive);
                     server.RespondToApproval(true);
                     Packet ready = client.ReadNonHeartbeat(); Check(ready.Kind == 2);
@@ -337,7 +419,7 @@ namespace Knot.NativePreview
                     Check(sink.Down.WaitOne(3000));
                     server.Stop(); Check(server.WaitStopped(4000));
                     Check(sink.Events.Contains("key:30:up") && media.Closed == 1 && media.SameThread);
-                    Check(!server.IsActive);
+                    Check(!server.IsActive); Check(view.Clear(server.Identity) && view.Pin == "");
                 }
             }
         }
@@ -412,7 +494,7 @@ namespace Knot.NativePreview
                 server.ApprovalRequested = delegate { Interlocked.Increment(ref approvals); server.RespondToApproval(true); };
                 using (TlsClient legitimate = new TlsClient(server, pin))
                 {
-                    legitimate.Send(1, Hello(validToken)); Check(legitimate.Read().Kind == 2);
+                    legitimate.Send(1, Hello(validToken)); Check(legitimate.ReadNonHeartbeat().Kind == 2);
                     Check(approvals == 1 && media.Opened == 1);
                     server.Stop(); Check(server.WaitStopped(4000));
                 }
@@ -427,7 +509,7 @@ namespace Knot.NativePreview
                 string token = Token(server), pin = server.Pin; server.Start();
                 using (TlsClient client = new TlsClient(server, pin))
                 {
-                    client.Send(1, Hello(token)); Check(client.Read().Kind == 2);
+                    client.Send(1, Hello(token)); Check(client.ReadNonHeartbeat().Kind == 2);
                     client.Send(0x20, Key(1, 30).Payload); Check(sink.Down.WaitOne(3000));
                     if (malformed) client.Send(0x22, new byte[] { 7, 0, 0, 0, 0 });
                     else client.Client.Close();
@@ -458,6 +540,35 @@ namespace Knot.NativePreview
                     server.Stop(); Check(server.WaitStopped(4000));
                 }
             }
+        }
+        private static void TlsApprovedBeforeBlockingOpen()
+        {
+            using (BlockingMediaFactory media = new BlockingMediaFactory())
+            using (HostServer server = new HostServer(IPAddress.Loopback, 0, media, new FakeInput(), true, null))
+            {
+                ++tlsFixtures;
+                List<string> statuses = new List<string>();
+                server.StatusChanged = delegate(string text) { lock (statuses) statuses.Add(text); };
+                server.ApprovalRequested = delegate { server.RespondToApproval(true); };
+                string token = Token(server), pin = server.Pin; server.Start();
+                using (TlsClient client = new TlsClient(server, pin))
+                {
+                    client.Send(1, Hello(token)); Packet heartbeat = client.Read();
+                    Check(heartbeat.Kind == 4 && heartbeat.Payload.Length == 0 && media.Entered.WaitOne(3000));
+                    server.Stop(); media.Continue.Set(); Check(server.WaitStopped(4000));
+                    lock (statuses) foreach (string status in statuses) Check(!status.StartsWith("Connection ended", StringComparison.Ordinal));
+                }
+            }
+        }
+        private sealed class BlockingMediaFactory : IMediaFactory, IDisposable
+        {
+            internal readonly ManualResetEvent Entered = new ManualResetEvent(false), Continue = new ManualResetEvent(false);
+            public IMediaSource Open()
+            {
+                Entered.Set(); if (!Continue.WaitOne(3000)) throw new IOException("Synthetic media wait expired.");
+                throw new IOException("Synthetic close race.");
+            }
+            public void Dispose() { Continue.Set(); Entered.Dispose(); Continue.Dispose(); }
         }
         private sealed class FakeInput : IInputSink
         {

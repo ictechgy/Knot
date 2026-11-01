@@ -39,4 +39,4 @@ Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{group}\Knot Native Preview"; Filename: "{app}\Knot-Native-Preview.exe"; IconFilename: "{app}\AppIcon.ico"
 [Run]
-Filename: "{app}\Knot-Native-Preview.exe"; Description: "Knot Native Preview 열기"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Knot-Native-Preview.exe"; Description: "Open Knot Native Preview"; Flags: nowait postinstall skipifsilent

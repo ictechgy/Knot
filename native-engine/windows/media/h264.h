@@ -13,5 +13,5 @@ constexpr size_t kMaxNals = 128U;
 bool NormalizeH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
 bool SequenceHeaderH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
 bool AnalyzeH264(const std::vector<uint8_t>& bytes, bool& idr, bool& sps,
-    bool& pps, std::vector<uint8_t>* parameterSets);
+    bool& pps, std::vector<uint8_t>* parameterSets, bool* hasSlice = nullptr);
 }

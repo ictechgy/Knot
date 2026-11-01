@@ -6,9 +6,12 @@ import KnotNativeCore
 
 protocol NativeChannel: AnyObject, Sendable {
     func start() async throws
-    func readExactly(_ count: Int) async throws -> Data
+    func readExactly(_ count: Int, timeout: Duration) async throws -> Data
     func send(_ packet: Packet) async throws
     func close()
+}
+extension NativeChannel {
+    func readExactly(_ count: Int) async throws -> Data { try await readExactly(count, timeout: .seconds(10)) }
 }
 
 /// Owns one fresh TLS connection. All reads and writes have a wall-clock deadline;
@@ -71,10 +74,10 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
         }
     }
 
-    func readExactly(_ count: Int) async throws -> Data {
-        guard count >= 0, count <= 4_194_304 else { throw NativeFailure.oversized }
+    func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
+        guard count >= 0, count <= 4_194_304, timeout > .zero, timeout <= .seconds(65) else { throw NativeFailure.oversized }
         if count == 0 { return Data() }
-        let deadline = ContinuousClock.now + .seconds(10)
+        let deadline = ContinuousClock.now + timeout
         var bytes = Data(); bytes.reserveCapacity(count)
         while bytes.count < count {
             guard ContinuousClock.now < deadline else { close(); throw NativeFailure.transport }

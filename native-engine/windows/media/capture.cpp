@@ -164,40 +164,41 @@ HRESULT DesktopCapture::Start(const KnMediaConfig& bounds, KnMediaInfo& info, Kn
     return S_OK;
 }
 
-HRESULT DesktopCapture::Read(std::vector<uint8_t>& nv12, uint64_t& timestamp, Deadline deadline) {
+DesktopCapture::Result DesktopCapture::Read(std::vector<uint8_t>& nv12, uint64_t& timestamp, Deadline deadline) {
+    const auto failure = [](HRESULT status) { return Result{status, CaptureReadiness::Failed}; };
     HRESULT hr = CheckDisplay();
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return failure(hr);
     hr = device_->GetDeviceRemovedReason();
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return failure(hr);
     if (!copyPending_) {
         AcquiredFrame acquired(duplication_.Get());
         DXGI_OUTDUPL_FRAME_INFO frame{};
         ComPtr<IDXGIResource> resource;
         // Poll: the enclosing read function owns the entire wall-clock budget.
         hr = duplication_->AcquireNextFrame(0, &frame, &resource);
-        if (hr == DXGI_ERROR_WAIT_TIMEOUT) return S_FALSE;
-        if (FAILED(hr)) return hr;
+        if (hr == DXGI_ERROR_WAIT_TIMEOUT) return {S_OK, CaptureReadiness::Unchanged};
+        if (FAILED(hr)) return failure(hr);
         acquired.Acquired();
-        if (frame.ProtectedContentMaskedOut) return E_ACCESSDENIED;
+        if (frame.ProtectedContentMaskedOut) return failure(E_ACCESSDENIED);
         ComPtr<ID3D11Texture2D> texture;
         hr = resource.As(&texture);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) return failure(hr);
         context_->CopyResource(captured_.Get(), texture.Get());
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE; stream.pInputSurface = inputView_.Get();
         hr = videoContext_->VideoProcessorBlt(processor_.Get(), outputView_.Get(), 0, 1, &stream);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) return failure(hr);
         context_->CopyResource(staging_.Get(), converted_.Get());
         context_->Flush();
         pendingTimestamp_ = MonotonicMicros();
         copyPending_ = true;
     } // ReleaseFrame occurs here, AFTER conversion/copy commands were submitted.
-    if (Clock::now() >= deadline) return S_FALSE;
+    if (Clock::now() >= deadline) return {S_OK, CaptureReadiness::Pending};
     D3D11_MAPPED_SUBRESOURCE mapped{};
     hr = context_->Map(staging_.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
-    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return S_FALSE;
-    if (FAILED(hr)) return hr;
-    if (mapped.RowPitch < width_) { context_->Unmap(staging_.Get(), 0); return E_FAIL; }
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return {S_OK, CaptureReadiness::Pending};
+    if (FAILED(hr)) return failure(hr);
+    if (mapped.RowPitch < width_) { context_->Unmap(staging_.Get(), 0); return failure(E_FAIL); }
     // Allocate BEFORE mapping in future optimizations; catch also unmaps here.
     try {
         nv12.resize(static_cast<size_t>(width_) * height_ * 3U / 2U);
@@ -207,6 +208,6 @@ HRESULT DesktopCapture::Read(std::vector<uint8_t>& nv12, uint64_t& timestamp, De
     } catch (...) { context_->Unmap(staging_.Get(), 0); throw; }
     context_->Unmap(staging_.Get(), 0);
     copyPending_ = false; timestamp = pendingTimestamp_;
-    return S_OK;
+    return {S_OK, CaptureReadiness::Fresh};
 }
 } // namespace knot

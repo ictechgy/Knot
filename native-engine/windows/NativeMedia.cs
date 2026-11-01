@@ -30,6 +30,14 @@ namespace Knot.NativePreview
     }
     internal interface IMediaFactory { IMediaSource Open(); }
 
+    internal static class NativeMediaErrors
+    {
+        internal static ProtocolException ForStatus(int status)
+        {
+            return new ProtocolException(status == -3 ? "encoder" : "capture", status == -2 ? "display" : status == -3 ? "encoder" : status == -4 ? "device" : "capture");
+        }
+    }
+
     internal sealed class WindowsMediaFactory : IMediaFactory
     {
         public IMediaSource Open() { return new WindowsMediaSource(); }
@@ -74,7 +82,7 @@ namespace Knot.NativePreview
                 MediaConfig config = new MediaConfig { Width = 1920, Height = 1080, Fps = 60, Bitrate = 12000000 };
                 int error;
                 media = create(ref config, out info, out error);
-                if (media == IntPtr.Zero) throw new ProtocolException(error == -3 ? "encoder" : "capture");
+                if (media == IntPtr.Zero) throw NativeMediaErrors.ForStatus(error);
                 info.Ready();
             }
             catch { Dispose(); throw; }
@@ -104,21 +112,25 @@ namespace Knot.NativePreview
         {
             if (count < 4 || count > NativeProtocol.VideoLimit - 17 || flags > 1 || Prefix(bytes, 0, count) == 0) throw new ProtocolException("encoder");
             int at = 0, nals = 0, spsCount = 0, ppsCount = 0;
-            bool sps = false, pps = false, idr = false;
+            bool sps = false, pps = false, idr = false, slice = false;
             while (at < count)
             {
                 int prefix = Prefix(bytes, at, count), payload = at + prefix;
                 if (prefix == 0 || payload >= count || ++nals > 128) throw new ProtocolException("encoder");
                 int next = payload + 1;
                 while (next < count && Prefix(bytes, next, count) == 0) ++next;
+                int end = next;
+                while (end > payload && bytes[end - 1] == 0) --end;
+                if (end <= payload) throw new ProtocolException("encoder");
                 int type = bytes[payload] & 31;
-                if ((bytes[payload] & 128) != 0 || type < 1 || type > 23 || (type == 7 || type == 8) && next - payload > 65536) throw new ProtocolException("encoder");
+                if ((bytes[payload] & 128) != 0 || type < 1 || type > 23 || (type == 7 || type == 8) && end - payload > 65536) throw new ProtocolException("encoder");
                 if (type == 7) { sps = true; if (++spsCount > 8) throw new ProtocolException("encoder"); }
                 if (type == 8) { pps = true; if (++ppsCount > 8) throw new ProtocolException("encoder"); }
                 if (type == 5) idr = true;
+                if (type == 1 || type == 5) slice = true;
                 at = next;
             }
-            if (flags == 1 && !(sps && pps && idr)) throw new ProtocolException("encoder");
+            if (!slice || (flags == 1) != idr || flags == 1 && !(sps && pps)) throw new ProtocolException("encoder");
         }
     }
 }

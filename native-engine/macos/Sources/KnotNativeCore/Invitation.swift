@@ -41,8 +41,12 @@ public struct Invitation: Sendable, Equatable {
         }
         return bytes[0] == 10 || (bytes[0] == 172 && (16...31).contains(bytes[1])) || (bytes[0] == 192 && bytes[1] == 168) || (bytes[0] == 100 && (64...127).contains(bytes[1]))
     }
-    public func hello() throws -> Packet {
-        let body = try JSONSerialization.data(withJSONObject: ["v": 1, "token": token, "name": "Knot Native Preview"])
+    public static func validViewerLabel(_ name: String) -> Bool {
+        (1...64).contains(name.utf8.count) && !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    }
+    public func hello(name: String = "Mac viewer") throws -> Packet {
+        guard Self.validViewerLabel(name) else { throw NativeFailure.malformed }
+        let body = try JSONSerialization.data(withJSONObject: ["v": 1, "token": token, "name": name])
         return Packet(kind: .hello, payload: body)
     }
 }

@@ -80,8 +80,28 @@ bool SharedLimitChecks() {
     prepended.insert(prepended.end(), oneMore.begin(), oneMore.end());
     return !knot::AnalyzeH264(prepended, idr, sps, pps, nullptr);
 }
+bool VideoSliceChecks() {
+    bool idr = false, sps = false, pps = false, hasSlice = false;
+    auto parameters = Nals(1, 7);
+    const auto ppsBytes = Nals(1, 8);
+    parameters.insert(parameters.end(), ppsBytes.begin(), ppsBytes.end());
+    if (!knot::AnalyzeH264(parameters, idr, sps, pps, nullptr, &hasSlice) || hasSlice || idr || !sps || !pps)
+        return false; // valid internal sequence header, not a video access unit
+    for (const uint8_t type : {uint8_t{1}, uint8_t{5}}) {
+        auto slice = Nals(1, type);
+        slice.insert(slice.end(), {0, 0, 0}); // AnnexB trailing_zero_8bits are permitted.
+        if (!knot::AnalyzeH264(slice, idr, sps, pps, nullptr, &hasSlice) || !hasSlice ||
+            idr != (type == 5)) return false;
+        std::vector<uint8_t> normalized;
+        if (!knot::NormalizeH264(slice.data(), slice.size(), normalized) || normalized.back() != 0x80)
+            return false;
+    }
+    const auto aud = Nals(1, 9), sei = Nals(1, 6);
+    return knot::AnalyzeH264(aud, idr, sps, pps, nullptr, &hasSlice) && !hasSlice &&
+        knot::AnalyzeH264(sei, idr, sps, pps, nullptr, &hasSlice) && !hasSlice;
+}
 bool Checks() {
-    if (!SharedLimitChecks()) return false;
+    if (!SharedLimitChecks() || !VideoSliceChecks()) return false;
     std::vector<uint8_t> output;
     bool idr = false, sps = false, pps = false;
     const std::vector<uint8_t> annex{0, 0, 1, 0x67, 0x80, 0, 0, 0, 1, 0x68, 0x80, 0, 0, 1, 0x65, 0x80};
