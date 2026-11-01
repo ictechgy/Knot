@@ -16,17 +16,25 @@ if ($numericParts.Count -ne 4 -or @($numericParts | Where-Object { $_ -lt 0 -or 
     throw 'Expected a four-part numeric PE version.'
 }
 $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo([System.IO.Path]::GetFullPath($Installer))
+# Inno reserves fixed-width string resources and pads them with ASCII spaces.
+# Keep the raw evidence; normalize only that suffix, never leading/control text.
+$productName = $info.ProductName.TrimEnd([char[]]@([char]32))
+$productVersion = $info.ProductVersion.TrimEnd([char[]]@([char]32))
+$fileVersion = $info.FileVersion.TrimEnd([char[]]@([char]32))
 $fileParts = @($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
 $productParts = @($info.ProductMajorPart, $info.ProductMinorPart, $info.ProductBuildPart, $info.ProductPrivatePart)
-if ($info.ProductName -cne 'Knot Native Preview' -or
-    $info.ProductVersion -cne $ExpectedVersion -or $info.FileVersion -cne $ExpectedNumericVersion -or
+if ($productName -cne 'Knot Native Preview' -or
+    $productVersion -cne $ExpectedVersion -or $fileVersion -cne $ExpectedNumericVersion -or
     ($fileParts -join '.') -cne $ExpectedNumericVersion -or ($productParts -join '.') -cne $ExpectedNumericVersion) {
     # Only public build metadata is reported; no installer execution or user state.
     [ordered]@{
         status = 'failed'
-        productName = $info.ProductName
-        productVersion = $info.ProductVersion
-        fileVersion = $info.FileVersion
+        productName = $productName
+        productVersion = $productVersion
+        fileVersion = $fileVersion
+        rawProductName = $info.ProductName
+        rawProductVersion = $info.ProductVersion
+        rawFileVersion = $info.FileVersion
         fileParts = $fileParts
         productParts = $productParts
         expectedVersion = $ExpectedVersion
@@ -38,9 +46,13 @@ if ($info.ProductName -cne 'Knot Native Preview' -or
 [ordered]@{
     schema = 1
     status = 'passed'
-    productName = $info.ProductName
-    productVersion = $info.ProductVersion
-    fileVersion = $info.FileVersion
+    productName = $productName
+    productVersion = $productVersion
+    fileVersion = $fileVersion
+    rawProductName = $info.ProductName
+    rawProductVersion = $info.ProductVersion
+    rawFileVersion = $info.FileVersion
+    stringNormalization = 'trailing ASCII space only'
     fileParts = $fileParts
     productParts = $productParts
     inspectionOnly = $true
