@@ -27,6 +27,17 @@ Native read refuses to return a flagged IDR without both SPS and PPS. A stalled
 codec fails the session after two seconds of pending output; no raw/encoded
 queue grows while a network writer is blocked.
 
+Caller-owned MFT output scratch is separate from the compressed access-unit
+limit. `MFT_OUTPUT_STREAM_INFO.cbSize` is the minimum required output allocation,
+not the actual compressed sample length. The observed synthetic Windows 4K MFT
+requests 15,552,000 bytes. `CodecOutputScratch` admits a minimum only within
+`max(4,194,287, width × height × 3)` bytes after validating the dimensions, then
+allocates only `max(4,194,287, cbSize)`. This is a finite two-NV12-frame budget:
+at most 24,883,200 caller-visible bytes for 3840×2160. It is a resource policy,
+not a guarantee about every encoder; a larger requirement fails explicitly.
+Actual H.264 access units remain capped at 4,194,287 bytes and the video wire
+payload at 4,194,304 bytes. Encoder in-flight capacity remains two.
+
 The encoder retains the selected `IMFActivate` until teardown, including any
 partially configured candidate until its failure cleanup. Enumeration releases
 only candidates it never activated. Shutdown runs while transform interfaces
@@ -131,6 +142,8 @@ the separate synthetic MFT fixture and real hardware acceptance remain distinct.
 - [Asynchronous MFT event/lifetime model](https://learn.microsoft.com/en-us/windows/win32/medfound/asynchronous-mfts)
 - [Optional activation detach behavior](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfactivate-detachobject)
 - [H264 encoder types and parameters](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder)
+- [MFT output minimum allocation](https://learn.microsoft.com/en-us/windows/win32/api/mftransform/ns-mftransform-mft_output_stream_info)
+- [Owned aligned media buffer allocation](https://learn.microsoft.com/en-us/windows/win32/api/mfapi/nf-mfapi-mfcreatealignedmemorybuffer)
 - [Low-latency property type](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avlowlatencymode)
 - [Force-keyframe property type](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avencvideoforcekeyframe)
 - [Current-sample duration contract](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfsample-setsampleduration)

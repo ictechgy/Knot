@@ -49,10 +49,15 @@ bool VideoBounds() {
     const uint32_t wireLimit = static_cast<uint32_t>(knot::kMaxAccessUnit);
     const KnMediaConfig hd{1920, 1080, 60, 20000000};
     if (!knot::CodecOutputScratch(hd, 0, capacity) || capacity != wireLimit ||
-        knot::CodecOutputScratch(hd, wireLimit + 1, capacity) ||
+        !knot::CodecOutputScratch(hd, wireLimit + 1, capacity) || capacity != wireLimit + 1 ||
+        !knot::CodecOutputScratch(hd, 6220800, capacity) || capacity != 6220800 ||
+        knot::CodecOutputScratch(hd, 6220801, capacity) ||
         !knot::CodecOutputScratch(fourK, 12441600, capacity) || capacity != 12441600 ||
-        knot::CodecOutputScratch(fourK, 12441601, capacity) ||
-        knot::CodecOutputScratch({0xffffffffU, 0xffffffffU, 30, 40000000}, 0, capacity)) return false;
+        !knot::CodecOutputScratch(fourK, 15552000, capacity) || capacity != 15552000 ||
+        !knot::CodecOutputScratch(fourK, 24883200, capacity) || capacity != 24883200 ||
+        knot::CodecOutputScratch(fourK, 24883201, capacity) ||
+        knot::CodecOutputScratch(fourK, 0xffffffffU, capacity) ||
+        knot::CodecOutputScratch({0xffffffffU, 0xffffffffU, 30, 40000000}, 0, capacity) || capacity != 0) return false;
     return true;
 }
 

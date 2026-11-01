@@ -146,7 +146,7 @@ private struct WindowsCodecFixture: Decodable {
     let encoderPeak = try #require(fixture.peakEncoderInFlight)
     try #require(fixture.encoderCapacity == 2 && (1...2).contains(encoderPeak))
     let scratchPeak = try #require(fixture.peakOutputScratchBytes)
-    try #require((0...12_441_600).contains(scratchPeak))
+    try #require((0...24_883_200).contains(scratchPeak))
     let decoder = NativeDecoder(width: fixture.width, height: fixture.height)
     defer { decoder.stop() }
     var decoded = 0, failed = false, validDimensions = true

@@ -68,7 +68,7 @@ class NativeRebuildTests(unittest.TestCase):
                             peakEncoderInFlight=1, encoderCapacity=2, peakOutputScratchBytes=0)
                 if invalid_four_k == "dimensions": data["width"] = 1920
                 elif invalid_four_k == "capture": data["captureInvoked"] = True
-                elif invalid_four_k == "scratch": data["peakOutputScratchBytes"] = 12441601
+                elif invalid_four_k == "scratch": data["peakOutputScratchBytes"] = 24883201
                 Path(argv[-1]).write_text(json.dumps(data))
             elif label == "native-host-checks":
                 self.assertEqual(argv[1], "--export-certificate")

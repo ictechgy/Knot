@@ -28,13 +28,16 @@ inline bool ScaleVideoToBounds(uint32_t sourceWidth, uint32_t sourceHeight, cons
     return ValidVideoDimensions(width, height) && width <= sourceWidth && height <= sourceHeight;
 }
 // An MFT's minimum output allocation is not an encoded access-unit length.
-// Permit at most one validated NV12 frame of scratch for 4K encoders while
-// retaining the separate, smaller compressed AU/wire limit in h264.h.
+// The measured Windows 4K software MFT requests 1.25 NV12 frames. Permit a
+// finite two-NV12-frame budget (24,883,200 bytes at 4K), not an arbitrary MFT
+// allocation. This is our resource policy, not a bound guaranteed by codecs.
+// The separate, smaller compressed AU/wire limit remains in h264.h.
 inline bool CodecOutputScratch(const KnMediaConfig& config, uint32_t minimum, uint32_t& capacity) {
     capacity = 0;
     if (!ValidMediaConfig(config)) return false;
-    const uint64_t rawBytes = static_cast<uint64_t>(config.width) * config.height * 3U / 2U;
-    const uint64_t maximum = std::max(static_cast<uint64_t>(kMaxAccessUnit), rawBytes);
+    // ValidMediaConfig bounds the product before this 64-bit arithmetic.
+    const uint64_t twoNV12Frames = static_cast<uint64_t>(config.width) * config.height * 3U;
+    const uint64_t maximum = std::max(static_cast<uint64_t>(kMaxAccessUnit), twoNV12Frames);
     if (minimum > maximum) return false;
     capacity = std::max(static_cast<uint32_t>(kMaxAccessUnit), minimum);
     return true;

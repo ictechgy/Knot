@@ -454,7 +454,7 @@ class Builder:
                 native_record_4k.get("parserChecks") is not True or
                 native_record_4k.get("encoderCapacity") != 2 or
                 type(native_record_4k.get("peakOutputScratchBytes")) is not int or
-                not 0 <= native_record_4k["peakOutputScratchBytes"] <= 12441600 or
+                not 0 <= native_record_4k["peakOutputScratchBytes"] <= 24883200 or
                 type(native_record_4k.get("peakEncoderInFlight")) is not int or
                 not 1 <= native_record_4k["peakEncoderInFlight"] <= 2 or
                 type(native_record_4k.get("keyframes")) is not int or
