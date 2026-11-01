@@ -308,7 +308,7 @@ namespace Knot.NativePreview
             PreviewCard steps = new PreviewCard(scale); steps.Dock = DockStyle.Top;
             Label title = MakeLabel("8자리 번호로 연결하기", 17, FontStyle.Bold); title.Margin = new Padding(0, 0, 0, P(20)); steps.Content.Controls.Add(title);
             AddHelpStep(steps.Content, "01  이 PC에서 공유 시작", "‘화면 공유 시작’을 누르면 8자리 연결번호가 표시돼요. 이 번호를 아는 Mac 한 대에 이번 화면·입력 연결을 허용해요.");
-            AddHelpStep(steps.Content, "02  Mac에서 이 PC 선택", "같은 Wi-Fi·LAN에서는 ‘근처 PC’에서 선택하세요. Tailscale로 연결하거나 PC가 보이지 않으면 Windows에 표시된 사설·Tailscale 주소로 찾으세요. PC를 선택한 뒤 8자리 번호를 입력하세요.");
+            AddHelpStep(steps.Content, "02  Mac에서 이 PC 선택", "같은 Wi-Fi·LAN에서는 Mac의 ‘주변 PC 찾기’로 선택하세요. Tailscale이나 수동 연결은 이 Windows의 ‘이 PC 공유’ → ‘연결 네트워크’ 주소로 찾으세요. 주소가 안 보이면 창을 넓혀주세요. PC를 선택한 뒤 8자리 번호를 입력하세요.");
             AddHelpStep(steps.Content, "03  번호 확인 후 연결", "8자리 번호 방식은 확인이 끝나면 바로 화면을 준비해요. Windows에서 추가로 승인할 필요가 없으며 ‘공유 중지’로 이번 권한을 끝낼 수 있어요.");
             Label legacyHelp = MakeLabel("고급의 긴 연결코드 방식을 선택했다면 Mac에 코드를 붙여 넣은 뒤, Windows에서 연결 요청을 허용해주세요.", 9, FontStyle.Regular);
             legacyHelp.ForeColor = PreviewStyle.Muted; legacyHelp.Margin = Padding.Empty; steps.Content.Controls.Add(legacyHelp);
