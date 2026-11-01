@@ -35,6 +35,9 @@ namespace Knot.NativePreview
         private readonly TableLayoutPanel requestPanel, trustPanel;
         private readonly MonitorIllustration illustration = new MonitorIllustration();
         private readonly List<Label> wrappingLabels = new List<Label>();
+        // Control.Visible includes ancestor visibility. Track the requested local
+        // value so hidden pages do not repeatedly invalidate WinForms layout.
+        private readonly Dictionary<Control, bool> localVisibility = new Dictionary<Control, bool>();
         private readonly RunPresentation presentation = new RunPresentation();
         private readonly Timer lifecycleTimer = new Timer();
         private Icon ownedIcon;
@@ -43,7 +46,7 @@ namespace Knot.NativePreview
         private HostViewPhase phase;
         private HostViewSnapshot fixture;
         private string rawStatus = "";
-        private bool closing, helpVisible, settingWrapWidths, invitationAvailable, responsiveLayout, compactMode, densityApplied;
+        private bool closing, helpVisible, networkExpanded, settingWrapWidths, invitationAvailable, responsiveLayout, compactMode, densityApplied;
 
         internal PreviewForm() : this(PrivateAddresses(), false, null, 1f) { }
 
@@ -92,7 +95,7 @@ namespace Knot.NativePreview
             main = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = PreviewStyle.Canvas };
             shell.Controls.Add(main, 1, 0);
             header = Column(); header.Dock = DockStyle.Top; header.Padding = new Padding(P(32), P(28), P(32), P(20));
-            compactNavigation = BuildCompactNavigation(); compactNavigation.Visible = false; header.Controls.Add(compactNavigation);
+            compactNavigation = BuildCompactNavigation(); SetViewVisible(compactNavigation, false); header.Controls.Add(compactNavigation);
             headerTitle = MakeLabel("이 PC를 Mac에서 열기", 24, FontStyle.Bold); headerTitle.Margin = new Padding(0, 0, 0, P(8));
             header.Controls.Add(headerTitle);
             headerSubtitle = MakeLabel("원하는 순간에만 화면과 입력을 공유하세요.", 10.5f, FontStyle.Regular); header.Controls.Add(headerSubtitle);
@@ -152,24 +155,23 @@ namespace Knot.NativePreview
             addresses.AccessibleName = "화면 공유에 사용할 네트워크"; addresses.Margin = new Padding(0, P(8), 0, 0);
             foreach (AdapterChoice choice in choices) addresses.Items.Add(choice);
             if (addresses.Items.Count > 0) addresses.SelectedIndex = 0;
-            networkSettings.Controls.Add(addresses); networkSettings.Visible = false; networkCard.Content.Controls.Add(networkSettings);
+            networkSettings.Controls.Add(addresses); SetViewVisible(networkSettings, false); networkCard.Content.Controls.Add(networkSettings);
 
             privacy = MakeLabel("허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.", 9, FontStyle.Regular);
             privacy.Margin = new Padding(P(2), 0, P(2), P(12)); body.Controls.Add(privacy);
 
-            helpBody = BuildHelp(); helpBody.Dock = DockStyle.Top; helpBody.Visible = false; scroll.Controls.Add(helpBody);
+            helpBody = BuildHelp(); helpBody.Dock = DockStyle.Top; SetViewVisible(helpBody, false); scroll.Controls.Add(helpBody);
             desktopNavigation.Click += delegate { ShowHelp(false); };
             helpNavigation.Click += delegate { ShowHelp(true); };
             compactDesktopNavigation.Click += delegate { ShowHelp(false); };
             compactHelpNavigation.Click += delegate { ShowHelp(true); };
-            networkDisclosure.Click += delegate { networkSettings.Visible = !networkSettings.Visible; UpdateWrapWidths(); };
+            networkDisclosure.Click += delegate { networkExpanded = !networkExpanded; SetViewVisible(networkSettings, networkExpanded); ApplyResponsiveLayout(); UpdateWrapWidths(); };
             addresses.SelectedIndexChanged += delegate { UpdateNetwork(); };
             SizeChanged += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
             Shown += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
-            body.SizeChanged += delegate { UpdateWrapWidths(); };
-            helpBody.SizeChanged += delegate { UpdateWrapWidths(); };
-            pin.SizeChanged += delegate { ApplyResponsiveLayout(); };
-            status.SizeChanged += delegate { ApplyResponsiveLayout(); };
+            // Child sizes are outputs of layout, not new presentation inputs.
+            // Re-entering full layout from their SizeChanged callbacks creates
+            // deferred AutoSize/scrollbar feedback, especially on hidden pages.
             lifecycleTimer.Interval = 250;
             lifecycleTimer.Tick += delegate
             {
@@ -271,7 +273,7 @@ namespace Knot.NativePreview
         }
         private void ShowHelp(bool show)
         {
-            helpVisible = show; body.Visible = !show; helpBody.Visible = show;
+            helpVisible = show; SetViewVisible(body, !show); SetViewVisible(helpBody, show);
             headerTitle.Text = show ? "Mac 연결 안내" : "이 PC를 Mac에서 열기";
             headerSubtitle.Text = show ? "처음 연결부터, 공유를 마칠 때까지." : "원하는 순간에만 화면과 입력을 공유하세요.";
             desktopNavigation.Selected = !show; helpNavigation.Selected = show; desktopNavigation.Invalidate(); helpNavigation.Invalidate();
@@ -284,6 +286,13 @@ namespace Knot.NativePreview
         }
         private float CurrentLayoutScale { get { return fixtureMode ? scale : DeviceDpi / 96f; } }
         private int R(float value) { return (int)Math.Round(value * CurrentLayoutScale); }
+        private void SetViewVisible(Control control, bool visible)
+        {
+            bool previous;
+            if (localVisibility.TryGetValue(control, out previous) && previous == visible) return;
+            localVisibility[control] = visible;
+            control.Visible = visible;
+        }
         private static void SetOwnedFont(Control control, Font next)
         {
             Font previous = control.Font; control.Font = next; previous.Dispose();
@@ -328,8 +337,8 @@ namespace Knot.NativePreview
                     densityApplied = true;
                 }
                 compactMode = compact;
-                rail.Visible = !compact; shell.ColumnStyles[0].Width = compact ? 0 : R(204);
-                compactNavigation.Visible = compact; headerTitle.Visible = headerSubtitle.Visible = !compact;
+                SetViewVisible(rail, !compact); shell.ColumnStyles[0].Width = compact ? 0 : R(204);
+                SetViewVisible(compactNavigation, compact); SetViewVisible(headerTitle, !compact); SetViewVisible(headerSubtitle, !compact);
                 header.Padding = compact ? new Padding(R(16), R(8), R(16), R(6)) : new Padding(R(32), R(28), R(32), R(20));
                 badge.Margin = new Padding(0, R(compact ? 4 : 12), 0, 0);
                 body.Padding = helpBody.Padding = new Padding(R(compact ? 16 : 32), 0, R(compact ? 16 : 32), R(compact ? 12 : 20));
@@ -340,28 +349,37 @@ namespace Knot.NativePreview
                     PreviewCard card = control as PreviewCard;
                     if (card != null) { card.Padding = new Padding(R(compact ? 12 : 24)); card.Margin = new Padding(0, 0, 0, R(compact ? 12 : 16)); }
                 }
-                illustration.Visible = idle && !compact; stateStep.Visible = !compact;
-                stateTitle.Visible = !compact || idle;
-                stateDescription.Visible = !compact || idle || view.Phase == HostViewPhase.Invitation;
+                SetViewVisible(illustration, idle && !compact); SetViewVisible(stateStep, !compact);
+                SetViewVisible(stateTitle, !compact || idle);
+                SetViewVisible(stateDescription, !compact || idle || view.Phase == HostViewPhase.Invitation);
                 stateTitle.Margin = new Padding(0, 0, 0, R(compact ? 8 : 10));
                 stateDescription.Margin = new Padding(0, 0, 0, R(compact ? 12 : 20));
                 requestName.Margin = new Padding(0, 0, 0, R(4)); requestAddress.Margin = new Padding(0, 0, 0, R(6));
-                requestWarning.Visible = view.Phase == HostViewPhase.Request && !compact;
+                SetViewVisible(requestWarning, view.Phase == HostViewPhase.Request && !compact);
                 trustTitle.Margin = new Padding(0, 0, 0, R(compact ? 4 : 8));
                 trustPanel.Margin = new Padding(0, 0, 0, R(compact ? 8 : 18));
-                networkCard.Visible = !compact || !view.RunPresent;
-                privacy.Visible = !compact || idle;
+                SetViewVisible(networkCard, !compact || !view.RunPresent);
+                SetViewVisible(privacy, !compact || idle);
                 stop.MinimumSize = new Size(0, R(compact ? 36 : 44));
                 stop.Padding = compact ? new Padding(R(12), R(8), R(12), R(8)) : new Padding(R(18), R(10), R(18), R(10));
                 footer.Padding = compact ? new Padding(R(16), R(10), R(16), R(10)) : new Padding(R(32), R(18), R(32), R(18));
                 status.Margin = new Padding(0, R(2), R(compact ? 12 : 18), 0);
                 shell.PerformLayout(); header.PerformLayout(); UpdateWrapWidths();
-                if (view.Pin.Length > 0) pin.Height = Math.Max(R(24), PinTextHeight());
+                if (!helpVisible && view.Pin.Length > 0)
+                {
+                    int pinHeight = Math.Max(R(24), PinTextHeight());
+                    if (pin.Height != pinHeight) pin.Height = pinHeight;
+                }
                 Size stopSize = view.RunPresent ? stop.GetPreferredSize(Size.Empty) : Size.Empty;
                 int statusWidth = main.ClientSize.Width - footer.Padding.Horizontal - stopSize.Width - status.Margin.Horizontal;
                 int contentHeight = Math.Max(stopSize.Height, StatusTextHeight(statusWidth) + status.Margin.Vertical + R(4));
-                footer.Height = Math.Max(R(compact ? 64 : 88), contentHeight + footer.Padding.Vertical);
+                int footerHeight = Math.Max(R(compact ? 64 : 88), contentHeight + footer.Padding.Vertical);
+                if (footer.Height != footerHeight) footer.Height = footerHeight;
                 footer.PerformLayout();
+                // Footer and scrollbar changes may alter available label width.
+                // Reconcile once from this explicit input transaction; child
+                // SizeChanged events never schedule another full transaction.
+                UpdateWrapWidths();
             }
             finally { responsiveLayout = false; }
         }
@@ -369,16 +387,23 @@ namespace Knot.NativePreview
         {
             if (settingWrapWidths) return;
             settingWrapWidths = true;
+            HashSet<Control> parents = new HashSet<Control>();
             try
             {
                 foreach (Label label in wrappingLabels)
+                    if (label.Parent != null && label.Visible && parents.Add(label.Parent)) label.Parent.SuspendLayout();
+                foreach (Label label in wrappingLabels)
                 {
-                    if (label.Parent == null) continue;
+                    if (label.Parent == null || !label.Visible) continue;
                     int width = Math.Max(P(80), label.Parent.ClientSize.Width - label.Parent.Padding.Horizontal - label.Margin.Horizontal);
                     if (label.MaximumSize.Width != width) label.MaximumSize = new Size(width, 0);
                 }
             }
-            finally { settingWrapWidths = false; }
+            finally
+            {
+                foreach (Control parent in parents) parent.ResumeLayout(true);
+                settingWrapWidths = false;
+            }
         }
         private void UpdateNetwork()
         {
@@ -398,21 +423,19 @@ namespace Knot.NativePreview
             bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
             badge.Text = "●  " + PreviewCopy.Phase(view.Phase);
             badge.ForeColor = view.Phase == HostViewPhase.Failed ? PreviewStyle.Warning : PreviewStyle.Muted;
-            illustration.Visible = idle;
             stateStep.Text = view.Phase == HostViewPhase.Failed ? "공유 준비 확인" : idle ? "01  화면 공유" : view.Phase == HostViewPhase.Invitation ? "02  Mac에 코드 보내기" : "03  연결 확인";
             stateTitle.Text = view.Phase == HostViewPhase.Failed ? "공유 준비를 확인해주세요" : view.Phase == HostViewPhase.Stopped ? "새 코드로 다시 연결하세요" : idle ? "Mac에서 이 화면을 사용하세요" : view.Phase == HostViewPhase.Invitation ? "연결 코드를 Mac에 보내세요" : view.Phase == HostViewPhase.Request ? "이 Mac의 연결을 허용할까요?" : view.Phase == HostViewPhase.Sharing ? "Windows 화면을 전송하고 있어요" : view.Phase == HostViewPhase.Stopping ? "화면 공유를 마치고 있어요" : "Windows 화면을 준비하고 있어요";
             stateDescription.Text = view.Phase == HostViewPhase.Failed ? view.Status : view.Phase == HostViewPhase.Stopped ? "이전 연결의 권한은 끝났어요.\r\n공유를 시작하면 새 연결 코드가 만들어져요." : idle ? "공유를 시작하면 연결 코드가 만들어져요.\r\nMac에서 코드를 확인한 뒤 이 PC에서 연결을 허용해주세요." : view.Phase == HostViewPhase.Invitation ? "Mac의 Knot Native Preview에 붙여 넣으세요.\r\n연결 코드는 2분 동안 한 번만 사용할 수 있어요." : view.Phase == HostViewPhase.Request ? "직접 연결을 요청한 Mac인지 이름과 주소를 확인해주세요." : view.Phase == HostViewPhase.Sharing ? "이 PC의 화면과 입력이 공유 중이에요.\r\n다시 연결하려면 새 연결 코드가 필요해요." : view.Phase == HostViewPhase.Stopping ? "이번 연결의 권한을 종료하고 있어요. 정리가 끝나면 새 코드를 만들 수 있어요." : "연결은 허용됐어요. 인코더와 전송 준비가 끝날 때까지 잠시 기다려주세요.";
-            requestPanel.Visible = view.ViewerLabel.Length > 0 && (view.Phase == HostViewPhase.Request || view.Phase == HostViewPhase.Preparing || view.Phase == HostViewPhase.Sharing);
+            SetViewVisible(requestPanel, view.ViewerLabel.Length > 0 && (view.Phase == HostViewPhase.Request || view.Phase == HostViewPhase.Preparing || view.Phase == HostViewPhase.Sharing));
             requestName.Text = view.ViewerLabel + "  ·  확인되지 않은 이름";
             requestAddress.Text = "연결 주소  " + view.ObservedAddress;
-            requestWarning.Visible = view.Phase == HostViewPhase.Request;
-            trustPanel.Visible = view.Pin.Length != 0;
+            SetViewVisible(trustPanel, view.Pin.Length != 0);
             if (pin.Text != view.Pin) pin.Text = view.Pin;
-            share.Visible = idle; share.Enabled = idle && view.HasAddress && !view.RunPresent;
-            copy.Visible = view.Phase == HostViewPhase.Invitation; copy.Enabled = view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
-            approve.Visible = decline.Visible = view.Phase == HostViewPhase.Request;
+            SetViewVisible(share, idle); share.Enabled = idle && view.HasAddress && !view.RunPresent;
+            SetViewVisible(copy, view.Phase == HostViewPhase.Invitation); copy.Enabled = view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
+            SetViewVisible(approve, view.Phase == HostViewPhase.Request); SetViewVisible(decline, view.Phase == HostViewPhase.Request);
             approve.Enabled = decline.Enabled = view.Phase == HostViewPhase.Request && view.RunPresent;
-            stop.Visible = view.RunPresent; stop.Enabled = view.RunPresent && view.Phase != HostViewPhase.Stopping;
+            SetViewVisible(stop, view.RunPresent); stop.Enabled = view.RunPresent && view.Phase != HostViewPhase.Stopping;
             addresses.Enabled = networkDisclosure.Enabled = !view.RunPresent;
             if (status.Text != view.Status) status.Text = view.Status;
             ApplyResponsiveLayout(); UpdateWrapWidths();

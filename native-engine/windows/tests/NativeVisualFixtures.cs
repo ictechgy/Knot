@@ -17,6 +17,7 @@ namespace Knot.NativePreview
     internal static class NativeVisualFixtures
     {
         private static string currentFrame = "initialization";
+        private static string currentStage = "initialization", progressPath;
         private sealed class Frame
         {
             internal string Name;
@@ -36,6 +37,15 @@ namespace Knot.NativePreview
                 return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
         }
         private static string Q(string value) { return StrictJson.Quote(value); }
+        private static void Progress(Frame frame, string stage)
+        {
+            currentStage = stage;
+            // Only fixed stage names and synthetic fixture names are recorded.
+            // The file survives an outer builder timeout with captured stdout.
+            string line = frame.Name + " " + stage + Environment.NewLine;
+            File.AppendAllText(progressPath, line, new UTF8Encoding(false));
+            Console.Write(line); Console.Out.Flush();
+        }
         private static int CountControls(Control root)
         {
             int count = 1;
@@ -83,6 +93,7 @@ namespace Knot.NativePreview
                 if (Directory.Exists(output) && Directory.GetFileSystemEntries(output).Length != 0)
                     throw new IOException("Synthetic output must be new or empty.");
                 Directory.CreateDirectory(output);
+                progressPath = Path.Combine(output, "fixture-progress.log");
                 Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
                 List<Frame> frames = new List<Frame>();
                 frames.Add(new Frame("windows-idle.png", HostViewPhase.Idle, false, 1040, 740, 1));
@@ -112,21 +123,29 @@ namespace Knot.NativePreview
                         List<AdapterChoice> adapters = new List<AdapterChoice>();
                         adapters.Add(new AdapterChoice(IPAddress.Parse("192.168.50.12"), "Wi-Fi", NetworkInterfaceType.Wireless80211, true));
                         adapters.Add(new AdapterChoice(IPAddress.Parse("100.85.20.16"), "Tailscale", NetworkInterfaceType.Tunnel, false));
+                        Progress(frame, "before-constructor");
                         using (PreviewForm form = new PreviewForm(adapters, true, icon, frame.Scale))
                         {
+                            Progress(frame, "after-constructor");
                             form.StartPosition = FormStartPosition.Manual; form.Location = new Point(20, 20);
                             form.ClientSize = new Size((int)(frame.Width * frame.Scale), (int)(frame.Height * frame.Scale));
+                            Progress(frame, "after-requested-size");
                             HostViewSnapshot state = Snapshot(frame.Phase);
                             if (frame.StatusOverride != null || frame.ViewerLabelOverride != null)
                                 state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy);
-                            form.SetFixturePresentation(state, frame.Help);
-                            form.Show(); form.PerformLayout(); Pump();
-                            for (int layoutPass = 0; layoutPass < 3; ++layoutPass) { form.PrepareFixtureLayout(); Pump(); }
+                            Progress(frame, "before-presentation"); form.SetFixturePresentation(state, frame.Help); Progress(frame, "after-presentation");
+                            Progress(frame, "before-show"); form.Show(); Progress(frame, "after-show");
+                            form.PerformLayout(); Progress(frame, "after-initial-layout"); Pump(); Progress(frame, "after-initial-pump");
+                            for (int layoutPass = 0; layoutPass < 3; ++layoutPass)
+                            {
+                                Progress(frame, "before-layout-pass-" + layoutPass); form.PrepareFixtureLayout();
+                                Progress(frame, "after-layout-pass-" + layoutPass); Pump(); Progress(frame, "after-layout-pump-" + layoutPass);
+                            }
                             if (frame.Phase == HostViewPhase.Invitation)
                             {
-                                form.SetFixturePresentation(state, true); Pump();
+                                Progress(frame, "before-help"); form.SetFixturePresentation(state, true); Progress(frame, "after-help"); Pump(); Progress(frame, "after-help-pump");
                                 if (form.CopyVisible) throw new InvalidOperationException("Invitation copy action must be hidden on the help page (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
-                                form.SetFixturePresentation(state, false); Pump();
+                                Progress(frame, "before-help-return"); form.SetFixturePresentation(state, false); Progress(frame, "after-help-return"); Pump(); Progress(frame, "after-help-return-pump");
                                 if (!form.CopyVisible || !form.CopyEnabled)
                                     throw new InvalidOperationException("Invitation copy action must restore from explicit state after help navigation (visible=" + form.CopyVisible + ",enabled=" + form.CopyEnabled + ").");
                             }
@@ -154,15 +173,18 @@ namespace Knot.NativePreview
                             float actualDpi;
                             using (Graphics graphics = form.CreateGraphics()) actualDpi = graphics.DpiX;
                             string path = Path.Combine(output, frame.Name);
+                            Progress(frame, "before-bitmap");
                             using (Bitmap bitmap = new Bitmap(form.Width, form.Height, PixelFormat.Format32bppArgb))
                             {
                                 form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                                Progress(frame, "after-bitmap");
                                 if (!form.FixtureBrandPainted) throw new InvalidOperationException("The actual sidebar Knot mark did not paint.");
                                 HashSet<int> sampleColors = new HashSet<int>();
                                 for (int y = 8; y < bitmap.Height; y += 13)
                                     for (int x = 8; x < bitmap.Width; x += 13) sampleColors.Add(bitmap.GetPixel(x, y).ToArgb());
                                 if (sampleColors.Count < 12) throw new InvalidOperationException("Synthetic render appears blank.");
                                 bitmap.Save(path, ImageFormat.Png);
+                                Progress(frame, "after-save");
                                 records.Add("{\"name\":" + Q(frame.Name) + ",\"sha256\":" + Q(Digest(path)) +
                                     ",\"bytes\":" + new FileInfo(path).Length + ",\"width\":" + bitmap.Width + ",\"height\":" + bitmap.Height +
                                     ",\"clientWidth\":" + form.ClientSize.Width + ",\"clientHeight\":" + form.ClientSize.Height +
@@ -174,8 +196,9 @@ namespace Knot.NativePreview
                                     ",\"state\":" + Q(frame.Phase.ToString()) + ",\"controlCount\":" + CountControls(form) +
                                     ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"brandPainted\":true,\"effectsBound\":false}");
                             }
-                            form.Close(); Pump();
+                            Progress(frame, "before-close"); form.Close(); Progress(frame, "after-close"); Pump(); Progress(frame, "after-close-pump");
                         }
+                        Progress(frame, "after-dispose");
                     }
                 }
                 string report = "{\"schema\":1,\"status\":\"passed\",\"freshSyntheticOnly\":true," +
@@ -191,7 +214,7 @@ namespace Knot.NativePreview
             catch (Exception error)
             {
                 // Only synthetic fixture diagnostics, without user/service data.
-                Console.Error.WriteLine("Synthetic UI rendering failed [" + currentFrame + "]: " + error.GetType().Name + ": " + error.Message);
+                Console.Error.WriteLine("Synthetic UI rendering failed [" + currentFrame + " stage=" + currentStage + "]: " + error.GetType().Name + ": " + error.Message);
                 return 1;
             }
         }
