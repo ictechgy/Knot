@@ -91,7 +91,7 @@ bool SequenceHeaderH264(const uint8_t* data, size_t size, std::vector<uint8_t>& 
             if (size - at < 2) return false;
             const size_t length = (static_cast<size_t>(data[at]) << 8U) | data[at + 1];
             at += 2;
-            if (length == 0 || length > size - at || (data[at] & 31U) != (group == 0 ? 7 : 8)) return false;
+            if (length == 0 || length > size - at || (data[at] & 31U) != (group == 0 ? 7U : 8U)) return false;
             Append(out, data + at, length);
             at += length;
         }

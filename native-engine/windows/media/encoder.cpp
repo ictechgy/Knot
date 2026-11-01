@@ -1,6 +1,19 @@
 #include "media_internal.h"
 
 namespace knot {
+namespace {
+struct Activations {
+    IMFActivate** values = nullptr;
+    UINT32 count = 0;
+    ~Activations() {
+        for (UINT32 i = 0; i < count; ++i) {
+            values[i]->ShutdownObject(); // Successful transform was detached.
+            values[i]->Release();
+        }
+        CoTaskMemFree(values);
+    }
+};
+}
 HRESULT Runtime::Start() {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) return hr;
@@ -41,23 +54,21 @@ HRESULT Encoder::Start(const KnMediaConfig& config, bool softwareOnly) {
     Reset();
     MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, MFVideoFormat_NV12};
     MFT_REGISTER_TYPE_INFO output{MFMediaType_Video, MFVideoFormat_H264};
-    IMFActivate** activations = nullptr;
-    UINT32 count = 0;
+    Activations activations;
     const UINT32 flags = MFT_ENUM_FLAG_SORTANDFILTER |
         (softwareOnly ? MFT_ENUM_FLAG_SYNCMFT : MFT_ENUM_FLAG_HARDWARE);
-    HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, &input, &output, &activations, &count);
+    HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, &input, &output,
+        &activations.values, &activations.count);
     if (FAILED(hr)) return hr;
     hr = MF_E_TOPO_CODEC_NOT_FOUND;
-    for (UINT32 i = 0; i < count; ++i) {
+    for (UINT32 i = 0; i < activations.count; ++i) {
         if (FAILED(hr)) {
             Reset();
-            hr = Configure(activations[i], config, !softwareOnly);
-            if (FAILED(hr)) activations[i]->ShutdownObject();
-            else activations[i]->DetachObject(); // Session now owns shutdown.
+            hr = Configure(activations.values[i], config, !softwareOnly);
+            if (FAILED(hr)) activations.values[i]->ShutdownObject();
+            else activations.values[i]->DetachObject(); // Session now owns shutdown.
         }
-        activations[i]->Release();
     }
-    CoTaskMemFree(activations);
     if (FAILED(hr)) Reset();
     return hr;
 }
@@ -269,7 +280,9 @@ HRESULT Encoder::Receive(AccessUnit& output) {
     BYTE* data = nullptr; DWORD length = 0;
     hr = buffer->Lock(&data, nullptr, &length);
     if (FAILED(hr)) return hr;
-    const bool normalized = NormalizeH264(data, length, output.bytes);
+    bool normalized = false;
+    try { normalized = NormalizeH264(data, length, output.bytes); }
+    catch (...) { buffer->Unlock(); throw; }
     const HRESULT unlock = buffer->Unlock();
     if (FAILED(unlock)) return unlock;
     if (!normalized) return MF_E_INVALIDMEDIATYPE;

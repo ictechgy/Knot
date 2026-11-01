@@ -194,3 +194,10 @@ Windows 설정·QR 창은 DPI에 맞춰 확대되고 현재 작업 영역 안으
 - Linux download progress keeps the latest value with at most one pending UI callback. Completion wins over stale progress; cancellation/close suppress delivery.
 - Linux engine restart uses Knot stop/start. Web Restart and custom child programs cannot escape the owned lifetime boundary; missing kernel restriction support prevents startup with actionable authored guidance.
 - Use neutral Windows startup guidance until a typed OS failure proves a category. Signing/publisher configuration is an external prerequisite, not a generic explanation for every setup error. Compact/high-DPI Windows native layout still needs separate device acceptance.
+
+## Independent native engine experiment (2026-11-01)
+
+- User authorized a native-engine proof after first-principles external-advisor discussion. Keep the current production product available; standalone `Knot Native Preview` owns the new host/viewer and links no Sunshine/Moonlight/Glimmer runtime. Detailedcontract: native-engine/PROTOCOL.md and native-engine/README.md.
+- Target first: logged-in Win11Home x64 primarySDR landscape ->AppleSiliconMac26+. Use system/native controls, Knot brand assets and honest experimental status. One Share/invitation/explicitApprove flow; never expose a Sunshine web account/PIN. Temporary one-use trust is displayed, with no implied saved pairing/update continuity.
+- Screen/input permission only; no files/audio/headless/securedesktop/HDR/multimonitor inthisslice. Do not erase existing reverse/Linux/file features. Stop/focusloss/disconnect release input, unreadydecode is notsuccessfulstreaming, and neither realhardware norperformance is inferredfromCI.
+- Normalhostrequires hardwareH264; explicit softwareMFT exists only in syntheticchecks. PinnedTLS/secretinvitation/auth approval precede capture/input; no automatic trust repair, persisted key adoption or weaker backend fallback.

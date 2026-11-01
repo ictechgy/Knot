@@ -64,8 +64,10 @@ jobs:
           $download = Join-Path $env:RUNNER_TEMP 'knot-native-inno-7.1.0.exe'
           Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $download
           if ((Get-FileHash $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f') { throw 'Native compiler installer SHA256 mismatch' }
-          $process = Start-Process -FilePath $download -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait -PassThru
+          $install = Join-Path $env:RUNNER_TEMP 'KnotNativeInno'
+          $process = Start-Process -FilePath $download -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',('/DIR="' + $install + '"')) -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw 'Native compiler installation failed' }
+          "INNO_COMPILER=$install\ISCC.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - if: github.event_name != 'workflow_dispatch' || !inputs.media_only
         run: python scripts/build_native_engine.py --platform windows
       - if: github.event_name == 'workflow_dispatch' && inputs.media_only
@@ -82,3 +84,13 @@ jobs:
             build/native-engine/windows/SHA256SUMS
             build/native-engine/windows/evidence/
           if-no-files-found: error
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: failure()
+        with:
+          name: native-windows-failed-diagnostics
+          path: |
+            build/native-engine/windows/evidence/
+            build/native-engine/windows/NATIVE-INPUTS.json
+            build/native-engine/windows/synthetic.h264
+            build/native-engine/windows/synthetic-codec.json
+          if-no-files-found: warn

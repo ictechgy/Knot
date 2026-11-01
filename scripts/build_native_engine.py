@@ -47,6 +47,10 @@ class Builder:
         self.sources = source_snapshot(ROOT)
         validate_corresponding_source(ROOT, self.sources)
         self.head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        (self.output / "NATIVE-INPUTS.json").write_text(json.dumps({
+            "schema": 1, "head": self.head, "sourceManifest": self.sources,
+            "scope": "Build inputs only; not successful checks or runtime acceptance"
+        }, indent=2) + "\n")
 
     def run(self, label, argv, cwd=None, env=None, timeout=600):
         print(label, flush=True)
@@ -193,8 +197,12 @@ class Builder:
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")
         shutil.copy2(self.input(ROOT / "Assets/Brand/AppIcon.ico"), self.output / "AppIcon.ico")
         shutil.copy2(self.input(ROOT / "LICENSE"), self.output / "LICENSE")
-        iscc = next((p for p in [Path(os.environ["ProgramFiles(x86)"]) / "Inno Setup 7/ISCC.exe",
-                                Path(os.environ["ProgramFiles(x86)"]) / "Inno Setup 6/ISCC.exe"] if p.is_file()), None)
+        candidates = [Path(os.environ[k]) / (version + "/ISCC.exe")
+                      for k in ["ProgramFiles", "ProgramFiles(x86)"]
+                      for version in ["Inno Setup 7", "Inno Setup 6"]]
+        if os.environ.get("INNO_COMPILER"):
+            candidates.insert(0, Path(os.environ["INNO_COMPILER"]))
+        iscc = next((p for p in candidates if p.is_file()), None)
         if not iscc:
             raise ValueError("Inno Setup compiler is required for the native experiment installer")
         self.run("native-installer", [iscc, "/DNativeOutput=" + str(self.output), "/DNativeVersion=" + VERSION,

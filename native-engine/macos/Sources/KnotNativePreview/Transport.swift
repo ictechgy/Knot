@@ -16,6 +16,7 @@ protocol NativeChannel: AnyObject, Sendable {
 final class TLSChannel: NativeChannel, @unchecked Sendable {
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "KnotNativePreview.tls")
+    private let helloDeadline = ContinuousClock.now + .seconds(10)
 
     convenience init(invitation: Invitation) throws {
         guard let port = NWEndpoint.Port(rawValue: invitation.port) else { throw NativeFailure.malformed }
@@ -61,9 +62,7 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
                 default: break
                 }
             }
-            queue.asyncAfter(deadline: .now() + 10) { [self] in
-                if gate.finish(.failure(NativeFailure.transport)) { connection.cancel() }
-            }
+            gate.armDeadline(after: 10, on: queue) { [self] in connection.cancel() }
             connection.start(queue: queue)
         }
     }
@@ -92,33 +91,50 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
                 else if error != nil || complete { _ = gate.finish(.failure(NativeFailure.transport)) }
                 else { _ = gate.finish(.failure(NativeFailure.transport)) }
             }
-            queue.asyncAfter(deadline: .now() + max(0.001, timeout)) { [self] in
-                if gate.finish(.failure(NativeFailure.transport)) { connection.cancel() }
-            }
+            gate.armDeadline(after: max(0.001, timeout), on: queue) { [self] in connection.cancel() }
         }
     }
 
     func send(_ packet: Packet) async throws {
         guard packet.payload.count <= 4096 else { throw NativeFailure.oversized }
+        var timeout = 10.0
+        if packet.kind == .hello {
+            let remaining = helloDeadline - ContinuousClock.now
+            timeout = Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18
+            guard timeout > 0 else { close(); throw NativeFailure.transport }
+        }
+        let budget = timeout
         try await withCheckedThrowingContinuation { continuation in
             let gate = CompletionGate<Void>(continuation)
             connection.send(content: packet.encoded, completion: .contentProcessed { error in
                 _ = gate.finish(error == nil ? .success(()) : .failure(NativeFailure.transport))
             })
-            queue.asyncAfter(deadline: .now() + 10) { [self] in
-                if gate.finish(.failure(NativeFailure.transport)) { connection.cancel() }
-            }
+            gate.armDeadline(after: budget, on: queue) { [self] in connection.cancel() }
         }
     }
     func close() { connection.cancel() }
 }
 
-private final class CompletionGate<Value: Sendable>: @unchecked Sendable {
+final class CompletionGate<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, any Error>?
+    private var timer: DispatchSourceTimer?
     init(_ continuation: CheckedContinuation<Value, any Error>) { self.continuation = continuation }
+    /// Only the pending operation owns a timer. Completion clears and cancels it,
+    /// so fragmented reads cannot retain ten seconds of obsolete deadline work.
+    func armDeadline(after seconds: Double, on queue: DispatchQueue, timeout: @escaping @Sendable () -> Void) {
+        lock.lock()
+        guard continuation != nil, timer == nil else { lock.unlock(); return }
+        let deadline = DispatchSource.makeTimerSource(queue: queue)
+        deadline.schedule(deadline: .now() + seconds)
+        deadline.setEventHandler { [weak self] in
+            if self?.finish(.failure(NativeFailure.transport)) == true { timeout() }
+        }
+        timer = deadline; deadline.resume(); lock.unlock()
+    }
     @discardableResult func finish(_ result: Result<Value, any Error>) -> Bool {
-        lock.lock(); let pending = continuation; continuation = nil; lock.unlock()
+        lock.lock(); let pending = continuation; continuation = nil; let deadline = timer; timer = nil; lock.unlock()
+        deadline?.cancel()
         guard let pending else { return false }; pending.resume(with: result); return true
     }
 }

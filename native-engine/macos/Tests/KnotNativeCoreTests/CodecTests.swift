@@ -68,8 +68,61 @@ private final class EncodedSamples: @unchecked Sendable {
     let deadline = ContinuousClock.now + .seconds(5)
     while !decoded && !failed && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
     #expect(decoded && !failed)
+    let stopped = NativeDecoder(width: 64, height: 64)
+    var staleFrames = 0
+    stopped.onImage = { _ in staleFrames += 1 }
+    try stopped.decode(access); stopped.stop()
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(staleFrames == 0)
     // The decoder must reject the fixture against a different advertised size.
     let wrongSize = NativeDecoder(width: 128, height: 64)
     defer { wrongSize.stop() }
     #expect(throws: (any Error).self) { try wrongSize.decode(access) }
+}
+
+private struct WindowsCodecFixture: Decodable {
+    struct Unit: Decodable {
+        let sequence: UInt64, offset: Int, length: Int, flags: UInt8, timestampMicros: UInt64
+    }
+    let v: Int, synthetic: Bool, captureInvoked: Bool, codec: String
+    let width: Int, height: Int, fps: Int, bitrate: Int, hardwareEncoder: Bool
+    let frames: Int, keyframes: Int, parserChecks: Bool
+    let accessUnits: [Unit]
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"] != nil,
+               "Windows MF artifact path not supplied locally; CI supplies and requires it."))
+@MainActor func windowsMediaFoundationFixtureDecodesWithNativeVideoToolbox() async throws {
+    let root = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"]), isDirectory: true)
+    let json = try Data(contentsOf: root.appendingPathComponent("synthetic-codec.json"))
+    let data = try Data(contentsOf: root.appendingPathComponent("synthetic.h264"))
+    try #require(json.count <= 131_072 && data.count <= 64 * 1024 * 1024)
+    let fixture = try JSONDecoder().decode(WindowsCodecFixture.self, from: json)
+    try #require(fixture.v == 1 && fixture.synthetic && !fixture.captureInvoked && fixture.parserChecks)
+    try #require(fixture.codec == "h264-annexb" && fixture.width == 320 && fixture.height == 180)
+    try #require(fixture.fps == 30 && fixture.bitrate == 2_000_000 && !fixture.hardwareEncoder)
+    try #require(fixture.frames == 120 && fixture.accessUnits.count == fixture.frames && fixture.keyframes >= 2)
+    let decoder = NativeDecoder(width: fixture.width, height: fixture.height)
+    defer { decoder.stop() }
+    var decoded = 0, failed = false, validDimensions = true
+    decoder.onImage = { image in
+        decoded += 1
+        validDimensions = validDimensions && CVPixelBufferGetWidth(image) == 320 && CVPixelBufferGetHeight(image) == 180
+    }
+    decoder.onFailure = { failed = true }
+    var offset = 0, keyframes = 0, sequence: UInt64 = 0, timestamp: UInt64 = 0
+    for unit in fixture.accessUnits {
+        try #require(unit.sequence == sequence + 1 && unit.offset == offset && unit.length > 0 && unit.length <= 4_194_287)
+        try #require(unit.offset <= data.count && unit.length <= data.count - unit.offset && unit.flags <= 1 && unit.timestampMicros > timestamp)
+        let access = try AccessUnit(annexB: data.subdata(in: unit.offset..<(unit.offset + unit.length)))
+        try #require(access.isIDR == (unit.flags == 1))
+        if access.isIDR { keyframes += 1; try #require(!access.sps.isEmpty && !access.pps.isEmpty) }
+        let expected = decoded + 1
+        try decoder.decode(access)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while decoded < expected && !failed && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(decoded == expected && !failed && validDimensions)
+        sequence = unit.sequence; timestamp = unit.timestampMicros; offset += unit.length
+    }
+    #expect(offset == data.count && decoded == fixture.frames && keyframes == fixture.keyframes)
 }

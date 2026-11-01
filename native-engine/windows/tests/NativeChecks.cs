@@ -35,13 +35,17 @@ namespace Knot.NativePreview
                 stage = "tls-pin-mismatch"; TlsPinMismatch(); stage = "tls-approval-stop"; TlsApprovalStop();
                 stage = "tls-decline"; TlsDecline(); stage = "tls-expired"; TlsExpired(); stage = "tls-single-use"; TlsSingleUse();
                 stage = "tls-wrong-token"; TlsWrongToken(); stage = "tls-disconnect"; TlsDisconnect(false); stage = "tls-malformed-input"; TlsDisconnect(true);
+                stage = "tls-delayed-approval"; TlsDelayedApproval();
                 Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
                 return 0;
             }
-            catch (Exception)
+            catch (Exception failure)
             {
-                // Deliberately no raw exception or invitation material in output.
-                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"assertions\":" + assertions + "}");
+                // Synthetic-only diagnostics identify the API category without any raw
+                // message, stack, token, pin, key, endpoint or operating-system path.
+                string kind = failure.GetType().FullName;
+                if (kind.Length > 128) kind = "Exception";
+                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"exceptionType\":" + StrictJson.Quote(kind) + ",\"exceptionHResult\":" + failure.HResult + ",\"assertions\":" + assertions + "}");
                 return 1;
             }
         }
@@ -159,15 +163,21 @@ namespace Knot.NativePreview
             string owned;
             using (RunCertificate cert = new RunCertificate())
             {
+                stage = "fresh-certificate-created";
                 owned = cert.OwnedKeyContainerName;
                 Check(cert.Certificate.HasPrivateKey);
+                stage = "fresh-certificate-valid-pin";
                 Check(RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, cert.Pin));
+                stage = "fresh-certificate-name-reject";
                 Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateNameMismatch, cert.Pin));
+                stage = "fresh-certificate-pin-reject";
                 Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, new string('0', 64)));
             }
+            stage = "fresh-certificate-owned-key-cleanup";
             bool deleted = false;
             CspParameters onlyOwned = RunCertificate.Parameters(owned);
-            onlyOwned.Flags |= CspProviderFlags.UseExistingKey;
+            // Generation-only flags must not accompany an existing-key lookup.
+            onlyOwned.Flags = CspProviderFlags.NoPrompt | CspProviderFlags.UseExistingKey;
             try { using (RSACryptoServiceProvider residual = new RSACryptoServiceProvider(onlyOwned)) { residual.PersistKeyInCsp = false; } }
             catch (CryptographicException) { deleted = true; }
             Check(deleted); // Lookup is solely this fixture's random owned name, never enumeration.
@@ -205,6 +215,16 @@ namespace Knot.NativePreview
                 if (length > 4096) throw new InvalidOperationException("Unexpected fixture length.");
                 return new Packet(header[0], NativeProtocol.ReadExactly(Stream, (int)length));
             }
+            internal Packet ReadNonHeartbeat()
+            {
+                for (int i = 0; i < 32; ++i)
+                {
+                    Packet packet = Read();
+                    if (packet.Kind != 4) return packet;
+                    if (packet.Payload.Length != 0) throw new InvalidOperationException("Invalid synthetic heartbeat.");
+                }
+                throw new InvalidOperationException("Synthetic approval budget exceeded.");
+            }
             public void Dispose() { if (Stream != null) Stream.Dispose(); Client.Close(); }
         }
         private static byte[] Hello(string token) { return Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(token) + ",\"name\":\"Synthetic viewer\"}"); }
@@ -233,7 +253,7 @@ namespace Knot.NativePreview
                     client.Send(1, Hello(token)); Check(pending.WaitOne(3000));
                     Check(media.Opened == 0 && sink.Events.Count == 0 && !server.IsActive);
                     server.RespondToApproval(true);
-                    Packet ready = client.Read(); Check(ready.Kind == 2);
+                    Packet ready = client.ReadNonHeartbeat(); Check(ready.Kind == 2);
                     StrictJson.Parse(ready.Payload, "v", "codec", "width", "height", "fps", "bitrate", "hardwareEncoder");
                     Check(media.Opened == 1);
                     client.Send(0x20, Key(1, 30).Payload);
@@ -255,7 +275,7 @@ namespace Knot.NativePreview
                 using (TlsClient client = new TlsClient(server, pin))
                 {
                     client.Send(1, Hello(token)); Check(pending.WaitOne(3000)); server.RespondToApproval(false);
-                    Packet error = client.Read(); Check(error.Kind == 127 && StrictJson.String(StrictJson.Parse(error.Payload, "code"), "code") == "declined");
+                    Packet error = client.ReadNonHeartbeat(); Check(error.Kind == 127 && StrictJson.String(StrictJson.Parse(error.Payload, "code"), "code") == "declined");
                     Check(server.WaitStopped(4000)); Check(media.Opened == 0 && sink.Events.Count == 0);
                 }
             }
@@ -302,14 +322,22 @@ namespace Knot.NativePreview
             FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
             using (HostServer server = Server(media, sink, null))
             {
-                byte[] wrong = NativeProtocol.DecodeToken(Token(server)); wrong[0] ^= 1;
+                string validToken = Token(server);
+                byte[] wrong = NativeProtocol.DecodeToken(validToken); wrong[0] ^= 1;
                 string pin = server.Pin; int approvals = 0;
                 server.ApprovalRequested = delegate { Interlocked.Increment(ref approvals); }; server.Start();
                 using (TlsClient client = new TlsClient(server, pin))
                 {
                     client.Send(1, Hello(NativeProtocol.Base64Url(wrong))); Packet error = client.Read();
                     Check(error.Kind == 127 && StrictJson.String(StrictJson.Parse(error.Payload, "code"), "code") == "auth");
-                    Check(server.WaitStopped(4000)); Check(approvals == 0 && media.Opened == 0 && sink.Events.Count == 0);
+                    Check(approvals == 0 && media.Opened == 0 && sink.Events.Count == 0);
+                }
+                server.ApprovalRequested = delegate { Interlocked.Increment(ref approvals); server.RespondToApproval(true); };
+                using (TlsClient legitimate = new TlsClient(server, pin))
+                {
+                    legitimate.Send(1, Hello(validToken)); Check(legitimate.Read().Kind == 2);
+                    Check(approvals == 1 && media.Opened == 1);
+                    server.Stop(); Check(server.WaitStopped(4000));
                 }
             }
         }
@@ -328,6 +356,29 @@ namespace Knot.NativePreview
                     else client.Client.Close();
                     Check(server.WaitStopped(4000));
                     Check(sink.Events.Contains("key:30:up") && media.Closed == 1);
+                }
+            }
+        }
+        private static void TlsDelayedApproval()
+        {
+            FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
+            using (ManualResetEvent pending = new ManualResetEvent(false))
+            using (HostServer server = Server(media, sink, null))
+            {
+                server.ApprovalRequested = delegate { pending.Set(); };
+                string token = Token(server), pin = server.Pin; server.Start();
+                using (TlsClient client = new TlsClient(server, pin))
+                {
+                    client.Send(1, Hello(token)); Check(pending.WaitOne(3000));
+                    Stopwatch waiting = Stopwatch.StartNew();
+                    for (int i = 0; i < 6; ++i)
+                    {
+                        Packet heartbeat = client.Read(); Check(heartbeat.Kind == 4 && heartbeat.Payload.Length == 0);
+                        Check(media.Opened == 0 && sink.Events.Count == 0 && !server.IsActive);
+                    }
+                    Check(waiting.ElapsedMilliseconds >= 10500);
+                    server.RespondToApproval(true); Check(client.ReadNonHeartbeat().Kind == 2); Check(media.Opened == 1);
+                    server.Stop(); Check(server.WaitStopped(4000));
                 }
             }
         }

@@ -25,6 +25,7 @@ final class SessionModel: ObservableObject {
     private var connectedAt = ContinuousClock.now
     private var lastIncoming = ContinuousClock.now
     private var lastHeartbeat = ContinuousClock.now
+    private var readyAt = ContinuousClock.now
     private var nextInput = ContinuousClock.now
     private var writerBusy = false
     private var inputEpoch: UInt64 = 0
@@ -53,6 +54,7 @@ final class SessionModel: ObservableObject {
                 guard self.identity == id else { transport.close(); return }
                 self.invitation = nil // one-use token must not become reusable trust
                 self.connectedAt = .now
+                self.lastIncoming = .now
                 self.phase = .approval; self.status = "Certificate verified. Waiting for the host’s explicit approval…"
                 self.startTicker(id: id)
                 while !Task.isCancelled, self.identity == id {
@@ -73,8 +75,12 @@ final class SessionModel: ObservableObject {
                             guard self.surface?.display(image) == true else { return }
                             self.phase = .streaming; self.status = "Receiving the host desktop. Temporary trust; no saved pairing."
                         }
-                        decoder.onFailure = { [weak self] in self?.fail("The native decoder stopped. Create a new invitation to reconnect.") }
+                        decoder.onFailure = { [weak self] in
+                            guard let self, self.identity == id else { return }
+                            self.fail("The native decoder stopped. Create a new invitation to reconnect.")
+                        }
                         self.decoder = decoder; self.phase = .decoding
+                        self.readyAt = .now
                         self.status = "Host approved and encoder ready. Waiting for the first decoded image…"
                     case .video: if let video { try self.decoder?.decode(video.accessUnit) }
                     case .error:
@@ -106,15 +112,25 @@ final class SessionModel: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard let self, self.identity == id, !Task.isCancelled else { return }
                 let now = ContinuousClock.now
-                guard now - self.lastIncoming < .seconds(10), self.phase != .approval || now - self.connectedAt < .seconds(60) else {
-                    self.fail("The peer or host approval timed out. Create a new invitation."); return
-                }
+                guard self.checkDeadlines(now: now) else { return }
                 if now - self.lastHeartbeat >= .seconds(2) { self.pumpWriter() }
             }
         }
     }
+    /// Shared by the real ticker and inert lifecycle tests; host activity cannot
+    /// indefinitely extend approval or the first decoded-image deadline.
+    func checkDeadlines(now: ContinuousClock.Instant) -> Bool {
+        guard active else { return false }
+        guard now - lastIncoming < .seconds(10), phase != .approval || now - connectedAt < .seconds(60) else {
+            fail("The peer or host approval timed out. Create a new invitation."); return false
+        }
+        guard phase != .decoding || now - readyAt < .seconds(15) else {
+            fail("The first decoded image did not arrive. Create a new invitation."); return false
+        }
+        return true
+    }
     func send(_ packet: Packet) {
-        guard phase == .streaming else { return }
+        guard phase == .streaming, !inputRecovery else { return }
         do { try input.append(packet); pumpWriter() }
         catch {
             inputEpoch &+= 1
@@ -125,6 +141,7 @@ final class SessionModel: ObservableObject {
         guard active else { return }
         inputEpoch &+= 1
         input.revoke(); inputRecovery = true; surface?.forgetHeldKeys(); pumpWriter()
+        if phase == .streaming { status = "Input paused. Click the desktop to resume." }
     }
     func recoverInput() {
         guard phase == .streaming else { return }
@@ -141,8 +158,8 @@ final class SessionModel: ObservableObject {
                 while !Task.isCancelled, self.identity == id {
                     let packet: Packet
                     let epoch = self.inputEpoch
-                    if let pending = self.input.pop() { packet = pending }
-                    else if ContinuousClock.now - self.lastHeartbeat >= .seconds(2) { packet = Packet(kind: .heartbeat); self.lastHeartbeat = .now }
+                    if ContinuousClock.now - self.lastHeartbeat >= .seconds(2) { packet = Packet(kind: .heartbeat); self.lastHeartbeat = .now }
+                    else if let pending = self.input.pop() { packet = pending }
                     else { break }
                     if ContinuousClock.now < self.nextInput { try await Task.sleep(until: self.nextInput) }
                     try Task.checkCancellation()

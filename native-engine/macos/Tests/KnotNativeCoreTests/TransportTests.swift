@@ -143,6 +143,19 @@ private final class InertChannel: NativeChannel, @unchecked Sendable {
     func close() { lock.lock(); closed = true; let pending = reader; reader = nil; lock.unlock(); pending?.resume(throwing: NativeFailure.transport) }
 }
 
+@Test func completedOperationReleasesOwnedDeadlineImmediately() async throws {
+    weak var retired: CompletionGate<Int>?
+    let value: Int = try await withCheckedThrowingContinuation { continuation in
+        let gate = CompletionGate<Int>(continuation); retired = gate
+        gate.armDeadline(after: 60, on: DispatchQueue(label: "knot-native.deadline-test")) {}
+        #expect(gate.finish(.success(7)))
+        #expect(!gate.finish(.failure(NativeFailure.transport)))
+    }
+    #expect(value == 7)
+    // A completed receive must not survive for its former 60-second deadline.
+    #expect(retired == nil)
+}
+
 @Test @MainActor func lifecycleUsesInertTransportAndNeverStreamsOnHello() async throws {
     let transport = InertChannel()
     let model = SessionModel(makeChannel: { _ in transport })

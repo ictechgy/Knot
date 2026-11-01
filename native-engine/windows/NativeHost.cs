@@ -86,34 +86,14 @@ namespace Knot.NativePreview
                     TcpClient accepted = listener.AcceptTcpClient();
                     IPAddress remote = ((IPEndPoint)accepted.Client.RemoteEndPoint).Address;
                     if (!NativeProtocol.IsPrivate(remote) && !(syntheticLoopback && IPAddress.IsLoopback(remote))) { accepted.Close(); continue; }
-                    lock (gate)
-                    {
-                        if (isStopped) { accepted.Close(); return; }
-                        client = accepted;
-                    }
-                    accepted.NoDelay = true;
-                    accepted.ReceiveTimeout = 10000; accepted.SendTimeout = 10000;
-                    accepted.ReceiveBufferSize = 16384; accepted.SendBufferSize = 262144;
-                    SslStream tls = new SslStream(accepted.GetStream(), false);
-                    lock (gate) { if (isStopped) { tls.Dispose(); return; } stream = tls; }
-                    // This timer covers the entire TLS+hello exchange, including trickled bytes.
-                    using (Timer budget = new Timer(delegate { try { accepted.Close(); } catch { } }, null, 10000, Timeout.Infinite))
-                    {
-                        tls.ReadTimeout = 10000; tls.WriteTimeout = 10000;
-                        tls.AuthenticateAsServer(certificate.Certificate, false, SslProtocols.Tls12, false);
-                        Packet hello = NativeProtocol.ReadClient(tls, true);
-                        byte[] candidate;
-                        peerName = NativeProtocol.HelloName(hello.Payload, out candidate);
-                        try { invitation.Claim(candidate); }
-                        finally { Array.Clear(candidate, 0, candidate.Length); }
-                        lock (gate) { if (isStopped) return; isClaimed = true; }
-                    }
+                    if (!TryClaim(accepted)) continue;
+                    SslStream tls = stream;
                     // A claim consumes this run's invitation even if approval is denied.
                     listener.Stop();
                     Notify("Viewer is waiting for your approval. No capture or input has started.");
                     Action<string> request = ApprovalRequested;
                     if (request != null) request(peerName);
-                    if (WaitHandle.WaitAny(new WaitHandle[] { approval, stopped }, 60000) != 0) throw new ProtocolException(Stopping ? "closed" : "timeout");
+                    WaitForApproval(tls);
                     lock (gate) { if (isStopped) return; if (!approved) throw new ProtocolException("declined"); }
                     Notify("Approved. Initializing the primary SDR display and hardware encoder.");
                     media = mediaFactory.Open(); // create/read/close all stay on this MTA writer.
@@ -179,6 +159,82 @@ namespace Knot.NativePreview
                     Action finished = Finished; if (finished != null) finished();
                 }
             }
+        }
+        private void WaitForApproval(SslStream tls)
+        {
+            long deadline = Stopwatch.GetTimestamp() + 60L * Stopwatch.Frequency;
+            WaitHandle[] handles = new WaitHandle[] { approval, stopped };
+            while (!Stopping)
+            {
+                long remaining = deadline - Stopwatch.GetTimestamp();
+                if (remaining <= 0) throw new ProtocolException("timeout");
+                int milliseconds = (int)Math.Max(1, Math.Min(2000, remaining * 1000.0 / Stopwatch.Frequency));
+                int signaled = WaitHandle.WaitAny(handles, milliseconds);
+                if (signaled == 0) return;
+                if (signaled == 1 || Stopping) throw new ProtocolException("closed");
+                if (Stopwatch.GetTimestamp() >= deadline) throw new ProtocolException("timeout");
+                // The sole writer keeps the authenticated viewer alive throughout the
+                // approval window. Capture and input remain uninitialized.
+                NativeProtocol.Write(tls, 4, new byte[0]);
+            }
+            throw new ProtocolException("closed");
+        }
+        private bool TryClaim(TcpClient accepted)
+        {
+            SslStream tls = null;
+            bool claimed = false;
+            try
+            {
+                lock (gate)
+                {
+                    if (isStopped) return false;
+                    client = accepted;
+                }
+                accepted.NoDelay = true;
+                accepted.ReceiveTimeout = 10000; accepted.SendTimeout = 10000;
+                accepted.ReceiveBufferSize = 16384; accepted.SendBufferSize = 262144;
+                tls = new SslStream(accepted.GetStream(), false);
+                lock (gate) { if (isStopped) return false; stream = tls; }
+                // Absolute budget includes all TLS and hello bytes and never extends
+                // the invitation TTL. An unauthenticated visitor cannot consume trust.
+                int milliseconds = Math.Max(1, Math.Min(10000, invitation.RemainingMilliseconds));
+                using (Timer budget = new Timer(delegate { try { accepted.Close(); } catch { } }, null, milliseconds, Timeout.Infinite))
+                {
+                    tls.ReadTimeout = 10000; tls.WriteTimeout = 10000;
+                    tls.AuthenticateAsServer(certificate.Certificate, false, SslProtocols.Tls12, false);
+                    Packet hello = NativeProtocol.ReadClient(tls, true);
+                    byte[] candidate;
+                    string name = NativeProtocol.HelloName(hello.Payload, out candidate);
+                    try { invitation.Claim(candidate); }
+                    finally { Array.Clear(candidate, 0, candidate.Length); }
+                    lock (gate)
+                    {
+                        if (isStopped) return false;
+                        isClaimed = true; peerName = name; claimed = true;
+                    }
+                }
+                return true;
+            }
+            catch (ProtocolException error) { SendError(error.Code); }
+            catch (AuthenticationException) { }
+            catch (IOException) { }
+            catch (SocketException) { }
+            catch (ObjectDisposedException) { }
+            finally
+            {
+                if (!claimed)
+                {
+                    try { if (tls != null) tls.Dispose(); } catch { }
+                    try { accepted.Close(); } catch { }
+                    lock (gate)
+                    {
+                        if (client == accepted) client = null;
+                        if (stream == tls) stream = null;
+                    }
+                }
+            }
+            if (invitation.IsExpired) throw new ProtocolException("expired");
+            return false;
         }
         private void ReadInput()
         {

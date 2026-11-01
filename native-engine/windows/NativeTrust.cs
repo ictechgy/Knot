@@ -111,6 +111,10 @@ namespace Knot.NativePreview
             using (RandomNumberGenerator random = RandomNumberGenerator.Create()) random.GetBytes(token);
         }
         internal bool IsExpired { get { lock (gate) return clock() - created >= 120L * Stopwatch.Frequency; } }
+        internal int RemainingMilliseconds
+        {
+            get { lock (gate) return (int)Math.Max(0, Math.Min(120000, 120000 - (clock() - created) * 1000.0 / Stopwatch.Frequency)); }
+        }
         internal string Encode(IPAddress address, int port, string pin)
         {
             lock (gate)

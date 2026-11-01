@@ -151,3 +151,7 @@ For bugs, include your OS, app version, connection direction and reproduction st
 Knot is **GPL-3.0-only**. Modifications and redistribution must preserve the applicable GPL terms and upstream notices and provide corresponding source for distributed executables.
 
 The Mac engine builds on [Glimmer](https://github.com/Se7enbrc/glimmer); Sunshine and Windows Moonlight are separate official packages. [License](LICENSE) · [Glimmer credits](Vendor/Glimmer/CREDITS.md) · [Upstream changes](docs/UPSTREAM_CHANGES.md) · [QR decoder and notices](Vendor/ZXingNet/README.md)
+
+## Independent native engine experiment
+
+The separate [Knot Native Preview](native-engine/README.md) is an experimental Windows11Home host /AppleSiliconMac viewer built with OS capture, hardwareH264, TLS and VideoToolbox APIs. It has no Sunshine/Moonlight/Glimmer runtime dependency. Temporary invitation approval, build scope and device acceptance limits are explicit; the existing product remains unchanged.

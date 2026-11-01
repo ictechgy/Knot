@@ -137,3 +137,7 @@ Knot은 기존 DeskBridge의 새 이름입니다. 저장된 페어링과 설정 
 Knot는 **GPL-3.0-only**입니다. 실행 파일을 배포할 때는 GPL 조건과 원본 고지를 유지하고 대응 소스를 제공해야 합니다.
 
 Mac 엔진은 [Glimmer](https://github.com/Se7enbrc/glimmer)를 기반으로 하며, Sunshine과 Windows용 Moonlight는 별도 공식 패키지를 사용합니다. [라이선스](LICENSE) · [Glimmer 기여자](Vendor/Glimmer/CREDITS.md) · [upstream 변경](docs/UPSTREAM_CHANGES.md) · [QR 디코더·고지](Vendor/ZXingNet/README.md)
+
+## 자체 엔진 실험
+
+[별도 자체 엔진 실험판](native-engine/START-HERE.ko.md)은 Sunshine·Moonlight·Glimmer 없이 OS캡처·하드웨어H264·TLS·VideoToolbox를 사용하는 Windows호스트/Mac뷰어입니다. 일회용 초대와 명시적 승인을 사용하며 기존 앱과 분리됩니다. 지원 범위와 실제기기 검증 제한은 안내를 확인하세요.
