@@ -236,6 +236,7 @@ namespace Knot.NativePreview
             Check(WindowsInputSink.Normalize(-1920, -1920, 3840) == 0);
             Check(WindowsInputSink.Normalize(1919, -1920, 3840) == 65535);
             ReleaseFailureChecks();
+            ReleaseRetryExhaustionChecks();
         }
         private static void ReleaseFailureChecks()
         {
@@ -265,6 +266,45 @@ namespace Knot.NativePreview
                 Reject(delegate { session.Accept(Key(1, 31)); });
                 session.Close();
                 Check(sink.Events.Count == before && !sink.Events.Contains("key:31:down"));
+            }
+        }
+        private static void ReleaseRetryExhaustionChecks()
+        {
+            foreach (int failures in new int[] { 1, 2, 4, 7 })
+            {
+                FakeInput sink = new FakeInput();
+                // Five failures outlast ReleaseAll and the three Close passes.
+                sink.KeyUpFailures = (failures & 1) != 0 ? 5 : 0;
+                sink.ButtonReleaseFailures = (failures & 2) != 0 ? 5 : 0;
+                sink.UnicodeReleaseFailures = (failures & 4) != 0 ? 5 : 0;
+                InputSession session = new InputSession(sink, new CaptureRectangle(0, 0, 1920, 1080));
+                session.Accept(Key(0, 31));
+                session.Accept(new Packet(0x22, new byte[] { 4, 0, 0, 0, 0 }));
+                session.Accept(Key(1, 30));
+                session.Accept(new Packet(0x22, new byte[] { 1, 0, 0, 0, 0 }));
+                bool inputFailure = false;
+                try { session.Accept(new Packet(0x24, new byte[0])); }
+                catch (ProtocolException error) { inputFailure = error.Code == "input"; }
+                Check(inputFailure);
+                session.Close();
+                Check(sink.KeyUpAttempts == ((failures & 1) != 0 ? 4 : 1));
+                Check(sink.ButtonReleaseAttempts == ((failures & 2) != 0 ? 4 : 1));
+                Check(sink.UnicodeReleaseAttempts == 4);
+                Check(sink.KeyUpFailures == ((failures & 1) != 0 ? 1 : 0));
+                Check(sink.ButtonReleaseFailures == ((failures & 2) != 0 ? 1 : 0));
+                Check(sink.UnicodeReleaseFailures == ((failures & 4) != 0 ? 1 : 0));
+                Check(sink.Events.Contains("key:30:up") == ((failures & 1) == 0));
+                Check(sink.Events.Contains("pointer:2") == ((failures & 2) == 0));
+                Check(!sink.Events.Contains("key:31:up") && !sink.Events.Contains("pointer:4") && !sink.Events.Contains("pointer:6"));
+                Check(sink.Events.Contains("key:30:down") && sink.Events.Contains("pointer:1"));
+                int events = sink.Events.Count, keys = sink.KeyUpAttempts;
+                int buttons = sink.ButtonReleaseAttempts, unicode = sink.UnicodeReleaseAttempts;
+                Reject(delegate { session.Accept(Key(1, 31)); });
+                Reject(delegate { session.Accept(new Packet(0x22, new byte[] { 3, 0, 0, 0, 0 })); });
+                Reject(delegate { session.Accept(new Packet(0x21, Bytes("Synthetic late text"))); });
+                session.Close();
+                Check(sink.Events.Count == events && sink.KeyUpAttempts == keys &&
+                    sink.ButtonReleaseAttempts == buttons && sink.UnicodeReleaseAttempts == unicode);
             }
         }
         private static void HostPolicyChecks()

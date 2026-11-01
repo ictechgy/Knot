@@ -20,7 +20,7 @@ Use only a private network or an already configured Tailscale connection.
 1. Install/open `Knot Native Preview` on Windows. Select its LAN/Tailscale address, click **Share**, then **Copy invitation**. Sharing creates a temporary identity and a secret invitation valid120seconds. It does not create a Sunshine account or start capture immediately.
 2. Open the Mac native preview. Paste the invitation, review its address, compare the exact certificate pin with the Windows sharing window, and explicitly connect.
 3. On Windows, review the observed peer address and claimed viewer label, then click **Approve**. The label and IP are context, not authenticated identity; keep the invitation secret. Native capture/input starts only after valid pinnedTLS, an unused invitation and this approval. The Mac reports streaming only after a decoded frame reaches its display surface.
-4. **Stop / revoke all**, disconnect, window close or timeout ends this temporary permission and releases injected keys/buttons. Reconnection needs a new invitation; no old pairing or certificate is imported, reset or persisted.
+4. **Stop / revoke all**, disconnect, window close or timeout ends this temporary permission and requests release of injected keys/buttons. Windows can refuse release during a desktop transition; retries are bounded, so successful OS cleanup is not guaranteed. Reconnection needs a new invitation; no old pairing or certificate is imported, reset or persisted.
 
 The invitation is a secret capability, unlike the current product's address-only QR links. Copying it is an explicit user action. The apps do not automatically read the clipboard. Never put an actual invitation in an issue or log. [Wire and security contract](PROTOCOL.md).
 

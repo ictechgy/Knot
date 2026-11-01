@@ -157,7 +157,7 @@ namespace Knot.NativePreview
         {
             if (server != null) { presentation.Clear(server.Identity); pin.Text = presentation.Pin; server.Stop(); }
             copy.Enabled = approve.Enabled = decline.Enabled = false;
-            status.Text = "Stopped. Temporary trust revoked and this session's accepted input released."; peer.Text = "No active peer.";
+            status.Text = "Stopped. Temporary trust revoked; input release requested."; peer.Text = "No active peer.";
         }
     }
 }

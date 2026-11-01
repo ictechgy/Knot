@@ -25,4 +25,6 @@ Cross-platform CI also sets `KNOT_NATIVE_WINDOWS_FIXTURES` to the fresh Windows 
 
 Unverified device gates: real Windows 11 Home Desktop Duplication/hardware MF encoding, HDR/rotation failure behavior, LAN/Tailscale/Wi-Fi latency, macOS fullscreen rendering, keyboard layouts, IME, focus transitions and signed distribution. Host timestamps are recorded as host monotonic values, never claimed as one-way latency.
 
+Host input cleanup retries only owned releases and is bounded. Windows can reject every attempt during a desktop transition; stopping revokes further remote input but cannot guarantee the OS accepted all key/button releases.
+
 Wheel conversion uses separate authored preview scales (precise points versus line deltas); real device calibration and direction remain acceptance gates. Zero deltas are suppressed. Only an already-held button-up while the native view remains focused may clamp to the image edge; arbitrary letterbox clicks remain rejected, and focus loss still releases all input.

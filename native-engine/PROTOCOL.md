@@ -14,6 +14,8 @@ Client sends hello over authenticatedTLS, containing EXACT JSON keys v=1, token 
 
 Windows displays the exact current run's certificate pin for comparison with the reviewed Mac invitation. Approval displays the source IPv4 observed on the accepted socket and the viewer's claimed label; neither the label nor the address is an authenticated viewer identity. Invalid/preclaim connections cannot publish approval metadata. UI callbacks must belong to the displayed run.
 
+Input revocation requests release of this session's owned input only. A failed `ReleaseAll` ends the connection before any later input is accepted, with up to three owned-release retry passes during teardown. Windows may refuse every attempt during a desktop transition; bounded cleanup is not proof of a successful OS release. Stop status reports the release request rather than claiming unverified success.
+
 The viewer allows65seconds of read silence before Ready while waiting for approval or media initialization, with an overall125second stage deadline (60seconds approval, up to60seconds initialization and scheduling allowance). The host emits a heartbeat immediately before media initialization. After Ready the ordinary read/silence budget is10seconds and the first-presented-image budget is15seconds. These budgets bound viewer waiting; they do not make an in-process GPU/codec call preemptible. No new wire message or automatic reconnect is introduced.
 
 ## Binary frame envelope
