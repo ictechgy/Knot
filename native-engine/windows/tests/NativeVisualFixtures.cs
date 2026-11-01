@@ -124,7 +124,7 @@ namespace Knot.NativePreview
                         adapters.Add(new AdapterChoice(IPAddress.Parse("192.168.50.12"), "Wi-Fi", NetworkInterfaceType.Wireless80211, true));
                         adapters.Add(new AdapterChoice(IPAddress.Parse("100.85.20.16"), "Tailscale", NetworkInterfaceType.Tunnel, false));
                         Progress(frame, "before-constructor");
-                        using (PreviewForm form = new PreviewForm(adapters, true, icon, frame.Scale))
+                        using (PreviewForm form = new PreviewForm(adapters, true, icon, frame.Scale, delegate(string stage) { Progress(frame, "source-" + stage); }))
                         {
                             Progress(frame, "after-constructor");
                             form.StartPosition = FormStartPosition.Manual; form.Location = new Point(20, 20);

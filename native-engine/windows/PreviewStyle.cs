@@ -61,6 +61,67 @@ namespace Knot.NativePreview
         }
     }
 
+    // The trust block has a known two-child geometry. Do not ask nested
+    // AutoSize/percent tables to discover the native edit control's height.
+    internal sealed class PreviewTrustPanel : Panel
+    {
+        private readonly Label title;
+        private readonly TextBox pin;
+        private bool arranging;
+        private int gap, minimumPinHeight, pinPadding;
+        internal PreviewTrustPanel(Label heading, TextBox fingerprint)
+        {
+            title = heading; pin = fingerprint;
+            AutoSize = false; BackColor = PreviewStyle.Surface;
+            title.AutoSize = false; title.Dock = pin.Dock = DockStyle.None;
+            pin.AutoSize = false; title.Anchor = pin.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            title.MaximumSize = Size.Empty;
+            Controls.Add(title); Controls.Add(pin);
+            AccessibleRole = AccessibleRole.Grouping;
+            AccessibleName = "현재 연결의 인증서 지문";
+        }
+        internal void SetMetrics(int titleGap, int minimumHeight, int padding)
+        {
+            gap = titleGap; minimumPinHeight = minimumHeight; pinPadding = padding;
+            PerformLayout();
+        }
+        internal int RequiredPinHeight
+        {
+            get
+            {
+                int width = Math.Max(1, ClientSize.Width - pinPadding);
+                int textWidth = TextRenderer.MeasureText(pin.Text.Length == 0 ? "0" : pin.Text, pin.Font, Size.Empty,
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+                int lines = Math.Max(1, (textWidth + width - 1) / width);
+                int lineHeight = TextRenderer.MeasureText("Ag", pin.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Height;
+                return Math.Max(minimumPinHeight, lines * lineHeight + pinPadding);
+            }
+        }
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            return new Size(proposedSize.Width > 0 ? proposedSize.Width : Width, Height);
+        }
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            if (arranging) return;
+            if (title == null || pin == null || !Visible || ClientSize.Width <= pinPadding) { base.OnLayout(e); return; }
+            arranging = true;
+            try
+            {
+                base.OnLayout(e);
+                int width = Math.Max(1, ClientSize.Width);
+                int titleHeight = TextRenderer.MeasureText(title.Text, title.Font, new Size(width, 32767),
+                    TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Height;
+                title.SetBounds(0, 0, width, titleHeight);
+                int pinHeight = RequiredPinHeight;
+                pin.SetBounds(0, titleHeight + gap, width, pinHeight);
+                int height = titleHeight + gap + pinHeight;
+                if (Height != height) Height = height;
+            }
+            finally { arranging = false; }
+        }
+    }
+
     internal sealed class PreviewCard : Panel
     {
         private readonly float layoutScale;

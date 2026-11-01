@@ -23,6 +23,7 @@ namespace Knot.NativePreview
     {
         private readonly float scale;
         private readonly bool fixtureMode;
+        private readonly Action<string> fixtureTrace;
         private readonly ComboBox addresses = new ComboBox();
         private readonly PreviewButton share, copy, stop, approve, decline, desktopNavigation, helpNavigation, networkDisclosure, compactDesktopNavigation, compactHelpNavigation;
         private readonly TextBox status = new TextBox(), pin = new TextBox();
@@ -32,7 +33,8 @@ namespace Knot.NativePreview
         private readonly FlowLayoutPanel actions, compactNavigation;
         private readonly PreviewCard taskCard, networkCard;
         private readonly Panel main, rail, footer;
-        private readonly TableLayoutPanel requestPanel, trustPanel;
+        private readonly TableLayoutPanel requestPanel;
+        private readonly PreviewTrustPanel trustPanel;
         private readonly MonitorIllustration illustration = new MonitorIllustration();
         private readonly List<Label> wrappingLabels = new List<Label>();
         // Control.Visible includes ancestor visibility. Track the requested local
@@ -52,10 +54,10 @@ namespace Knot.NativePreview
 
         // The separate fixture supplies fake adapters and omits action handlers.
         // Production Main cannot select fixture mode through arguments.
-        internal PreviewForm(IEnumerable<AdapterChoice> choices, bool visualFixture, Icon fixtureIcon, float layoutScale)
+        internal PreviewForm(IEnumerable<AdapterChoice> choices, bool visualFixture, Icon fixtureIcon, float layoutScale, Action<string> trace = null)
         {
             if (layoutScale < 1 || layoutScale > 2) throw new ArgumentException("Invalid fixture layout scale.");
-            fixtureMode = visualFixture; scale = visualFixture ? layoutScale : 1f;
+            fixtureMode = visualFixture; scale = visualFixture ? layoutScale : 1f; fixtureTrace = visualFixture ? trace : null;
             Text = "Knot Native Preview"; ClientSize = new Size(P(1040), P(740));
             MinimumSize = new Size(P(500), P(360)); StartPosition = FormStartPosition.CenterScreen;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = visualFixture ? AutoScaleMode.None : AutoScaleMode.Dpi;
@@ -127,13 +129,13 @@ namespace Knot.NativePreview
             requestPanel.Controls.Add(requestName); requestPanel.Controls.Add(requestAddress); requestPanel.Controls.Add(requestWarning);
             taskCard.Content.Controls.Add(requestPanel);
 
-            trustPanel = Column(); trustPanel.Dock = DockStyle.Top; trustPanel.Margin = new Padding(0, 0, 0, P(18));
             trustTitle = MakeLabel("인증서 지문 · Mac에 표시된 값과 비교해주세요", 9, FontStyle.Bold);
-            trustTitle.Margin = new Padding(0, 0, 0, P(8)); trustPanel.Controls.Add(trustTitle);
+            wrappingLabels.Remove(trustTitle);
             pin.ReadOnly = true; pin.Multiline = true; pin.WordWrap = true; pin.BorderStyle = BorderStyle.None;
             pin.Font = new Font("Consolas", 10 * scale); pin.BackColor = PreviewStyle.Surface; pin.ForeColor = PreviewStyle.Ink;
-            pin.Dock = DockStyle.Top; pin.Height = P(43); pin.Margin = Padding.Empty;
-            pin.AccessibleName = "현재 연결의 인증서 SHA-256 지문"; pin.ShortcutsEnabled = true; trustPanel.Controls.Add(pin);
+            pin.Height = P(43); pin.Margin = Padding.Empty;
+            pin.AccessibleName = "현재 연결의 인증서 SHA-256 지문"; pin.ShortcutsEnabled = true;
+            trustPanel = new PreviewTrustPanel(trustTitle, pin) { Dock = DockStyle.Top, Margin = new Padding(0, 0, 0, P(18)) };
             taskCard.Content.Controls.Add(trustPanel);
 
             actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
@@ -168,7 +170,18 @@ namespace Knot.NativePreview
             networkDisclosure.Click += delegate { networkExpanded = !networkExpanded; SetViewVisible(networkSettings, networkExpanded); ApplyResponsiveLayout(); UpdateWrapWidths(); };
             addresses.SelectedIndexChanged += delegate { UpdateNetwork(); };
             SizeChanged += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
-            Shown += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
+            Shown += delegate
+            {
+                TraceFixture("shown-enter");
+                // Complete native Show/activation before changing the hierarchy.
+                // Exactly one deferred pass; layout outputs never enqueue more.
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    if (IsDisposed || Disposing) return;
+                    TraceFixture("shown-deferred-enter"); ApplyResponsiveLayout(); UpdateWrapWidths(); TraceFixture("shown-deferred-exit");
+                });
+                TraceFixture("shown-exit");
+            };
             // Child sizes are outputs of layout, not new presentation inputs.
             // Re-entering full layout from their SizeChanged callbacks creates
             // deferred AutoSize/scrollbar feedback, especially on hidden pages.
@@ -198,6 +211,7 @@ namespace Knot.NativePreview
         }
 
         private int P(float value) { return (int)Math.Round(value * scale); }
+        private void TraceFixture(string stage) { if (fixtureTrace != null) fixtureTrace(stage); }
         private PreviewButton ActionButton(string text, PreviewButtonKind kind) { return new PreviewButton(text, kind, scale); }
         private TableLayoutPanel Column()
         {
@@ -302,21 +316,13 @@ namespace Knot.NativePreview
             return TextRenderer.MeasureText(status.Text.Length == 0 ? " " : status.Text, status.Font,
                 new Size(Math.Max(40, width), 32767), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding).Height;
         }
-        private int PinTextHeight()
-        {
-            int width = Math.Max(R(40), pin.Width - R(8));
-            int textWidth = TextRenderer.MeasureText(pin.Text.Length == 0 ? "0" : pin.Text, pin.Font, Size.Empty,
-                TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
-            int lines = Math.Max(1, (textWidth + width - 1) / width);
-            int lineHeight = TextRenderer.MeasureText("Ag", pin.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Height;
-            return lines * lineHeight + R(8);
-        }
         private void ApplyResponsiveLayout()
         {
             if (responsiveLayout || shell == null || footer == null || body == null || helpBody == null || networkCard == null) return;
             responsiveLayout = true;
             try
             {
+                TraceFixture("responsive-enter");
                 HostViewSnapshot view = CurrentSnapshot();
                 bool compact = ClientSize.Width / CurrentLayoutScale < 920 || ClientSize.Height / CurrentLayoutScale < 680;
                 bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
@@ -356,7 +362,6 @@ namespace Knot.NativePreview
                 stateDescription.Margin = new Padding(0, 0, 0, R(compact ? 12 : 20));
                 requestName.Margin = new Padding(0, 0, 0, R(4)); requestAddress.Margin = new Padding(0, 0, 0, R(6));
                 SetViewVisible(requestWarning, view.Phase == HostViewPhase.Request && !compact);
-                trustTitle.Margin = new Padding(0, 0, 0, R(compact ? 4 : 8));
                 trustPanel.Margin = new Padding(0, 0, 0, R(compact ? 8 : 18));
                 SetViewVisible(networkCard, !compact || !view.RunPresent);
                 SetViewVisible(privacy, !compact || idle);
@@ -364,22 +369,22 @@ namespace Knot.NativePreview
                 stop.Padding = compact ? new Padding(R(12), R(8), R(12), R(8)) : new Padding(R(18), R(10), R(18), R(10));
                 footer.Padding = compact ? new Padding(R(16), R(10), R(16), R(10)) : new Padding(R(32), R(18), R(32), R(18));
                 status.Margin = new Padding(0, R(2), R(compact ? 12 : 18), 0);
-                shell.PerformLayout(); header.PerformLayout(); UpdateWrapWidths();
-                if (!helpVisible && view.Pin.Length > 0)
-                {
-                    int pinHeight = Math.Max(R(24), PinTextHeight());
-                    if (pin.Height != pinHeight) pin.Height = pinHeight;
-                }
+                TraceFixture("responsive-before-shell"); shell.PerformLayout(); TraceFixture("responsive-after-shell");
+                header.PerformLayout(); TraceFixture("responsive-after-header"); UpdateWrapWidths(); TraceFixture("responsive-after-wrap");
+                if (!helpVisible) trustPanel.SetMetrics(R(compact ? 4 : 8), R(24), R(8));
+                TraceFixture("responsive-after-trust");
                 Size stopSize = view.RunPresent ? stop.GetPreferredSize(Size.Empty) : Size.Empty;
                 int statusWidth = main.ClientSize.Width - footer.Padding.Horizontal - stopSize.Width - status.Margin.Horizontal;
                 int contentHeight = Math.Max(stopSize.Height, StatusTextHeight(statusWidth) + status.Margin.Vertical + R(4));
                 int footerHeight = Math.Max(R(compact ? 64 : 88), contentHeight + footer.Padding.Vertical);
                 if (footer.Height != footerHeight) footer.Height = footerHeight;
                 footer.PerformLayout();
+                TraceFixture("responsive-after-footer");
                 // Footer and scrollbar changes may alter available label width.
                 // Reconcile once from this explicit input transaction; child
                 // SizeChanged events never schedule another full transaction.
                 UpdateWrapWidths();
+                TraceFixture("responsive-exit");
             }
             finally { responsiveLayout = false; }
         }
@@ -476,7 +481,7 @@ namespace Knot.NativePreview
         {
             get
             {
-                return trustPanel.Visible && pin.ClientSize.Height >= PinTextHeight() - R(8) &&
+                return trustPanel.Visible && pin.ClientSize.Height >= trustPanel.RequiredPinHeight &&
                     scroll.ClientRectangle.Contains(BoundsWithin(pin, scroll)) && scroll.ClientRectangle.Contains(BoundsWithin(requestName, scroll)) &&
                     scroll.ClientRectangle.Contains(BoundsWithin(requestAddress, scroll)) && scroll.ClientRectangle.Contains(BoundsWithin(approve, scroll)) &&
                     scroll.ClientRectangle.Contains(BoundsWithin(decline, scroll));
