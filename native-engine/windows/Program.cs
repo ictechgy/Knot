@@ -527,6 +527,7 @@ namespace Knot.NativePreview
             fixtureCode = code;
         }
         internal string DisplayedEnrollmentCode { get { return enrollmentCode.Text; } }
+        internal string DisplayedStatus { get { return status.Text; } }
         internal bool HelpVisible { get { return helpVisible; } }
         internal string DisplayedPin { get { return pin.Text; } }
         internal bool ApprovalVisible { get { return approve.Visible; } }
@@ -634,7 +635,7 @@ namespace Knot.NativePreview
                         if (server != run || !presentation.IsCurrent(run.Identity)) return;
                         rawStatus = text;
                         if (run.IsActive) phase = HostViewPhase.Sharing;
-                        else if (run.EnrollmentReady && phase != HostViewPhase.Stopping) phase = HostViewPhase.Preparing;
+                        else if (phase == HostViewPhase.Invitation && run.EnrollmentReady) phase = HostViewPhase.Preparing;
                         ApplyCurrentPresentation();
                     });
                 };
@@ -665,16 +666,24 @@ namespace Knot.NativePreview
                         ApplyCurrentPresentation();
                     });
                 };
-                rawStatus = run.UsesEnrollment ? "Mac에서 이 PC를 선택하고 8자리 번호를 입력하세요. 이 번호로 한 번의 화면·입력 연결을 허용해요." : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";
+                rawStatus = run.UsesEnrollment ? EnrollmentGuidance.Ready : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";
                 ShowHelp(false); ApplyCurrentPresentation(); lifecycleTimer.Start(); run.Start();
+            }
+            catch (PairingSetupException)
+            {
+                FailShareStart(EnrollmentGuidance.For(EnrollmentFailure.Setup));
             }
             catch (Exception)
             {
-                if (server != null) { presentation.Clear(server.Identity); server.Dispose(); server = null; }
-                lifecycleTimer.Stop(); phase = HostViewPhase.Failed; invitationAvailable = false;
-                rawStatus = "화면 공유를 시작하지 못했어요. 선택한 네트워크와 TCP 48631·48632, UDP 48633의 연결 허용 여부를 확인해주세요.";
-                ApplyCurrentPresentation();
+                FailShareStart("화면 공유를 시작하지 못했어요. 선택한 네트워크와 TCP 48631·48632, UDP 48633의 연결 허용 여부를 확인해주세요.");
             }
+        }
+        private void FailShareStart(string guidance)
+        {
+            if (server != null) { presentation.Clear(server.Identity); server.Dispose(); server = null; }
+            lifecycleTimer.Stop(); phase = HostViewPhase.Failed; invitationAvailable = false;
+            rawStatus = guidance;
+            ApplyCurrentPresentation();
         }
         private void Decide(bool allowed)
         {

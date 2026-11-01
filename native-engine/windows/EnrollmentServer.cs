@@ -23,8 +23,9 @@ namespace Knot.NativePreview
         private readonly Thread worker;
         private readonly DiscoveryServer discovery;
         private readonly Func<byte[], string, IPAddress, EnrollmentGrant> issue;
-        private readonly Action unavailable;
+        private readonly Action<EnrollmentFailure> unavailable;
         private readonly Action<string> status;
+        private readonly IDisposable pairingModule;
         private readonly bool syntheticLoopback;
         private TcpClient client;
         private bool started, stopped, grantSent;
@@ -33,17 +34,21 @@ namespace Knot.NativePreview
         internal int DiscoveryPort { get { return discovery.Port; } }
         internal string Code { get { return Slot.DisplayCode; } }
         internal EnrollmentServer(IPAddress address, string name, bool syntheticLoopback, Func<long> clock,
-                                  Func<byte[], string, IPAddress, EnrollmentGrant> issue, Action unavailable, Action<string> status)
+                                  Func<byte[], string, IPAddress, EnrollmentGrant> issue, Action<EnrollmentFailure> unavailable, Action<string> status,
+                                  Func<IDisposable> preflight = null)
         {
             this.issue = issue; this.unavailable = unavailable; this.status = status; this.syntheticLoopback = syntheticLoopback;
-            Slot = new EnrollmentSlot(clock); listener = new TcpListener(address, syntheticLoopback ? 0 : EnrollmentProtocol.Port);
+            // Fail before generating a code, charging attempts or opening discovery.
+            pairingModule = (preflight ?? new Func<IDisposable>(PairingCryptoSession.Preflight))();
+            if (pairingModule == null) throw new PairingSetupException();
             try
             {
+                Slot = new EnrollmentSlot(clock); listener = new TcpListener(address, syntheticLoopback ? 0 : EnrollmentProtocol.Port);
                 listener.Start(1); Port = ((IPEndPoint)listener.LocalEndpoint).Port;
                 discovery = new DiscoveryServer(address, syntheticLoopback ? 0 : EnrollmentProtocol.DiscoveryPort, Port, Slot, name, syntheticLoopback, clock);
                 worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot native enrollment";
             }
-            catch { Slot.Dispose(); listener.Stop(); throw; }
+            catch { if (Slot != null) Slot.Dispose(); if (listener != null) listener.Stop(); pairingModule.Dispose(); throw; }
         }
         internal void Start()
         {
@@ -58,6 +63,7 @@ namespace Knot.NativePreview
         private bool IsStopped { get { lock (gate) return stopped; } }
         private void Run()
         {
+            EnrollmentFailure terminalFailure = EnrollmentFailure.Unavailable;
             try
             {
                 while (!IsStopped && Slot.Available)
@@ -82,14 +88,20 @@ namespace Knot.NativePreview
                             Packet hello = EnrollmentProtocol.Read(stream, 1);
                             byte[] claimedSlot = new byte[16], peerMessage = new byte[32];
                             Buffer.BlockCopy(hello.Payload, 0, claimedSlot, 0, 16); Buffer.BlockCopy(hello.Payload, 16, peerMessage, 0, 32);
-                            if (!NativeProtocol.Equal(claimedSlot, Slot.Id)) throw new ProtocolException("auth");
+                            if (!NativeProtocol.Equal(claimedSlot, Slot.Id)) throw new EnrollmentAttemptException(EnrollmentFailure.StaleCandidate, "auth");
                             using (PairingCryptoSession crypto = PairingCryptoSession.Create(true, password, Slot.Id))
                             {
                                 byte[] response = new byte[48]; Buffer.BlockCopy(Slot.Id, 0, response, 0, 16); Buffer.BlockCopy(crypto.Message, 0, response, 16, 32);
                                 EnrollmentProtocol.Write(stream, 2, response);
                                 crypto.Process(peerMessage);
                                 // SPAKE2 process success alone cannot authorize anything.
-                                confirmPlain = crypto.Open(3, EnrollmentProtocol.Read(stream, 3).Payload);
+                                byte[] confirmation = EnrollmentProtocol.Read(stream, 3).Payload;
+                                try { confirmPlain = crypto.Open(3, confirmation); }
+                                catch (ProtocolException error)
+                                {
+                                    if (error.Code == "auth") throw new EnrollmentAttemptException(EnrollmentFailure.Authentication, "auth");
+                                    throw;
+                                }
                                 string name = EnrollmentProtocol.ConfirmName(confirmPlain, Slot.Id);
                                 if (IsStopped) throw new ProtocolException("closed");
                                 EnrollmentGrant grant = issue(Slot.Id, name, remote);
@@ -101,11 +113,13 @@ namespace Knot.NativePreview
                             }
                         }
                     }
-                    catch (ProtocolException error) { TryError(stream, error.Code); if (status != null && !IsStopped) status("연결번호를 확인하지 못했어요. Mac에서 번호를 다시 입력해주세요."); }
+                    catch (EnrollmentAttemptException error) { TryError(stream, error.WireCode); Notice(error.Failure); }
+                    catch (PairingSetupException) { TryError(stream, "protocol"); terminalFailure = EnrollmentFailure.Setup; }
+                    catch (ProtocolException error) { TryError(stream, error.Code); Notice(EnrollmentGuidance.Classify(error)); }
                     catch (IOException) { }
                     catch (SocketException) { }
                     catch (ObjectDisposedException) { }
-                    catch (Exception) { TryError(stream, "protocol"); if (status != null && !IsStopped) status("연결을 준비하지 못했어요. 설치 파일과 연결 경로를 확인해주세요."); }
+                    catch (Exception) { TryError(stream, "protocol"); Notice(EnrollmentFailure.Protocol); }
                     finally
                     {
                         if (password != null) Array.Clear(password, 0, password.Length);
@@ -115,7 +129,7 @@ namespace Knot.NativePreview
                         try { accepted.Close(); } catch { }
                         lock (gate) { if (client == accepted) client = null; }
                     }
-                    if (grantSent) break;
+                    if (grantSent || terminalFailure == EnrollmentFailure.Setup) break;
                 }
             }
             catch (SocketException) { }
@@ -125,9 +139,10 @@ namespace Knot.NativePreview
             {
                 bool failed = !grantSent && !IsStopped;
                 try { listener.Stop(); } catch { } discovery.Stop();
-                if (failed && unavailable != null) unavailable();
+                if (failed && unavailable != null) unavailable(terminalFailure);
             }
         }
+        private void Notice(EnrollmentFailure failure) { if (status != null && !IsStopped) status(EnrollmentGuidance.For(failure)); }
         private static void TryError(Stream stream, string code)
         { try { if (stream != null) EnrollmentProtocol.Write(stream, 127, EnrollmentProtocol.Error(code)); } catch { } }
         internal void Stop()
@@ -141,7 +156,7 @@ namespace Knot.NativePreview
         {
             Stop();
             if (started && Thread.CurrentThread != worker && (worker.ThreadState & ThreadState.Unstarted) == 0) worker.Join();
-            discovery.Dispose(); Slot.Dispose();
+            discovery.Dispose(); Slot.Dispose(); pairingModule.Dispose();
         }
     }
 }

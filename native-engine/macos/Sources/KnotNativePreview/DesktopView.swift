@@ -3,6 +3,14 @@ import AVFoundation
 import SwiftUI
 import KnotNativeCore
 
+/// The monitor belongs only to this presenter's accepted physical-key lifetime.
+/// AppKit's local monitor handlers run on the main thread.
+private final class LocalKeyUpMonitor: @unchecked Sendable {
+    let token: Any
+    init(_ token: Any) { self.token = token }
+    deinit { NSEvent.removeMonitor(token) }
+}
+
 struct NativeDesktop: NSViewRepresentable {
     @ObservedObject var model: SessionModel
     func makeNSView(context: Context) -> DesktopView { let view = DesktopView(); view.model = model; model.surface = view; return view }
@@ -20,6 +28,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     private var heldModifiers: Set<UInt16> = []
     private var localModifiers = KeyboardModifierState()
     private var physicalKeys = PhysicalKeyOwnership()
+    private var commandKeyUpMonitor: LocalKeyUpMonitor?
     private var heldButtons: Set<UInt8> = []
     private var candidateAnchor = CGPoint(x: 24, y: 40)
     private var marked = NSAttributedString(string: "")
@@ -48,6 +57,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        commandKeyUpMonitor = nil
         notifications = nil
         guard let window else { model?.releaseInput(); return }
         window.collectionBehavior.insert(.fullScreenPrimary)
@@ -72,6 +82,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     }
     func clear() { video.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil); cancelComposition() }
     func forgetHeldKeys() {
+        commandKeyUpMonitor = nil
         heldModifiers.removeAll(); localModifiers.reset(); physicalKeys.reset(); heldButtons.removeAll()
         cancelComposition()
     }
@@ -142,12 +153,32 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         // Matching release follows ownership even after modifier/mode changes.
         physical(event, down: false)
         if acceptsInput { synchronizeModifiers(event.modifierFlags, physicalCommand: false) }
+        if physicalKeys.count == heldModifiers.count { commandKeyUpMonitor = nil }
     }
     private func physical(_ event: NSEvent, down: Bool) {
         guard let mapping = WindowsScanCodes.map[event.keyCode], let packet = try? Input.key(down: down, scan: mapping.0, extended: mapping.1) else { return }
         if !down && !physicalKeys.release(event.keyCode) { return }
         if down { physicalKeys.press(event.keyCode) }
         if model?.send(packet) != true, down { _ = physicalKeys.release(event.keyCode) }
+        else if down, event.modifierFlags.contains(.command), MacKeyboardRouting.modifierKeys[event.keyCode] == nil {
+            armCommandKeyUpMonitor()
+        }
+    }
+    private func armCommandKeyUpMonitor() {
+        guard commandKeyUpMonitor == nil, acceptsInput else { return }
+        // Command key-ups may bypass the responder. A local pre-dispatch
+        // compensation handles only our own matching release, once. It never
+        // monitors another app or forwards a key-down/menu equivalent.
+        if let token = NSEvent.addLocalMonitorForEvents(matching: .keyUp, handler: { [weak self] event in
+            let handled = MainActor.assumeIsolated {
+                guard let self, MacKeyboardRouting.compensatesCommandKeyUp(keyCode: event.keyCode,
+                    modifiers: Self.modifiers(event.modifierFlags), ownsPhysicalDown: self.physicalKeys.owns(event.keyCode),
+                    focused: self.acceptsInput, sameWindow: event.window != nil && event.window === self.window) else { return false }
+                self.keyUp(with: event)
+                return true
+            }
+            return handled ? nil : event
+        }) { commandKeyUpMonitor = LocalKeyUpMonitor(token) }
     }
     override func flagsChanged(with event: NSEvent) {
         // macOS owns both short language-switch and long capitals Caps Lock.

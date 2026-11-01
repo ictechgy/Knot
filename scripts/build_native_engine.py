@@ -82,8 +82,12 @@ class Builder:
                 raise ValueError("Native build ownership marker differs")
         else:
             marker.write_text(json.dumps({"owner": "KnotNativeBuild", "schema": 1}) + "\n")
-        # A failed rebuild must never leave an earlier success claim in place.
-        for name in ["NATIVE-BUILD.json", "SHA256SUMS", "native-ui-visual-checks.json"]:
+        # Start a fresh evidence epoch, including substep reports. A failed
+        # rebuild must not pair new inputs with a previous run's passed JSON.
+        for name in ["NATIVE-BUILD.json", "SHA256SUMS", "NATIVE-INPUTS.json", "native-ui-visual-checks.json",
+                     "native-cpp-checks.json", "native-host-checks.json", "native-installer-metadata.json",
+                     "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
+                     "synthetic-codec.json", "synthetic-codec-4k.json"]:
             (self.output / name).unlink(missing_ok=True)
         self.evidence = self.output / "evidence"
         self.evidence.mkdir(exist_ok=True)
@@ -145,6 +149,7 @@ class Builder:
                 report.get("freshSyntheticOnly") is not True or
                 any(report.get(flag) is not False for flag in false_flags) or
                 type(report.get("syntheticWindowsShown")) is not bool or
+                (self.platform == "macos" and report.get("syntheticWindowsShown") is not False) or
                 report.get("visualAcceptance") != "manual-review-required" or
                 not isinstance(report.get("renderMethod"), str) or not report["renderMethod"].strip()):
             raise ValueError("UI checks must identify fresh synthetic rendering without production effects")
@@ -332,7 +337,7 @@ class Builder:
                 "CFBundlePackageType": "APPL", "CFBundleVersion": PREVIEW_BUILD, "CFBundleShortVersionString": VERSION_BASE,
                 "KnotNativeVersion": VERSION, "CFBundleIconFile": "AppIcon", "LSMinimumSystemVersion": "26.0",
                 "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
-                "NSLocalNetworkUsageDescription": "Connect securely to the Windows PC you select and explicitly approve."}
+                "NSLocalNetworkUsageDescription": "Find and connect to the Windows PC you choose on your private network."}
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
         self.run("sign-native-app", ["/usr/bin/codesign", "--force", "--sign", "-", app])
         self.run("verify-native-app", ["/usr/bin/codesign", "--verify", "--deep", "--strict", app])

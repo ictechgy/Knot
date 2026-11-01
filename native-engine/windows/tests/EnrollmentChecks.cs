@@ -15,9 +15,41 @@ namespace Knot.NativePreview
         private static int discoveryFixtures;
         private static void EnrollmentChecks()
         {
-            EnrollmentPolicyChecks(); EnrollmentWireChecks();
+            EnrollmentPolicyChecks(); EnrollmentWireChecks(); EnrollmentPreflightChecks();
             EnrollmentWrongCodeThenClaim(); EnrollmentWrongName(); EnrollmentExpiredGrant();
-            EnrollmentStopBeforeConfirm(); EnrollmentExpiredSlotBeforeConfirm(); EnrollmentAttemptLimit(); EnrollmentLegacyCrossClaim();
+            EnrollmentStopBeforeConfirm(); EnrollmentExpiredSlotBeforeConfirm(); EnrollmentAttemptLimit(); EnrollmentLegacyCrossClaim(); EnrollmentWrongSourceBeforeTls(); EnrollmentStopAfterOffer();
+        }
+        private static void EnrollmentPreflightChecks()
+        {
+            int preflights = 0, clockReads = 0, grants = 0; EnrollmentServer published = null; bool failed = false;
+            try
+            {
+                published = new EnrollmentServer(IPAddress.Loopback, "Synthetic Windows", true,
+                    delegate { ++clockReads; return 0L; },
+                    delegate(byte[] slot, string name, IPAddress peer) { ++grants; return null; }, null, null,
+                    delegate { ++preflights; throw new PairingSetupException(); });
+            }
+            catch (PairingSetupException) { failed = true; }
+            finally { if (published != null) published.Dispose(); }
+            // EnrollmentSlot's constructor reads the clock before it can expose
+            // a code or charge an attempt. A lazy loader failure precedes it.
+            Check(failed && preflights == 1 && clockReads == 0 && grants == 0 && published == null);
+            Check(EnrollmentGuidance.Classify(new ProtocolException("auth")) == EnrollmentFailure.Protocol);
+            Check(EnrollmentGuidance.Classify(new ProtocolException("expired")) == EnrollmentFailure.Expired);
+            Check(EnrollmentGuidance.For(EnrollmentFailure.Setup) != EnrollmentGuidance.For(EnrollmentFailure.Authentication));
+            Check(EnrollmentGuidance.For(EnrollmentFailure.StaleCandidate) != EnrollmentGuidance.For(EnrollmentFailure.Authentication));
+            Check(EnrollmentGuidance.For(EnrollmentFailure.Protocol) != EnrollmentGuidance.For(EnrollmentFailure.Authentication));
+        }
+        private static void DiscoveryExclusiveBind(HostServer server)
+        {
+            using (Socket duplicate = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+            {
+                duplicate.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                bool blocked = false;
+                try { duplicate.Bind(new IPEndPoint(IPAddress.Loopback, server.DiscoveryPort)); }
+                catch (SocketException) { blocked = true; }
+                Check(blocked);
+            }
         }
         private static void EnrollmentPolicyChecks()
         {
@@ -125,11 +157,21 @@ namespace Knot.NativePreview
                     Dictionary<string, object> offer = StrictJson.Parse(plain, "v", "slot", "grant", "invitation", "ttlMs");
                     Check(StrictJson.Integer(offer, "v", 2, 2) == 2 && NativeProtocol.Equal(EnrollmentProtocol.Identifier(StrictJson.String(offer, "slot")), slot));
                     Check(EnrollmentProtocol.Identifier(StrictJson.String(offer, "grant")).Length == 16);
-                    Check(StrictJson.Integer(offer, "ttlMs", 1, 30000) > 0); return StrictJson.String(offer, "invitation");
+                    Check(StrictJson.Integer(offer, "ttlMs", 1, 30000) > 0);
+                    string invitation = StrictJson.String(offer, "invitation");
+                    Dictionary<string, object> fields = InvitationObject(invitation);
+                    Check(StrictJson.String(fields, "address") == IPAddress.Loopback.ToString());
+                    Check(StrictJson.Integer(fields, "port", 1, 65535) == server.Port);
+                    Check(StrictJson.String(fields, "certificateSHA256") == server.Pin);
+                    byte[] token = NativeProtocol.DecodeToken(StrictJson.String(fields, "token"));
+                    Check(token.Length == 32); Array.Clear(token, 0, token.Length);
+                    return invitation;
                 }
                 finally { Array.Clear(plain, 0, plain.Length); }
             }
         }
+        private static string OfferedPin(string invitation)
+        { return StrictJson.String(InvitationObject(invitation), "certificateSHA256"); }
         private static void WaitFor(Func<bool> result)
         {
             long until = Stopwatch.GetTimestamp() + 4L * Stopwatch.Frequency;
@@ -141,21 +183,42 @@ namespace Knot.NativePreview
             FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
             using (HostServer server = EnrollmentHost(media, sink, Stopwatch.GetTimestamp))
             {
-                int approvals = 0; server.ApprovalRequested = delegate { Interlocked.Increment(ref approvals); }; server.Start();
+                string notice = null;
+                int approvals = 0; server.ApprovalRequested = delegate { Interlocked.Increment(ref approvals); };
+                server.StatusChanged = delegate(string text)
+                {
+                    if (text == EnrollmentGuidance.For(EnrollmentFailure.Authentication) ||
+                        text == EnrollmentGuidance.For(EnrollmentFailure.StaleCandidate) ||
+                        text == EnrollmentGuidance.For(EnrollmentFailure.Protocol)) Interlocked.Exchange(ref notice, text);
+                }; server.Start();
+                DiscoveryExclusiveBind(server);
                 byte[] slot = Discover(server); string code = server.EnrollmentCode;
                 string wrong = (code[0] == '0' ? "1" : "0") + code.Substring(1);
                 Reject(delegate { Enroll(server, slot, wrong, false); }); WaitFor(delegate { return !server.EnrollmentBusy; });
-                Check(server.EnrollmentGrantsIssued == 0 && media.Opened == 0 && sink.Events.Count == 0 && approvals == 0);
+                Check(server.EnrollmentGrantsIssued == 0 && media.Opened == 0 && sink.Events.Count == 0 && approvals == 0 && server.EnrollmentAttempts == 1);
+                Check(Interlocked.CompareExchange(ref notice, null, null) == EnrollmentGuidance.For(EnrollmentFailure.Authentication));
                 byte[] wrongSlot = (byte[])slot.Clone(); wrongSlot[0] ^= 1;
                 Reject(delegate { Enroll(server, wrongSlot, code, false); }); WaitFor(delegate { return !server.EnrollmentBusy; });
                 Check(server.EnrollmentGrantsIssued == 0 && media.Opened == 0 && approvals == 0);
+                Check(Interlocked.CompareExchange(ref notice, null, null) == EnrollmentGuidance.For(EnrollmentFailure.StaleCandidate));
+                ++enrollmentFixtures;
+                using (TcpClient malformed = new TcpClient())
+                {
+                    malformed.Connect(IPAddress.Loopback, server.EnrollmentPort); malformed.ReceiveTimeout = malformed.SendTimeout = 3000;
+                    NetworkStream stream = malformed.GetStream(); stream.Write(new byte[8], 0, 8);
+                    Packet error = EnrollmentProtocol.Read(stream, 127);
+                    Check(StrictJson.String(StrictJson.Parse(error.Payload, "code"), "code") == "protocol");
+                }
+                WaitFor(delegate { return !server.EnrollmentBusy; });
+                Check(Interlocked.CompareExchange(ref notice, null, null) == EnrollmentGuidance.For(EnrollmentFailure.Protocol));
                 Reject(delegate { Enroll(server, slot, code, true); }); WaitFor(delegate { return !server.EnrollmentBusy; });
                 Check(server.EnrollmentGrantsIssued == 0 && media.Opened == 0 && approvals == 0);
+                Check(Interlocked.CompareExchange(ref notice, null, null) == EnrollmentGuidance.For(EnrollmentFailure.Authentication));
                 string invite = Enroll(server, slot, code, false);
                 Check(server.EnrollmentGrantsIssued == 1 && media.Opened == 0 && server.EnrollmentCode == "");
                 Reject(delegate { server.GetInvitation(); });
                 string token = StrictJson.String(InvitationObject(invite), "token"); ++tlsFixtures;
-                using (TlsClient client = new TlsClient(server, server.Pin))
+                using (TlsClient client = new TlsClient(server, OfferedPin(invite)))
                 {
                     client.Send(1, Hello(token)); Check(client.ReadNonHeartbeat().Kind == 2); WaitFor(delegate { return server.IsActive; });
                     Check(media.Opened == 1 && approvals == 0);
@@ -172,7 +235,7 @@ namespace Knot.NativePreview
                 int approvals = 0; server.ApprovalRequested = delegate { ++approvals; }; server.Start();
                 string invite = Enroll(server, Discover(server), server.EnrollmentCode, false);
                 string token = StrictJson.String(InvitationObject(invite), "token"); ++tlsFixtures;
-                using (TlsClient client = new TlsClient(server, server.Pin))
+                using (TlsClient client = new TlsClient(server, OfferedPin(invite)))
                 {
                     client.Send(1, Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(token) + ",\"name\":\"different viewer\"}"));
                     Check(client.ReadNonHeartbeat().Kind == 127);
@@ -187,7 +250,7 @@ namespace Knot.NativePreview
             {
                 server.Start(); string invite = Enroll(server, Discover(server), server.EnrollmentCode, false);
                 string token = StrictJson.String(InvitationObject(invite), "token"); ++tlsFixtures;
-                using (TlsClient client = new TlsClient(server, server.Pin))
+                using (TlsClient client = new TlsClient(server, OfferedPin(invite)))
                 {
                     Interlocked.Exchange(ref now, 31L * Stopwatch.Frequency); client.Send(1, Hello(token));
                     Check(client.ReadNonHeartbeat().Kind == 127);
@@ -221,7 +284,11 @@ namespace Knot.NativePreview
             {
                 server.Start(); byte[] slot = Discover(server); string code = server.EnrollmentCode;
                 string wrong = (code[0] == '0' ? "1" : "0") + code.Substring(1);
-                for (int i = 0; i < 5; ++i) Reject(delegate { Enroll(server, slot, wrong, false); });
+                for (int i = 0; i < 5; ++i)
+                {
+                    Reject(delegate { Enroll(server, slot, wrong, false); });
+                    WaitFor(delegate { return !server.EnrollmentBusy; });
+                }
                 Check(server.WaitStopped(4000) && server.EnrollmentAttempts == 5 && server.EnrollmentGrantsIssued == 0);
                 Check(media.Opened == 0 && sink.Events.Count == 0 && server.EnrollmentCode == "");
             }
@@ -259,9 +326,53 @@ namespace Knot.NativePreview
             {
                 server.Start(); string invite = Enroll(server, Discover(server), server.EnrollmentCode, false); ++tlsFixtures;
                 Check(StrictJson.String(InvitationObject(invite), "token") != oldToken);
-                using (TlsClient client = new TlsClient(server, server.Pin))
+                using (TlsClient client = new TlsClient(server, OfferedPin(invite)))
                 { client.Send(1, Hello(oldToken)); Check(client.ReadNonHeartbeat().Kind == 127); }
                 Check(media.Opened == 0 && sink.Events.Count == 0); server.Stop(); Check(server.WaitStopped(4000));
+            }
+        }
+        private static void EnrollmentWrongSourceBeforeTls()
+        {
+            FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
+            using (HostServer server = EnrollmentHost(media, sink, Stopwatch.GetTimestamp))
+            {
+                server.Start(); string invite = Enroll(server, Discover(server), server.EnrollmentCode, false);
+                using (TcpClient unrelated = new TcpClient(new IPEndPoint(IPAddress.Parse("127.0.0.2"), 0)))
+                {
+                    unrelated.Connect(IPAddress.Loopback, server.Port); unrelated.ReceiveTimeout = 1000;
+                    bool closed = false;
+                    try { closed = unrelated.GetStream().Read(new byte[1], 0, 1) == 0; }
+                    catch (IOException error)
+                    {
+                        SocketException socket = error.InnerException as SocketException;
+                        closed = socket != null && socket.SocketErrorCode == SocketError.ConnectionReset;
+                    }
+                    Check(closed && media.Opened == 0 && sink.Events.Count == 0 && !server.IsActive);
+                }
+                ++tlsFixtures;
+                using (TlsClient legitimate = new TlsClient(server, OfferedPin(invite)))
+                {
+                    legitimate.Send(1, Hello(StrictJson.String(InvitationObject(invite), "token")));
+                    Check(legitimate.ReadNonHeartbeat().Kind == 2); WaitFor(delegate { return server.IsActive; });
+                    Check(media.Opened == 1); server.Stop(); Check(server.WaitStopped(4000));
+                }
+            }
+        }
+        private static void EnrollmentStopAfterOffer()
+        {
+            FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
+            using (HostServer server = EnrollmentHost(media, sink, Stopwatch.GetTimestamp))
+            {
+                int approvals = 0; server.ApprovalRequested = delegate { Interlocked.Increment(ref approvals); };
+                server.Start(); string invite = Enroll(server, Discover(server), server.EnrollmentCode, false);
+                string token = StrictJson.String(InvitationObject(invite), "token"), pin = OfferedPin(invite);
+                Check(server.EnrollmentGrantsIssued == 1 && media.Opened == 0 && sink.Events.Count == 0 && approvals == 0);
+                server.Stop(); Check(server.WaitStopped(4000)); ++tlsFixtures;
+                bool rejected = false;
+                try { using (TlsClient replay = new TlsClient(server, pin)) { replay.Send(1, Hello(token)); replay.ReadNonHeartbeat(); } }
+                catch (SocketException) { rejected = true; } catch (IOException) { rejected = true; }
+                catch (System.Security.Authentication.AuthenticationException) { rejected = true; } catch (ObjectDisposedException) { rejected = true; }
+                Check(rejected && !server.IsActive && server.EnrollmentCode == "" && media.Opened == 0 && sink.Events.Count == 0 && approvals == 0);
             }
         }
     }

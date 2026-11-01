@@ -66,7 +66,7 @@ namespace Knot.NativePreview
             // This dispatches only the fresh fixture's layout/paint messages.
             for (int i = 0; i < 8; ++i) Application.DoEvents();
         }
-        private static HostViewSnapshot Snapshot(HostViewPhase phase)
+        private static HostViewSnapshot Snapshot(HostViewPhase phase, bool enrollmentMode)
         {
             bool active = phase == HostViewPhase.Invitation || phase == HostViewPhase.Request ||
                 phase == HostViewPhase.Preparing || phase == HostViewPhase.Sharing || phase == HostViewPhase.Stopping;
@@ -76,12 +76,12 @@ namespace Knot.NativePreview
                 phase == HostViewPhase.Sharing ? "화면을 전송하고 있어요. 중지하면 이번 연결의 권한이 끝나요." :
                 phase == HostViewPhase.Request ? "연결할 Mac을 확인해주세요. 아직 화면과 입력은 공유되지 않았어요." :
                 phase == HostViewPhase.Preparing ? "연결을 허용했어요. Windows 화면과 인코더를 준비하고 있어요." :
-                phase == HostViewPhase.Invitation ? "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요." :
+                phase == HostViewPhase.Invitation ? (enrollmentMode ? EnrollmentGuidance.Ready : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.") :
                 "공유를 시작하면 Mac에 보낼 연결 코드가 만들어져요.";
             string pin = active && phase != HostViewPhase.Stopping ?
                 "3d72a8f1b6e940c51a23d7e4f8b06c92a5e134789f2b60d8c714eab39065f2cd" : "";
             return new HostViewSnapshot(phase, true, active, pin, named ? "작업용 MacBook" : "",
-                named ? "192.168.50.24" : "", status);
+                named ? "192.168.50.24" : "", status, !enrollmentMode, enrollmentMode);
         }
 
         [STAThread]
@@ -149,10 +149,8 @@ namespace Knot.NativePreview
                             form.StartPosition = FormStartPosition.Manual; form.Location = new Point(20, 20);
                             form.ClientSize = new Size((int)(frame.Width * frame.Scale), (int)(frame.Height * frame.Scale));
                             Progress(frame, "after-requested-size");
-                            HostViewSnapshot state = Snapshot(frame.Phase);
+                            HostViewSnapshot state = Snapshot(frame.Phase, frame.EnrollmentMode);
                             form.SetFixtureEnrollmentCode("01234567");
-                            if (frame.EnrollmentMode)
-                                state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, state.ViewerLabel, state.ObservedAddress, state.Status, false, true);
                             if (frame.StatusOverride != null || frame.ViewerLabelOverride != null)
                                 state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy, state.EnrollmentMode);
                             Progress(frame, "before-presentation"); form.SetFixturePresentation(state, frame.Help); Progress(frame, "after-presentation");
@@ -205,6 +203,8 @@ namespace Knot.NativePreview
                             if (form.StopVisible != state.RunPresent) throw new InvalidOperationException("Stop action is not lifecycle-bound.");
                             string expectedCode = frame.EnrollmentMode && frame.Phase == HostViewPhase.Invitation ? "0123 4567" : "";
                             if (form.DisplayedEnrollmentCode != expectedCode) throw new InvalidOperationException("Only the current short-code invitation is displayed.");
+                            if (frame.EnrollmentMode && frame.Phase == HostViewPhase.Invitation && form.DisplayedStatus != EnrollmentGuidance.Ready)
+                                throw new InvalidOperationException("The short-code footer must use production enrollment guidance.");
                             if (form.FixtureQualityEditable == state.RunPresent)
                                 throw new InvalidOperationException("Quality is selectable only before the sharing run.");
                             AssertFontsUsable(form);

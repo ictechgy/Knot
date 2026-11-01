@@ -148,3 +148,5 @@ the separate synthetic MFT fixture and real hardware acceptance remain distinct.
 - [Force-keyframe property type](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avencvideoforcekeyframe)
 - [Current-sample duration contract](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfsample-setsampleduration)
 - [Media sample timestamp and duration meaning](https://learn.microsoft.com/en-us/windows/win32/medfound/working-with-media-samples)
+
+Pointer-only Desktop Duplication notifications do not trigger GPU conversion/readback after the first image. The production policy checks LastPresentTime, AccumulatedFrames and TotalMetadataBufferSize; any image-update metadata still copies the image. Protected-content checks precede this optimization, and pending copies still complete. A first pointer-only notification must take an initial snapshot. This preserves the one-Hz idle encoder cadence while moving a separately reported cursor; v1 does not composite that cursor. See [Microsoft's frame-info contract](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_outdupl_frame_info).

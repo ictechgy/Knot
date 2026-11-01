@@ -173,17 +173,30 @@ namespace Knot.NativePreview
             long offset = Math.Max(0L, Math.Min((long)extent - 1, (long)physical - origin));
             return (int)((offset * 65535 + (extent - 1) / 2) / (extent - 1));
         }
+        internal static bool TryMapPointer(ushort x, ushort y, CaptureRectangle rectangle, CaptureRectangle virtualScreen, out int dx, out int dy)
+        {
+            dx = dy = 0;
+            if (rectangle.Width < 1 || rectangle.Height < 1 || virtualScreen.Width < 1 || virtualScreen.Height < 1 ||
+                rectangle.Left < virtualScreen.Left || rectangle.Top < virtualScreen.Top ||
+                (long)rectangle.Left + rectangle.Width > (long)virtualScreen.Left + virtualScreen.Width ||
+                (long)rectangle.Top + rectangle.Height > (long)virtualScreen.Top + virtualScreen.Height) return false;
+            long px = rectangle.Left + ((long)x * (rectangle.Width - 1) + 32767) / 65535;
+            long py = rectangle.Top + ((long)y * (rectangle.Height - 1) + 32767) / 65535;
+            if (px < int.MinValue || px > int.MaxValue || py < int.MinValue || py > int.MaxValue) return false;
+            dx = Normalize((int)px, virtualScreen.Left, virtualScreen.Width);
+            dy = Normalize((int)py, virtualScreen.Top, virtualScreen.Height);
+            return true;
+        }
         public bool Pointer(byte action, ushort x, ushort y, CaptureRectangle rectangle)
         {
             int virtualLeft = GetSystemMetrics(76), virtualTop = GetSystemMetrics(77);
             int virtualWidth = GetSystemMetrics(78), virtualHeight = GetSystemMetrics(79);
-            if (rectangle.Width < 1 || rectangle.Height < 1 || virtualWidth < 1 || virtualHeight < 1) return false;
-            int px = rectangle.Left + (int)(((long)x * (rectangle.Width - 1) + 32767) / 65535);
-            int py = rectangle.Top + (int)(((long)y * (rectangle.Height - 1) + 32767) / 65535);
+            int dx, dy;
+            if (action > 6 || !TryMapPointer(x, y, rectangle, new CaptureRectangle(virtualLeft, virtualTop, virtualWidth, virtualHeight), out dx, out dy)) return false;
             uint[] buttonFlags = { 0, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040 };
             Input i = new Input();
-            i.value.mouse.dx = Normalize(px, virtualLeft, virtualWidth);
-            i.value.mouse.dy = Normalize(py, virtualTop, virtualHeight);
+            i.value.mouse.dx = dx;
+            i.value.mouse.dy = dy;
             i.value.mouse.flags = 0x0001 | 0x8000 | 0x4000 | buttonFlags[action];
             return Send(i);
         }

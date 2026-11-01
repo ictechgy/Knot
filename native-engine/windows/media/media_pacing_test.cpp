@@ -28,6 +28,36 @@ bool PendingReadback() {
     return true;
 }
 
+bool PointerOnlyCadence() {
+    if (!knot::DesktopImageNeedsCopy(false, 0, 0, 0) ||
+        knot::DesktopImageNeedsCopy(true, 0, 0, 0) ||
+        !knot::DesktopImageNeedsCopy(true, 1, 0, 0) ||
+        !knot::DesktopImageNeedsCopy(true, 0, 1, 0) ||
+        !knot::DesktopImageNeedsCopy(true, 0, 0, 1)) return false;
+    knot::CapturePacer pacer(60);
+    knot::MediaTimeline timeline(60);
+    bool havePixels = false;
+    uint32_t copies = 0, submissions = 0;
+    for (uint64_t now = 0; now <= 5000000; now += 1000) {
+        pacer.Pump(now, true, havePixels, timeline.KeyframeDue(now), [&]() {
+            // Every poll is a pointer-only DXGI notification. The initial one
+            // must still snapshot pixels; later ones must not trigger readback.
+            if (!knot::DesktopImageNeedsCopy(havePixels, 0, 0, 0)) return CaptureReadiness::Unchanged;
+            ++copies; havePixels = true; return CaptureReadiness::Fresh;
+        }, [&](bool) {
+            knot::MediaTiming timing;
+            if (!timeline.Plan(now, timing)) return false;
+            timeline.Commit(timing); ++submissions; pacer.OutputObserved(); return true;
+        });
+    }
+    if (copies != 1 || submissions < 5 || submissions > 7) return false;
+    // A real desktop update after idle remains immediately eligible.
+    return pacer.Pump(5020000, true, havePixels, false, [&]() {
+        if (!knot::DesktopImageNeedsCopy(havePixels, 1, 1, 0)) return CaptureReadiness::Failed;
+        ++copies; return CaptureReadiness::Fresh;
+    }, [&](bool fresh) { ++submissions; return fresh && copies == 2; });
+}
+
 bool VideoBounds() {
     if (!knot::ValidMediaConfig({3840, 2160, 30, 40000000}) ||
         !knot::ValidMediaConfig({3840, 2160, 60, 40000000}) ||
@@ -203,7 +233,7 @@ bool StaticToActiveDuration() {
 }
 
 int main() {
-    if (!VideoBounds() || !PendingReadback() || !StartupAndBackpressure() || !PendingLiveness() || !StaticCadenceAndTimeline() ||
+    if (!VideoBounds() || !PointerOnlyCadence() || !PendingReadback() || !StartupAndBackpressure() || !PendingLiveness() || !StaticCadenceAndTimeline() ||
         !KeyframeDeadlineOverridesIdle() || !ExplicitFixtureTimeline() || !StaticToActiveDuration()) {
         std::cerr << "FAIL: production media pacing/timeline policy\n"; return 1;
     }

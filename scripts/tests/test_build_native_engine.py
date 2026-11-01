@@ -113,6 +113,7 @@ class NativeRebuildTests(unittest.TestCase):
                     visualAcceptance="manual-review-required", images=rows,
                     renderMethod="INERT lifecycle test substitute; no native UI rendered")
                 if invalid_visual == "effects": report["networkInvoked"] = True
+                elif invalid_visual == "shown-synthetic": report["syntheticWindowsShown"] = True
                 elif invalid_visual == "digest": rows[0]["sha256"] = "0" * 64
                 elif invalid_visual == "path": rows[0]["name"] = "../not-owned.png"
                 (visual_output / "visual-checks.json").write_text(json.dumps(report) + "\n")
@@ -178,6 +179,11 @@ class NativeRebuildTests(unittest.TestCase):
             native.Builder("windows", self.output)
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "SHA256SUMS").exists())
+        for name in ["NATIVE-INPUTS.json", "native-ui-visual-checks.json", "native-cpp-checks.json",
+                     "native-host-checks.json", "native-installer-metadata.json",
+                     "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
+                     "synthetic-codec.json", "synthetic-codec-4k.json"]:
+            self.assertFalse((self.output / name).exists(), name)
         self.assertTrue((self.output / "native-test-public.cer").is_file())
 
     def test_exported_public_pin_must_match_its_certificate(self):
@@ -228,3 +234,26 @@ class NativeRebuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "4K codec evidence"):
             self.build_with_inert_tools(invalid_four_k="scratch")
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+
+    def test_synthetic_windows_may_be_shown_only_by_windows_fixture(self):
+        self.build_with_inert_tools(invalid_visual="shown-synthetic")
+        report = json.loads((self.output / "native-ui-visual-checks.json").read_text())
+        self.assertTrue(report["rendererReport"]["syntheticWindowsShown"])
+
+    def test_mac_secondary_validator_rejects_a_shown_window_claim(self):
+        self.build_with_inert_tools(invalid_visual="shown-synthetic")
+        builder = native.Builder("macos", self.output)
+        report_path = self.output / "visuals/visual-checks.json"
+        report = json.loads(report_path.read_text())
+        report["images"] = []
+        for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark"]:
+            image = self.output / "visuals" / ("mac-" + state + ".png")
+            image.write_bytes(self.inert_visual_png())
+            report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,
+                                        width=640, height=480))
+        report_path.write_text(json.dumps(report))
+        with self.assertRaisesRegex(ValueError, "without production effects"):
+            builder.record_visual_checks(self.output / "visuals", [])
+        report["syntheticWindowsShown"] = False
+        report_path.write_text(json.dumps(report))
+        self.assertTrue(builder.record_visual_checks(self.output / "visuals", []).is_file())

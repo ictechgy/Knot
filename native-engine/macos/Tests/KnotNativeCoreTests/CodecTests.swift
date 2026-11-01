@@ -55,9 +55,9 @@ private nonisolated func syntheticCompressionOutput(_ context: UnsafeMutableRawP
     #expect(avcc.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: $0.baseAddress!) } == noErr)
     var cursor = 0
     while cursor < avcc.count {
-        #expect(cursor + 4 <= avcc.count)
+        try #require(cursor + 4 <= avcc.count)
         let size = Int(avcc.readBE(UInt32.self, at: cursor)); cursor += 4
-        #expect(size > 0 && cursor + size <= avcc.count)
+        try #require(size > 0 && cursor + size <= avcc.count)
         annexB.append(contentsOf: [0,0,0,1]); annexB.append(avcc.subdata(in: cursor..<(cursor+size))); cursor += size
     }
     let access = try AccessUnit(annexB: annexB)

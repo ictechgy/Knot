@@ -71,3 +71,5 @@ The protocol does not compare host/client monotonic timestamps as latency; indep
 ## License
 
 The app follows the repository GPL-3.0-only license. Corresponding source includes the exact pinned BoringSSL source and its Apache-2.0/support-code notices. It does not link the existing vendored streaming engine. OS codec capabilities and capture/input permissions remain required.
+
+When distributing the preview installers, publish the generated corresponding-source archive and its SHA256SUMS alongside them. Individual check JSON files describe only their substeps; a successful complete build also requires the matching NATIVE-BUILD.json and product hashes.

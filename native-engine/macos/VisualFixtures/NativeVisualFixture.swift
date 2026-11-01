@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Foundation
+import Darwin
 import KnotNativeCore
 
 /// Separate entry point. It never enters App.main, creates a channel, or shows a window.
@@ -8,10 +9,27 @@ import KnotNativeCore
 struct NativeVisualFixture {
     @MainActor static func main() throws {
         guard CommandLine.arguments.count == 2 else { throw FixtureError.arguments }
-        let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        let probe = CommandLine.arguments[1] == "--probe-media-adapter-rejection"
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
         let effects = FixtureEnrollmentEffects()
+        if probe {
+            let model = try makeModel("reviewed", effects: effects)
+            model.connect() // Rejecting inert factory only; never creates a socket.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            guard effects.mediaCount == 1 else { throw FixtureError.effects }
+            do { try requireInert(model: model, state: "reviewed", effects: effects) }
+            catch FixtureError.effects {
+                let result: [String: Any] = ["schema": 1, "status": "rejected", "probe": "media-adapter",
+                    "adapterInvocations": effects.mediaCount, "freshSyntheticOnly": true,
+                    "networkInvoked": false, "productionEntryInvoked": false]
+                let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self))
+                Darwin.exit(3)
+            }
+            throw FixtureError.effects
+        }
+        let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let cases: [(String, String, Int, Int, Bool)] = [
             ("idle", "idle", 1200, 760, false),
             ("reviewed", "reviewed", 1200, 760, false),
@@ -41,7 +59,7 @@ struct NativeVisualFixture {
         ]
         var images: [[String: Any]] = []
         for (name, state, width, height, dark) in cases {
-            let model = try makeModel(state)
+            let model = try makeModel(state, effects: effects)
             let enrollment = try makeEnrollment(state, effects: effects)
             let immersive = name.hasPrefix("fullscreen")
             let revealed = name.hasSuffix("controls")
@@ -84,6 +102,7 @@ struct NativeVisualFixture {
                 stablePresenter = model.surface.map { ObjectIdentifier($0) == identity } == true
             }
 
+            try requireInert(model: model, state: state, effects: effects)
             guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { throw FixtureError.bitmap }
@@ -94,21 +113,23 @@ struct NativeVisualFixture {
             try png.write(to: output.appendingPathComponent(file), options: .atomic)
             images.append(["name": file, "width": width, "height": height, "state": state, "dark": dark,
                 "immersiveFullscreen": immersive, "controlsRevealed": revealed,
+                "expectedPhase": String(describing: expectedPhase(state)), "observedPhase": String(describing: model.phase),
                 "desktopFrame": frameDictionary(model: model, root: view),
                 "presenterTransitionChecks": name == "streaming" ? 3 : 0,
                 "stablePresenterAcrossFullscreen": stablePresenter.map { $0 as Any } ?? NSNull()])
             window.close()
             print("Rendered " + file)
         }
-        guard effects.count == 0 else { throw FixtureError.effects }
+        guard effects.count == 0, effects.mediaCount == 0 else { throw FixtureError.effects }
         let result: [String: Any] = [
             "schema": 1, "renderMethod": "offscreen NSHostingView cacheDisplay into owned bitmap; no shown window or screen capture",
             "controlActiveState": "key, explicit synthetic view environment",
             "syntheticWindowsShown": false, "existingUserUIRead": false,
-            "productionEntryInvoked": false, "networkInvoked": false,
+            "productionEntryInvoked": false, "networkInvoked": effects.count + effects.mediaCount > 0,
             "clipboardInvoked": false, "certificateCreationInvoked": false,
             "captureInvoked": false, "actualInputInvoked": false, "screenCaptureInvoked": false,
-            "freshSyntheticOnly": true, "enrollmentAdaptersInvoked": effects.count, "images": images
+            "freshSyntheticOnly": true, "enrollmentAdaptersInvoked": effects.count,
+            "mediaAdaptersInvoked": effects.mediaCount, "modelPhaseChecks": images.count, "images": images
         ]
         try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
             .write(to: output.appendingPathComponent("render-result.json"), options: .atomic)
@@ -145,7 +166,7 @@ struct NativeVisualFixture {
         let values = state == "nearby" ? [first, second] : ["number", "number-working", "number-error"].contains(state) ? [first] : []
         let phase: EnrollmentModel.Phase = state == "number-working" ? .authenticating : state == "number-error" ? .failed : .idle
         let status = state == "number-working" ? "8자리 번호를 확인하고 연결 정보를 안전하게 받고 있어요…" :
-            state == "number-error" ? "8자리 번호를 확인해주세요. 번호가 바뀌었다면 Windows에서 공유를 다시 시작하세요." :
+            state == "number-error" ? EnrollmentModel.authenticationGuidance :
             values.isEmpty ? nil : "Windows에 표시된 8자리 번호를 입력하세요. 기기 이름과 주소는 아직 인증되지 않았어요."
         let model = EnrollmentModel(makeDiscovery: { effects.mark(); return FixtureEmptyDiscovery() },
             makeClient: { _, _ in effects.mark(); throw EnrollmentFailure.cancelled },
@@ -155,8 +176,22 @@ struct NativeVisualFixture {
         return model
     }
 
-    @MainActor private static func makeModel(_ state: String) throws -> SessionModel {
-        let model = SessionModel(makeChannel: { _ in throw NativeFailure.state })
+    @MainActor private static func requireInert(model: SessionModel, state: String, effects: FixtureEnrollmentEffects) throws {
+        guard effects.count == 0, effects.mediaCount == 0 else { throw FixtureError.effects }
+        guard model.phase == expectedPhase(state) else { throw FixtureError.phase }
+    }
+    @MainActor private static func expectedPhase(_ state: String) -> SessionModel.Phase {
+        switch state {
+        case "connecting": .connecting
+        case "approval": .approval
+        case "decoding": .decoding
+        case "streaming", "input-paused", "display-behind": .streaming
+        case "failed": .failed
+        default: .idle
+        }
+    }
+    @MainActor private static func makeModel(_ state: String, effects: FixtureEnrollmentEffects) throws -> SessionModel {
+        let model = SessionModel(makeChannel: { _ in effects.markMedia(); throw NativeFailure.state })
         model.viewerLabel = "나의 Mac"
         switch state {
         case "reviewed", "invalid-name":
@@ -193,13 +228,16 @@ struct NativeVisualFixture {
     }
 }
 
-enum FixtureError: Error { case arguments, bitmap, presenter, effects, geometry(CGRect, CGSize) }
+enum FixtureError: Error { case arguments, bitmap, presenter, effects, phase, geometry(CGRect, CGSize) }
 
 private final class FixtureEnrollmentEffects: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
+    private var media = 0
     func mark() { lock.lock(); value += 1; lock.unlock() }
+    func markMedia() { lock.lock(); media += 1; lock.unlock() }
     var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+    var mediaCount: Int { lock.lock(); defer { lock.unlock() }; return media }
 }
 private final class FixtureEmptyDiscovery: EnrollmentDiscovering, @unchecked Sendable {
     func discover(address: String?) async throws -> [EnrollmentCandidate] { [] }

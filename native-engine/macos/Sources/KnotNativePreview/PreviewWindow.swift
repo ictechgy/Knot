@@ -318,7 +318,7 @@ struct PreviewWindow: View {
             Image(systemName: "exclamationmark.triangle").font(.system(size: 18)).foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 7) {
                 Text("연결을 확인해 주세요").font(.system(size: 14, weight: .semibold))
-                Text(NativeCopy.status(model.status)).font(.system(size: 13)).foregroundStyle(.secondary)
+                Text(NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod)).font(.system(size: 13)).foregroundStyle(.secondary)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
         }.frame(maxWidth: .infinity, alignment: .leading).padding(18).nativePanel()
@@ -366,7 +366,7 @@ struct PreviewWindow: View {
                         VStack(spacing: 16) {
                             ProgressView().controlSize(.regular)
                             Text(phaseTitle).font(.system(size: 18, weight: .semibold))
-                            Text(NativeCopy.status(model.status)).font(.system(size: 13)).foregroundStyle(.secondary)
+                            Text(NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod)).font(.system(size: 13)).foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center).frame(maxWidth: 380)
                         }.padding(28).frame(maxWidth: 460).nativePanel().padding(24).allowsHitTesting(false)
                     }
@@ -435,7 +435,7 @@ struct PreviewWindow: View {
                 .onChange(of: model.textMode) { _, _ in model.releaseInput() }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
-                Text(NativeCopy.status(model.status)).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod)).font(.system(size: 12)).foregroundStyle(.secondary)
                     .lineLimit(2).textSelection(.enabled)
                 Text("화면 클릭으로 입력 · Control + 방향키로 Mac 공간 이동")
                     .font(.system(size: 11)).foregroundStyle(.secondary)

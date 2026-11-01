@@ -59,6 +59,46 @@ import Testing
     #expect(state.desired(flags: [.shift, .option], textMode: false) == [56, 58])
 }
 
+@Test func ownedArrowRepeatsStayRemoteWhenControlIsPressedLater() {
+    for textMode in [true, false] {
+        var keys = PhysicalKeyOwnership()
+        keys.press(124)
+        #expect(MacKeyboardRouting.route(keyCode: 124, modifiers: [.control], textMode: textMode,
+            hasMarkedText: false, ownsPhysicalDown: keys.owns(124)) == .physical)
+        let released = keys.release(124)
+        #expect(released && keys.count == 0)
+        #expect(MacKeyboardRouting.route(keyCode: 124, modifiers: [.control], textMode: textMode,
+            hasMarkedText: false, ownsPhysicalDown: keys.owns(124)) == .localSpace)
+    }
+}
+
+@Test func commandKeyUpCompensationIsScopedOwnedNonmodifierAndExactlyOnce() {
+    var keys = PhysicalKeyOwnership()
+    keys.press(55); keys.press(15) // Win/Command + R forwarded by this presenter.
+    for (focused, sameWindow, flags): (Bool, Bool, KeyboardModifiers) in [
+        (false, true, .command), (true, false, .command), (true, true, [])
+    ] {
+        #expect(!MacKeyboardRouting.compensatesCommandKeyUp(keyCode: 15, modifiers: flags,
+            ownsPhysicalDown: keys.owns(15), focused: focused, sameWindow: sameWindow))
+    }
+    for code: UInt16 in [55, 57, 300] {
+        #expect(!MacKeyboardRouting.compensatesCommandKeyUp(keyCode: code, modifiers: .command,
+            ownsPhysicalDown: true, focused: true, sameWindow: true))
+    }
+    #expect(MacKeyboardRouting.compensatesCommandKeyUp(keyCode: 15, modifiers: .command,
+        ownsPhysicalDown: keys.owns(15), focused: true, sameWindow: true))
+    let rUp = keys.release(15)
+    #expect(rUp && keys.count == 1 && keys.owns(55))
+    #expect(!MacKeyboardRouting.compensatesCommandKeyUp(keyCode: 15, modifiers: .command,
+        ownsPhysicalDown: keys.owns(15), focused: true, sameWindow: true))
+    let duplicateUp = keys.release(15), commandUp = keys.release(55)
+    #expect(!duplicateUp && commandUp && keys.count == 0)
+    var modifiers = KeyboardModifierState()
+    modifiers.observe(keyCode: 55, flags: .command)
+    modifiers.observe(keyCode: 55, flags: [])
+    #expect(modifiers.desired(flags: .shift, textMode: true).isEmpty)
+}
+
 @Test func bothModifierSidesAndMissingFlagsEventsRemainBalanced() {
     var state = KeyboardModifierState()
     state.observe(keyCode: 56, flags: .shift)

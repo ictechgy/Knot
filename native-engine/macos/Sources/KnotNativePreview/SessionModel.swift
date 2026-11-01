@@ -6,6 +6,7 @@ import KnotNativeCore
 @MainActor
 final class SessionModel: ObservableObject {
     enum Phase: Equatable { case idle, connecting, approval, decoding, streaming, failed }
+    enum ReconnectMethod: Equatable { case number, invitation }
     @Published var phase: Phase = .idle
     @Published var status = "Paste a fresh invitation, review its target and certificate, then connect."
     @Published var invitation: Invitation?
@@ -14,6 +15,8 @@ final class SessionModel: ObservableObject {
     @Published var textMode = true
     @Published var showFullscreenControls = false
     @Published private(set) var numberAuthorized = false
+    // Presentation guidance survives revocation; it is never authorization.
+    private(set) var reconnectMethod: ReconnectMethod = .number
     @Published var viewerLabel = "My Mac"
     weak var surface: (any NativePresenter)? {
         didSet {
@@ -46,19 +49,21 @@ final class SessionModel: ObservableObject {
 
     func review(_ secret: String) {
         guard !active else { return }
+        reconnectMethod = .invitation
         numberAuthorized = false
         do { invitation = try Invitation(secret); phase = .idle; status = "Review the private address and exact certificate pin below. Trust lasts for this connection only." }
         catch { invitation = nil; phase = .failed; status = "Invalid invitation. Ask the host to create a fresh native invitation." }
     }
     func connect() {
         guard !active else { return }
+        reconnectMethod = .invitation
         numberAuthorized = false
         startConnection()
     }
     func connectAuthenticated(_ enrollment: AuthenticatedEnrollment) {
         guard !active else { return }
         guard ContinuousClock.now < enrollment.expiresAt, Invitation.validViewerLabel(enrollment.viewerName) else {
-            fail("Invitation was rejected or expired. Create a new invitation."); return
+            close(message: "Invitation was rejected or expired. Create a new invitation.", failed: true, numberConnection: true); return
         }
         invitation = enrollment.offer.invitation
         viewerLabel = enrollment.viewerName
@@ -131,13 +136,14 @@ final class SessionModel: ObservableObject {
         guard [.decoding, .streaming].contains(phase) else { return }
         switch surface?.display(image) ?? .backpressure {
         case .presented:
+            let statusChanged = phase != .streaming || displayBehind
             presentationBackpressureSince = nil; displayBehind = false
-            phase = .streaming
-            updateStreamingStatus()
+            if phase != .streaming { phase = .streaming }
+            if statusChanged { updateStreamingStatus() }
         case .backpressure:
             let began = presentationBackpressureSince ?? now
             presentationBackpressureSince = began
-            if phase == .streaming, now - began >= .seconds(2) {
+            if phase == .streaming, !displayBehind, now - began >= .seconds(2) {
                 displayBehind = true; updateStreamingStatus()
             }
         case .failed: presentationFailed()
@@ -145,7 +151,8 @@ final class SessionModel: ObservableObject {
     }
     private func updateStreamingStatus() {
         let reception = displayBehind ? "Display is behind; still receiving decoded images." : "Receiving the host desktop."
-        status = reception + (inputRecovery ? " Input paused; click the desktop to resume." : " Temporary trust; no saved pairing.")
+        let value = reception + (inputRecovery ? " Input paused; click the desktop to resume." : " Temporary trust; no saved pairing.")
+        if status != value { status = value }
     }
     private func presentationFailed() {
         guard [.decoding, .streaming].contains(phase) else { return }
@@ -245,7 +252,9 @@ final class SessionModel: ObservableObject {
     }
     func disconnect() { close(message: "Disconnected. Reconnect with a fresh invitation.", failed: false) }
     private func fail(_ message: String) { close(message: message, failed: true) }
-    private func close(message: String, failed: Bool) {
+    private func close(message: String, failed: Bool, numberConnection: Bool? = nil) {
+        if let numberConnection { reconnectMethod = numberConnection ? .number : .invitation }
+        else if active { reconnectMethod = numberAuthorized ? .number : .invitation }
         identity = UUID(); inputEpoch &+= 1
         input = InputBuffer()
         ticker?.cancel(); reader?.cancel(); writer?.cancel()

@@ -42,7 +42,7 @@ namespace Knot.NativePreview
             sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             try
             {
-                receiver.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                receiver.ExclusiveAddressUse = true;
                 receiver.ReceiveTimeout = 250;
                 receiver.Bind(new IPEndPoint(syntheticLoopback ? address : IPAddress.Any, discoveryPort));
                 sender.Bind(new IPEndPoint(address, 0)); sender.SendTimeout = 250;

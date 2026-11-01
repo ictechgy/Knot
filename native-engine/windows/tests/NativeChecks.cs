@@ -84,6 +84,18 @@ namespace Knot.NativePreview
             Reject(delegate { MediaInfo invalid = valid; invalid.DesktopWidth = 1920; invalid.Ready(); });
             sharp.Width = 16;
             Check(MediaQualityProfile.Sharp4K.Config.Width == 3840);
+            MediaInfo compatibilityInfo = valid; compatibilityInfo.Width = 1920; compatibilityInfo.Height = 1080;
+            compatibilityInfo.Fps = compatibility.Fps; compatibilityInfo.Bitrate = compatibility.Bitrate;
+            compatibilityInfo.ValidateProfile(compatibility); Check(true);
+            Reject(delegate { valid.ValidateProfile(compatibility); });
+            MediaInfo wrongFps = compatibilityInfo; wrongFps.Fps = 30;
+            Reject(delegate { wrongFps.ValidateProfile(compatibility); });
+            MediaInfo wrongBitrate = compatibilityInfo; wrongBitrate.Bitrate = 40000000;
+            Reject(delegate { wrongBitrate.ValidateProfile(compatibility); });
+            MediaInfo wrongAspect = compatibilityInfo; wrongAspect.Width = 1800;
+            Reject(delegate { wrongAspect.ValidateProfile(compatibility); });
+            MediaInfo rounded = compatibilityInfo; rounded.DesktopWidth = 3440; rounded.DesktopHeight = 1440;
+            rounded.Height = 802; rounded.ValidateProfile(compatibility); Check(true);
         }
         private static void ProtocolChecks()
         {
@@ -262,8 +274,31 @@ namespace Knot.NativePreview
             Reject(delegate { validation.Accept(Key(1, 129)); }); validation.Close();
             Check(WindowsInputSink.Normalize(-1920, -1920, 3840) == 0);
             Check(WindowsInputSink.Normalize(1919, -1920, 3840) == 65535);
+            PointerGeometryChecks();
             ReleaseFailureChecks();
             ReleaseRetryExhaustionChecks();
+        }
+        private static void PointerGeometryChecks()
+        {
+            int dx, dy;
+            CaptureRectangle fourK = new CaptureRectangle(0, 0, 3840, 2160);
+            Check(!WindowsInputSink.TryMapPointer(32768, 32768, fourK, new CaptureRectangle(0, 0, 2560, 1440), out dx, out dy));
+            Check(WindowsInputSink.TryMapPointer(0, 0, fourK, fourK, out dx, out dy) && dx == 0 && dy == 0);
+            Check(WindowsInputSink.TryMapPointer(65535, 65535, fourK, fourK, out dx, out dy) && dx == 65535 && dy == 65535);
+            Check(!WindowsInputSink.TryMapPointer(0, 0, new CaptureRectangle(-1, 0, 3840, 2160), fourK, out dx, out dy));
+            Check(!WindowsInputSink.TryMapPointer(0, 0, fourK, new CaptureRectangle(0, 0, 0, 2160), out dx, out dy));
+            CaptureRectangle secondary = new CaptureRectangle(-1920, -100, 1920, 1080);
+            CaptureRectangle all = new CaptureRectangle(-1920, -100, 5760, 2260);
+            foreach (ushort x in new ushort[] { 0, 32768, 65535 })
+                foreach (ushort y in new ushort[] { 0, 32768, 65535 })
+                {
+                    Check(WindowsInputSink.TryMapPointer(x, y, secondary, all, out dx, out dy));
+                    long roundX = all.Left + ((long)dx * (all.Width - 1) + 32767) / 65535;
+                    long roundY = all.Top + ((long)dy * (all.Height - 1) + 32767) / 65535;
+                    long expectedX = secondary.Left + ((long)x * (secondary.Width - 1) + 32767) / 65535;
+                    long expectedY = secondary.Top + ((long)y * (secondary.Height - 1) + 32767) / 65535;
+                    Check(Math.Abs(roundX - expectedX) <= 1 && Math.Abs(roundY - expectedY) <= 1);
+                }
         }
         private static void ReleaseFailureChecks()
         {

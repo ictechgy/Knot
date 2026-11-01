@@ -55,17 +55,17 @@ def main():
     source_manifest = {p.relative_to(ROOT).as_posix(): digest(p) for p in inputs}
     records = []
 
-    def run(label, argv, timeout=240):
+    def run(label, argv, timeout=240, expected_exit=0):
         result = subprocess.run(list(map(str, argv)), cwd=ROOT, capture_output=True, timeout=timeout)
         (output / (label + ".stdout")).write_bytes(result.stdout)
         (output / (label + ".stderr")).write_bytes(result.stderr)
         records.append({"label": label, "argv": list(map(str, argv)), "cwd": str(ROOT),
-                        "exitCode": result.returncode,
+                        "exitCode": result.returncode, "expectedExitCode": expected_exit,
                         "stdoutSHA256": hashlib.sha256(result.stdout).hexdigest(),
                         "stderrSHA256": hashlib.sha256(result.stderr).hexdigest()})
         (output / "invocations.json").write_text(json.dumps(records, indent=2) + "\n")
-        if result.returncode:
-            raise SystemExit(result.stderr.decode(errors="replace"))
+        if result.returncode != expected_exit:
+            raise SystemExit("Unexpected fixture exit for " + label + ": " + result.stderr.decode(errors="replace"))
         print(label + ": passed", flush=True)
         return result.stdout
 
@@ -91,6 +91,13 @@ def main():
         ui = [p for p in sorted((ROOT / "native-engine/macos/Sources/KnotNativePreview").glob("*.swift")) if p.name != "App.swift"]
         run("compile-visual-ui", ["/usr/bin/swiftc", "-parse-as-library", "-module-name", "KnotNativeVisualFixture",
             *common, "-I", fresh, fresh / "libKnotNativeCore.a", *libraries, "-lc++", *ui, fixture, "-o", executable])
+        probe = json.loads(run("reject-media-adapter-probe", [executable, "--probe-media-adapter-rejection"],
+                               timeout=30, expected_exit=3))
+        if (probe.get("schema") != 1 or probe.get("status") != "rejected" or probe.get("probe") != "media-adapter" or
+                type(probe.get("adapterInvocations")) is not int or probe["adapterInvocations"] != 1 or
+                probe.get("freshSyntheticOnly") is not True or probe.get("networkInvoked") is not False or
+                probe.get("productionEntryInvoked") is not False):
+            raise SystemExit("Inert media-adapter negative probe did not prove its expected rejection")
         run("render-offscreen-ui", [executable, output], timeout=120)
 
     rendered = json.loads((output / "render-result.json").read_text())
@@ -98,7 +105,13 @@ def main():
                "captureInvoked", "actualInputInvoked", "screenCaptureInvoked", "syntheticWindowsShown", "existingUserUIRead"]
     if rendered.get("freshSyntheticOnly") is not True or any(rendered.get(key) is not False for key in effects):
         raise SystemExit("Visual fixture effect contract failed")
+    if (type(rendered.get("mediaAdaptersInvoked")) is not int or rendered["mediaAdaptersInvoked"] != 0 or
+            type(rendered.get("modelPhaseChecks")) is not int or rendered["modelPhaseChecks"] != len(rendered["images"])):
+        raise SystemExit("Visual fixture did not measure adapter attempts and intended model phases")
     for row in rendered["images"]:
+        if (not isinstance(row.get("expectedPhase"), str) or not row["expectedPhase"] or
+                row.get("observedPhase") != row["expectedPhase"]):
+            raise SystemExit("Visual fixture changed the intended model phase")
         path = output / row["name"]
         data = path.read_bytes()
         if data[:8] != b"\x89PNG\r\n\x1a\n" or struct.unpack(">II", data[16:24]) != (row["width"], row["height"]) or len(data) < 10_000:

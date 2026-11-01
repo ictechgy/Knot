@@ -12,7 +12,10 @@ enum NativeCopy {
         case .failed: "연결 확인 필요"
         }
     }
-    static func status(_ source: String) -> String {
+    static func status(_ source: String, reconnectMethod: SessionModel.ReconnectMethod = .invitation) -> String {
+        if reconnectMethod == .number, let reason = numberReconnectReasons[source] {
+            return reason + " Windows에서 공유를 다시 시작하고 새 8자리 번호로 연결하세요."
+        }
         if let copy = statuses[source] { return copy }
         if source.hasPrefix("Display is behind; still receiving decoded images.") {
             return source.contains("Input paused") ? "화면 표시가 지연되고 있어요. 입력을 다시 시작하려면 화면을 클릭하세요." : "화면은 수신 중이지만 표시가 지연되고 있어요."
@@ -24,6 +27,20 @@ enum NativeCopy {
         // translation never becomes an authentication or readiness predicate.
         return source
     }
+    private static let numberReconnectReasons: [String: String] = [
+        "The native decoder stopped. Create a new invitation to reconnect.": "영상 처리가 중단됐어요.",
+        "The native display stopped. Create a new invitation to reconnect.": "화면 표시가 중단됐어요.",
+        "Connection ended or validation failed. Ask the host for a new invitation.": "연결이 끝났거나 확인에 실패했어요.",
+        "Invitation was rejected or expired. Create a new invitation.": "연결 번호가 만료됐거나 연결을 확인하지 못했어요.",
+        "The host declined the request. Create a new invitation to try again.": "Windows에서 연결을 종료했어요.",
+        "The host stopped accepting input. Create a new invitation.": "입력을 안전하게 처리할 수 없어 연결을 중단했어요.",
+        "The connection timed out. Create a new invitation.": "연결 대기 시간이 지났어요.",
+        "The host closed the connection. Create a new invitation to reconnect.": "Windows에서 연결을 종료했어요.",
+        "The peer or host approval timed out. Create a new invitation.": "Windows의 응답을 기다리는 시간이 지났어요.",
+        "The first decoded image did not arrive. Create a new invitation.": "첫 화면이 도착하지 않았어요.",
+        "Input transport stopped. Create a new invitation to reconnect.": "입력 연결이 중단됐어요.",
+        "Disconnected. Reconnect with a fresh invitation.": "연결을 종료했어요."
+    ]
     private static let statuses: [String: String] = [
         "Paste a fresh invitation, review its target and certificate, then connect.": "Windows에서 새 연결 코드를 복사해 주세요.",
         "Review the private address and exact certificate pin below. Trust lasts for this connection only.": "Windows에 표시된 인증서 지문과 같은지 확인한 뒤 연결하세요.",

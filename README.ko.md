@@ -140,4 +140,4 @@ Mac 엔진은 [Glimmer](https://github.com/Se7enbrc/glimmer)를 기반으로 하
 
 ## 자체 엔진 실험
 
-[별도 자체 엔진 실험판](native-engine/START-HERE.ko.md)은 Sunshine·Moonlight·Glimmer 없이 OS캡처·하드웨어H264·TLS·VideoToolbox를 사용하는 Windows호스트/Mac뷰어입니다. 일회용 초대와 명시적 승인을 사용하며 기존 앱과 분리됩니다. 지원 범위와 실제기기 검증 제한은 안내를 확인하세요.
+[별도 자체 엔진 실험판](native-engine/START-HERE.ko.md)은 Sunshine·Moonlight·Glimmer 없이 OS캡처·하드웨어H264·TLS·VideoToolbox를 사용하는 Windows호스트/Mac뷰어입니다. Windows에서 공유를 시작한 뒤 Mac에서 PC를 찾아 8자리 번호로 이번 연결만 허용합니다. 고급 긴 연결코드 방식에는 별도 승인이 유지되며 기존 앱과 분리됩니다. 지원 범위와 실제기기 검증 제한은 안내를 확인하세요.

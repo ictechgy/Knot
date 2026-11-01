@@ -78,7 +78,7 @@ namespace Knot.NativePreview
                     string name = deviceName ?? Environment.MachineName;
                     try { EnrollmentProtocol.ValidName(name); } catch (ProtocolException) { name = "Windows PC"; }
                     enrollment = new EnrollmentServer(address, name, syntheticLoopback, this.clock,
-                        IssueEnrollmentGrant, delegate { Notify("연결번호가 만료됐거나 사용할 수 없어요. 새 번호로 다시 공유해주세요."); Stop(); }, Notify);
+                        IssueEnrollmentGrant, delegate(EnrollmentFailure failure) { Notify(EnrollmentGuidance.For(failure)); Stop(); }, Notify);
                 }
             }
             catch { try { listener.Stop(); } catch { } certificate.Dispose(); throw; }
@@ -154,7 +154,7 @@ namespace Knot.NativePreview
             Timer watchdog = null;
             try
             {
-                Notify(enrollmentMode ? "Mac에서 이 PC를 선택하고 8자리 연결번호를 입력해주세요. 이 번호로 한 번의 화면·입력 연결을 허용해요." : "Invitation ready. Expires in 120 seconds. Waiting for a viewer.");
+                Notify(enrollmentMode ? EnrollmentGuidance.Ready : "Invitation ready. Expires in 120 seconds. Waiting for a viewer.");
                 while (!Stopping)
                 {
                     if (CredentialsExpired) throw new ProtocolException("expired");
@@ -162,6 +162,7 @@ namespace Knot.NativePreview
                     TcpClient accepted = listener.AcceptTcpClient();
                     IPAddress remote = ((IPEndPoint)accepted.Client.RemoteEndPoint).Address;
                     if (!NativeProtocol.IsPrivate(remote) && !(syntheticLoopback && IPAddress.IsLoopback(remote))) { accepted.Close(); continue; }
+                    if (!MayAttemptClaim(remote)) { accepted.Close(); continue; }
                     if (!TryClaim(accepted, remote)) continue;
                     SslStream tls = stream;
                     // A claim consumes this run's invitation even if approval is denied.
@@ -246,6 +247,15 @@ namespace Knot.NativePreview
                         Action finished = Finished; if (finished != null) finished();
                     }
                 }
+            }
+        }
+        private bool MayAttemptClaim(IPAddress observedRemote)
+        {
+            lock (gate)
+            {
+                // Only the source which authenticated enrollment can use its
+                // short T2 window. Other private peers receive no TLS work.
+                return !isStopped && (!enrollmentMode || enrollmentInvitation != null && observedRemote.Equals(enrollmentPeer));
             }
         }
         private void WaitForApproval(SslStream tls)

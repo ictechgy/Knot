@@ -8,6 +8,9 @@
 - Default ordinary typing to the Mac input method. Keep Caps Lock local, physical shortcuts/navigation and matching key-ups intact, cancel revoked composition and reject late commits.
 - Use private-LAN discovery and an eight-digit120second PAKE slot for normal enrollment. Directional authenticated encryption transfers a fresh one-use30second media grant; media still uses a separate full-pin OS TLS connection. Windows Share explicitly authorizes one code holder. Legacy mode is a separate approval-required run.
 - Build one pinned BoringSSL revision behind an owned ABI on both platforms, preserve complete source/license provenance and run upstream plus owned crypto checks. No runtime download, saved pairing or automatic reconnect is claimed.
+- Avoid repeated SwiftUI publication for unchanged streaming state and skip redundant GPU readback for pointer-only desktop updates after the first image. Validate every decoded image's actual dimensions before presentation.
+- Preflight the Windows pairing component before showing a number, keep setup/schema/stale-candidate guidance distinct from authentication failures, reject wrong-source T2 connections before TLS, and validate input geometry and selected media profiles.
+- Preserve Command-modified owned key releases, keep owned arrow repeats routed remotely, measure fixture adapter attempts/model phases, and require Windows codec/certificate fixtures in CI.
 - Advance numeric PE version to0.1.0.5 and Mac bundle revision to5. Build/synthetic acceptance remains separate from actual device and trusted-signing acceptance.
 
 ## 0.1.0-native.4

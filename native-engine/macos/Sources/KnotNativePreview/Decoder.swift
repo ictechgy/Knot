@@ -9,7 +9,7 @@ final class NativeDecoder {
     private var session: VTDecompressionSession?
     private var format: CMVideoFormatDescription?
     private var sps: [Data] = [], pps: [Data] = []
-    private var dimensions: (Int, Int)
+    private let dimensions: (Int, Int)
     private var waitingForIDR = true
     private var generation: UInt64 = 0
     private let admission = DecodeAdmission()
@@ -68,8 +68,9 @@ final class NativeDecoder {
             let transferred = image.map { PixelTransfer(buffer: $0) }
             Task { @MainActor [weak self] in
                 guard let self, self.generation == expectedGeneration else { admission.release(ticket); return }
-                DecodeDelivery.finish(ticket: ticket, admission: admission, status: status, frameDropped: flags.contains(.frameDropped), hasImage: transferred != nil,
-                    onImage: { if let transferred { self.onImage?(transferred.buffer) } }, onFailure: { self.onFailure?() })
+                DecodeDelivery.finish(ticket: ticket, admission: admission, status: status, frameDropped: flags.contains(.frameDropped),
+                    image: transferred?.buffer, width: self.dimensions.0, height: self.dimensions.1,
+                    onImage: { self.onImage?($0) }, onFailure: { self.onFailure?() })
             }
         }
         guard status == noErr else { throw NativeFailure.decoder }

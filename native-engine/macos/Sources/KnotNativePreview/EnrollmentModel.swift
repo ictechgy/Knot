@@ -5,6 +5,7 @@ import KnotNativeCore
 @MainActor
 final class EnrollmentModel: ObservableObject {
     enum Phase: Equatable { case idle, discovering, authenticating, failed }
+    static let authenticationGuidance = "8자리 번호를 확인하거나 주변 PC를 다시 찾아 선택해주세요. 번호가 바뀌었거나 여러 번 실패했다면 Windows에서 공유를 다시 시작하세요."
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var candidates: [EnrollmentCandidate] = []
     @Published private(set) var selectedID: String?
@@ -52,7 +53,7 @@ final class EnrollmentModel: ObservableObject {
                     "연결할 PC를 선택하고 Windows에 표시된 8자리 번호를 입력하세요."
             } catch {
                 guard let self, self.generation == id, !Task.isCancelled else { return }
-                self.fail(error as? EnrollmentFailure ?? .transport)
+                self.fail(Self.failure(error))
             }
         }
         return task
@@ -87,12 +88,23 @@ final class EnrollmentModel: ObservableObject {
                     authenticated(result)
                 } catch {
                     guard let self, self.generation == id, !Task.isCancelled else { return }
-                    let failure = error as? EnrollmentFailure ?? .transport
+                    let failure = Self.failure(error)
                     self.fail(failure, keepCandidates: failure == .authentication || failure == .invalidCode)
                 }
             }
-        } catch { fail(error as? EnrollmentFailure ?? .authentication); return nil }
+        } catch { fail(Self.failure(error)); return nil }
         return task
+    }
+    private static func failure(_ error: any Error) -> EnrollmentFailure {
+        if let failure = error as? EnrollmentFailure { return failure }
+        if let failure = error as? NativeFailure {
+            switch failure {
+            case .transport: return .transport
+            default: return .invalidMessage
+            }
+        }
+        if error is CancellationError { return .cancelled }
+        return .transport
     }
     func cancel() {
         generation = UUID(); task?.cancel(); task = nil
@@ -105,7 +117,7 @@ final class EnrollmentModel: ObservableObject {
         cancel(); candidates = saved; selectedID = selected; phase = .failed
         switch error {
         case .invalidCode, .authentication:
-            status = "8자리 번호를 확인해주세요. 여러 번 실패했거나 번호가 바뀌었다면 Windows에서 공유를 다시 시작하세요."
+            status = Self.authenticationGuidance
         case .invalidTarget:
             status = "개인 LAN 또는 Tailscale IPv4 주소를 입력해주세요. 인터넷 주소나 웹 링크는 사용할 수 없어요."
         case .expired: status = "연결 번호가 만료됐어요. Windows에서 공유를 다시 시작하고 PC를 다시 찾아주세요."

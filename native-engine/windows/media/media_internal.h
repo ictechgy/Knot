@@ -116,7 +116,7 @@ private:
     ComPtr<ID3D11VideoProcessorOutputView> outputView_;
     DXGI_OUTPUT_DESC display_{};
     uint32_t width_ = 0, height_ = 0;
-    bool copyPending_ = false;
+    bool copyPending_ = false, haveImage_ = false;
     uint64_t pendingTimestamp_ = 0;
 };
 } // namespace knot

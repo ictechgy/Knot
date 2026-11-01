@@ -154,4 +154,4 @@ The Mac engine builds on [Glimmer](https://github.com/Se7enbrc/glimmer); Sunshin
 
 ## Independent native engine experiment
 
-The separate [Knot Native Preview](native-engine/README.md) is an experimental Windows11Home host /AppleSiliconMac viewer built with OS capture, hardwareH264, TLS and VideoToolbox APIs. It has no Sunshine/Moonlight/Glimmer runtime dependency. Temporary invitation approval, build scope and device acceptance limits are explicit; the existing product remains unchanged.
+The separate [Knot Native Preview](native-engine/README.md) is an experimental Windows11Home host /AppleSiliconMac viewer built with OS capture, hardwareH264, TLS and VideoToolbox APIs. It has no Sunshine/Moonlight/Glimmer runtime dependency. Windows starts sharing with a temporary eight-digit number; the Mac finds the PC and uses that number to authenticate a fresh pinned connection. The legacy long-invitation path retains a separate approval. Build scope and device acceptance limits are explicit; the existing product remains unchanged.

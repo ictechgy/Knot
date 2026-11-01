@@ -177,6 +177,8 @@ DesktopCapture::Result DesktopCapture::Read(std::vector<uint8_t>& nv12, uint64_t
         if (FAILED(hr)) return failure(hr);
         acquired.Acquired();
         if (frame.ProtectedContentMaskedOut) return failure(E_ACCESSDENIED);
+        if (!DesktopImageNeedsCopy(haveImage_, frame.LastPresentTime.QuadPart,
+            frame.AccumulatedFrames, frame.TotalMetadataBufferSize)) return {S_OK, CaptureReadiness::Unchanged};
         ComPtr<ID3D11Texture2D> texture;
         hr = resource.As(&texture);
         if (FAILED(hr)) return failure(hr);
@@ -204,7 +206,7 @@ DesktopCapture::Result DesktopCapture::Read(std::vector<uint8_t>& nv12, uint64_t
             std::memcpy(nv12.data() + static_cast<size_t>(y) * width_, src + static_cast<size_t>(y) * mapped.RowPitch, width_);
     } catch (...) { context_->Unmap(staging_.Get(), 0); throw; }
     context_->Unmap(staging_.Get(), 0);
-    copyPending_ = false; timestamp = pendingTimestamp_;
+    copyPending_ = false; haveImage_ = true; timestamp = pendingTimestamp_;
     return {S_OK, CaptureReadiness::Fresh};
 }
 } // namespace knot

@@ -26,11 +26,19 @@ public enum MacKeyboardRouting {
     public static func route(keyCode: UInt16, modifiers: KeyboardModifiers, textMode: Bool,
                              hasMarkedText: Bool, ownsPhysicalDown: Bool) -> Route {
         if keyCode == 57 { return .localCapsLock }
+        if ownsPhysicalDown { return .physical }
         if modifiers.contains(.control), (123...126).contains(keyCode) { return .localSpace }
-        if ownsPhysicalDown || !textMode || modifiers.hasShortcut { return .physical }
+        if !textMode || modifiers.hasShortcut { return .physical }
         // During composition the input method gets editing, commit and cancel keys.
         if hasMarkedText { return .interpretText }
         return commands.contains(keyCode) ? .physical : .interpretText
+    }
+    /// A local AppKit key-up monitor may compensate only a Command-modified
+    /// release already owned by this focused presenter, never a new input.
+    public static func compensatesCommandKeyUp(keyCode: UInt16, modifiers: KeyboardModifiers,
+                                               ownsPhysicalDown: Bool, focused: Bool, sameWindow: Bool) -> Bool {
+        focused && sameWindow && modifiers.contains(.command) && ownsPhysicalDown &&
+        keyCode != 57 && modifierKeys[keyCode] == nil && WindowsScanCodes.map[keyCode] != nil
     }
 }
 

@@ -4,6 +4,7 @@ import Network
 import Security
 import CryptoKit
 import CoreVideo
+import Combine
 import KnotNativeCore
 @testable import KnotNativePreview
 
@@ -224,8 +225,12 @@ private final class InertPresenter: NativePresenter {
     var onFailure: (() -> Void)?
     var results: [PresentationResult]
     var cleared = 0
+    var displayed = 0
     init(_ results: [PresentationResult]) { self.results = results }
-    func display(_ image: CVPixelBuffer) -> PresentationResult { results.isEmpty ? .presented : results.removeFirst() }
+    func display(_ image: CVPixelBuffer) -> PresentationResult {
+        displayed += 1
+        return results.isEmpty ? .presented : results.removeFirst()
+    }
     func clear() { cleared += 1 }
     func forgetHeldKeys() {}
 }
@@ -248,6 +253,35 @@ private func syntheticPresentationPixel() throws -> CVPixelBuffer {
     var pixel: CVPixelBuffer?
     try #require(CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixel) == kCVReturnSuccess)
     return try #require(pixel)
+}
+
+private final class PublishedEmissionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+    func increment() { lock.lock(); total += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return total }
+}
+
+@Test @MainActor func presentedFramesPublishOnlyActualStreamingAndBackpressureTransitions() async throws {
+    let transport = InertChannel(), presenter = InertPresenter([])
+    let model = beginInert(transport, presenter: presenter)
+    try await approveInert(transport, model)
+    let image = try syntheticPresentationPixel(), start = ContinuousClock.now
+    let emissions = PublishedEmissionCounter()
+    let subscription = model.objectWillChange.sink { emissions.increment() }
+    defer { subscription.cancel(); model.disconnect() }
+    for _ in 0..<120 { model.presentDecodedImage(image, now: start) }
+    #expect(presenter.displayed == 120 && model.phase == .streaming)
+    #expect(emissions.count == 2) // First phase transition and first status only.
+
+    presenter.results = Array(repeating: .backpressure, count: 122)
+    model.presentDecodedImage(image, now: start + .milliseconds(100))
+    for _ in 0..<121 { model.presentDecodedImage(image, now: start + .seconds(3)) }
+    #expect(model.status.contains("Display is behind") && emissions.count == 3)
+    model.presentDecodedImage(image, now: start + .seconds(4))
+    #expect(!model.status.contains("Display is behind") && emissions.count == 4)
+    for _ in 0..<120 { model.presentDecodedImage(image, now: start + .seconds(4)) }
+    #expect(emissions.count == 4)
 }
 
 @Test @MainActor func disconnectRevokesBlockedHelloSynchronously() async throws {

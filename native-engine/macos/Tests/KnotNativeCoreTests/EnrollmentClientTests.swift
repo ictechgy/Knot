@@ -195,6 +195,90 @@ private final class RejectedEnrollment: EnrollmentAuthenticating, @unchecked Sen
     func close() {}
 }
 
+private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecked Sendable {
+    let failure: NativeFailure
+    private let lock = NSLock()
+    private var closed = false
+    init(_ failure: NativeFailure) { self.failure = failure }
+    func authenticate(name: String) async throws -> AuthenticatedEnrollment { throw failure }
+    func close() { lock.lock(); closed = true; lock.unlock() }
+    var isClosed: Bool { lock.lock(); defer { lock.unlock() }; return closed }
+}
+
+@Test @MainActor func malformedOrUnsupportedEnrollmentKeepsClosednessAndVersionGuidance() async throws {
+    let candidate = try testCandidate()
+    for failure in [NativeFailure.malformed, .unsupported] {
+        let rejected = NativeFailureEnrollment(failure)
+        let model = EnrollmentModel(makeClient: { _, _ in rejected }, initialCandidates: [candidate])
+        var authorized = 0
+        model.code = "00001234"
+        let operation = try #require(model.connect(name: "Fixture Mac") { _ in authorized += 1 })
+        await operation.value
+        #expect(rejected.isClosed && authorized == 0)
+        #expect(model.phase == .failed && model.code.isEmpty && model.candidates.isEmpty && model.selected == nil)
+        #expect(model.status.contains("앱 버전") && !model.status.contains("방화벽"))
+    }
+}
+
+@Test @MainActor func localEnrollmentCreationFailuresDoNotBlameTheNumber() throws {
+    let candidate = try testCandidate()
+    for failure in [NativeFailure.malformed, .unsupported, .transport] {
+        let model = EnrollmentModel(makeClient: { _, _ in throw failure }, initialCandidates: [candidate])
+        var authorized = 0
+        model.code = "00001234"
+        let operation = model.connect(name: "Fixture Mac") { _ in authorized += 1 }
+        #expect(operation == nil && authorized == 0 && model.phase == .failed && model.code.isEmpty)
+        #expect(model.candidates.isEmpty && model.selected == nil)
+        #expect(!model.status.contains("8자리 번호를 확인"))
+        #expect(failure == .transport ? model.status.contains("방화벽") : model.status.contains("앱 버전"))
+    }
+}
+
+@Test @MainActor func authenticatedButMalformedOfferClosesBothAdaptersWithoutGrantingMedia() async throws {
+    let candidate = try testCandidate()
+    let hello = try EnrollmentFrame(kind: .serverHello,
+        payload: EnrollmentWire.hello(slot: candidate.slot, message: Data(repeating: 5, count: 32)))
+    let offer = try EnrollmentFrame(kind: .serverOffer, payload: Data(repeating: 8, count: 29))
+    let socket = ScriptedEnrollmentSocket(hello.encoded + offer.encoded)
+    let crypto = ScriptedEnrollmentCrypto(plaintext: Data("{not-a-valid-offer}".utf8))
+    let client = try EnrollmentClient(candidate: candidate, password: EnrollmentWire.password("00001234"),
+        makeSocket: { _ in socket }, makeCrypto: { _, _ in crypto })
+    let model = EnrollmentModel(makeClient: { _, _ in client }, initialCandidates: [candidate])
+    var authorized = 0
+    model.code = "00001234"
+    let operation = try #require(model.connect(name: "Fixture Mac") { _ in authorized += 1 })
+    await operation.value
+    #expect(socket.snapshot().1 && crypto.snapshot().1 && authorized == 0)
+    #expect(model.phase == .failed && model.code.isEmpty && model.status.contains("앱 버전"))
+}
+
+@Test @MainActor func reconnectionGuidanceRetainsNumberOrLegacyModeAfterRevocation() async throws {
+    let candidate = try testCandidate()
+    let result = AuthenticatedEnrollment(offer: try EnrollmentOffer(testOffer(candidate), candidate: candidate),
+        viewerName: "Confirmed Mac", expiresAt: .now + .seconds(30))
+    for number in [true, false] {
+        let media = SessionModel(makeChannel: { _ in StopBeforeNetworkChannel() })
+        if number { media.connectAuthenticated(result) }
+        else { media.invitation = result.offer.invitation; media.connect() }
+        let deadline = ContinuousClock.now + .seconds(1)
+        while media.active, ContinuousClock.now < deadline { await Task.yield() }
+        try #require(media.phase == .failed && !media.numberAuthorized)
+        #expect(media.reconnectMethod == (number ? .number : .invitation))
+        let guidance = NativeCopy.status(media.status, reconnectMethod: media.reconnectMethod)
+        #expect(number ? guidance.contains("8자리 번호") && guidance.contains("공유를 다시 시작") : guidance.contains("새 연결 코드"))
+    }
+    let disconnected = SessionModel(makeChannel: { _ in StopBeforeNetworkChannel() })
+    disconnected.connectAuthenticated(result); disconnected.disconnect()
+    #expect(!disconnected.numberAuthorized && disconnected.reconnectMethod == .number)
+    disconnected.disconnect() // Repeated close cannot turn an ended number session into legacy guidance.
+    #expect(disconnected.reconnectMethod == .number)
+    #expect(NativeCopy.status(disconnected.status, reconnectMethod: disconnected.reconnectMethod).contains("8자리 번호"))
+    let expired = AuthenticatedEnrollment(offer: result.offer, viewerName: result.viewerName, expiresAt: .now - .seconds(1))
+    disconnected.connectAuthenticated(expired)
+    #expect(disconnected.phase == .failed && !disconnected.numberAuthorized && disconnected.reconnectMethod == .number)
+    #expect(NativeCopy.status(disconnected.status, reconnectMethod: disconnected.reconnectMethod).contains("8자리 번호"))
+}
+
 @Test @MainActor func wrongNumberKeepsTheUnverifiedCandidateForAnExplicitFreshRetry() async throws {
     let candidate = try testCandidate()
     let model = EnrollmentModel(makeDiscovery: { DelayedDiscovery() },

@@ -13,6 +13,17 @@ namespace Knot.NativePreview
         internal int Left, Top, DesktopWidth, DesktopHeight;
         internal uint HardwareEncoder;
         internal CaptureRectangle Rectangle { get { return new CaptureRectangle(Left, Top, DesktopWidth, DesktopHeight); } }
+        internal void ValidateProfile(MediaConfig requested)
+        {
+            Ready();
+            // Preserve the selected fallback even if a DLL/ABI edit regresses.
+            // ScaleVideoToBounds rounds each dimension down to an even pixel;
+            // its aspect error is less than two source-axis pixels.
+            long aspectError = Math.Abs((long)Width * DesktopHeight - (long)Height * DesktopWidth);
+            if (!MediaLimits.ValidConfig(requested) || Width > requested.Width || Height > requested.Height ||
+                Fps != requested.Fps || Bitrate > requested.Bitrate ||
+                aspectError > 2L * Math.Max(DesktopWidth, DesktopHeight)) throw new ProtocolException("encoder");
+        }
         internal byte[] Ready()
         {
             if (!MediaLimits.ValidDimensions(Width, Height) ||
@@ -79,6 +90,7 @@ namespace Knot.NativePreview
         internal WindowsMediaSource(MediaConfig config)
         {
             if (!MediaLimits.ValidConfig(config)) throw new ProtocolException("encoder");
+            MediaConfig requested = config;
             ownerThread = System.Threading.Thread.CurrentThread.ManagedThreadId;
             if (System.Threading.Thread.CurrentThread.GetApartmentState() != System.Threading.ApartmentState.MTA) throw new ProtocolException("capture");
             try
@@ -92,7 +104,7 @@ namespace Knot.NativePreview
                 int error;
                 media = create(ref config, out info, out error);
                 if (media == IntPtr.Zero) throw NativeMediaErrors.ForStatus(error);
-                info.Ready();
+                info.ValidateProfile(requested);
             }
             catch { Dispose(); throw; }
         }

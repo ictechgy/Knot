@@ -1,4 +1,5 @@
 import Foundation
+import CoreVideo
 import KnotNativeCore
 
 /// One compressed-stream reader waits here instead of dropping predictive units.
@@ -55,12 +56,19 @@ enum DecodeCompletion: Equatable {
 
 @MainActor
 enum DecodeDelivery {
-    static func finish(ticket: UUID, admission: DecodeAdmission, status: Int32, frameDropped: Bool, hasImage: Bool, onImage: () -> Void, onFailure: () -> Void) {
+    static func finish(ticket: UUID, admission: DecodeAdmission, status: Int32, frameDropped: Bool,
+                       image: CVPixelBuffer?, width: Int, height: Int, onImage: (CVPixelBuffer) -> Void, onFailure: () -> Void) {
         defer { admission.release(ticket) }
-        switch DecodeCompletion.classify(status: status, frameDropped: frameDropped, hasImage: hasImage) {
+        switch DecodeCompletion.classify(status: status, frameDropped: frameDropped, hasImage: image != nil) {
         case .dropped: break
         case .failure: onFailure()
-        case .image: onImage()
+        case .image:
+            // A format-description match does not authorize an unexpected
+            // output buffer. Ready's immutable dimensions apply to every frame.
+            guard let image, CVPixelBufferGetWidth(image) == width, CVPixelBufferGetHeight(image) == height else {
+                onFailure(); return
+            }
+            onImage(image)
         }
     }
 }

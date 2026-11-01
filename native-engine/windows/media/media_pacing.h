@@ -5,6 +5,14 @@
 namespace knot {
 enum class CaptureReadiness { Unchanged, Pending, Fresh, Failed };
 
+// DXGI reports pointer-only notifications with all three image-update fields
+// zero. v1 does not composite that separate cursor, so cached image pixels are
+// still current. Always take the first snapshot, and copy on any image metadata.
+inline bool DesktopImageNeedsCopy(bool havePixels, int64_t lastPresentTime,
+    uint32_t accumulatedFrames, uint32_t metadataBytes) {
+    return !havePixels || lastPresentTime != 0 || accumulatedFrames != 0 || metadataBytes != 0;
+}
+
 // Pure production policy. A Pending readback never submits the old pixels or
 // consumes the frame period: Pump polls it again on the next caller iteration.
 // After first encoder output, unchanged pixels are encoded at one Hz while
