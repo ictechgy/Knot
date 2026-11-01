@@ -3,6 +3,7 @@ import Testing
 import Network
 import Security
 import CryptoKit
+import CoreVideo
 import KnotNativeCore
 @testable import KnotNativePreview
 
@@ -119,6 +120,12 @@ private final class PortGate: @unchecked Sendable {
     try await good.start()
     try await good.send(Packet(kind: .heartbeat))
     #expect(try await good.readExactly(5) == Data([4,0,0,0,0]))
+    let pendingRead = Task { try await good.readExactly(1) }
+    try await Task.sleep(for: .milliseconds(10))
+    let revokedAt = ContinuousClock.now; good.close()
+    if case .success = await pendingRead.result { Issue.record("Revoked read unexpectedly completed") }
+    #expect(ContinuousClock.now - revokedAt < .milliseconds(500))
+    do { try await good.send(Packet(kind: .heartbeat)); Issue.record("Revoked TLS channel accepted a later write") } catch {}
     let bad = TLSChannel(endpoint: .hostPort(host: .ipv4(.loopback), port: port), pin: String(repeating: "0", count: 64))
     defer { bad.close() }
     do { try await bad.start(); Issue.record("Mismatched pin established TLS") } catch {}
@@ -128,19 +135,48 @@ private final class InertChannel: NativeChannel, @unchecked Sendable {
     private let lock = NSLock()
     private var writes: [Packet] = []
     private var reader: CheckedContinuation<Data, any Error>?
+    private var queuedReads: [Data] = []
+    private var pendingWrite: (Packet, CheckedContinuation<Void, any Error>)?
+    private var attempts: [Kind] = []
+    private let blockedKind: Kind?
+    private var closeCalls = 0
     private var closed = false
+    init(blockedKind: Kind? = nil) { self.blockedKind = blockedKind }
     func start() async throws {}
     func readExactly(_ count: Int) async throws -> Data {
         try await withCheckedThrowingContinuation { value in
             lock.lock()
             if closed { lock.unlock(); value.resume(throwing: NativeFailure.transport) }
+            else if !queuedReads.isEmpty { let bytes = queuedReads.removeFirst(); lock.unlock(); value.resume(returning: bytes) }
             else { reader = value; lock.unlock() }
         }
     }
-    func send(_ packet: Packet) async throws { record(packet) }
-    private func record(_ packet: Packet) { lock.lock(); writes.append(packet); lock.unlock() }
+    func send(_ packet: Packet) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            lock.lock()
+            guard !closed else { lock.unlock(); continuation.resume(throwing: NativeFailure.transport); return }
+            attempts.append(packet.kind)
+            if packet.kind == blockedKind { pendingWrite = (packet, continuation); lock.unlock() }
+            else { writes.append(packet); lock.unlock(); continuation.resume() }
+        }
+    }
+    func feed(_ bytes: Data) {
+        lock.lock(); guard !closed else { lock.unlock(); return }
+        let pending = reader; reader = nil
+        if pending == nil { queuedReads.append(bytes) }; lock.unlock(); pending?.resume(returning: bytes)
+    }
     func snapshot() -> [Packet] { lock.lock(); defer { lock.unlock() }; return writes }
-    func close() { lock.lock(); closed = true; let pending = reader; reader = nil; lock.unlock(); pending?.resume(throwing: NativeFailure.transport) }
+    func attemptedKinds() -> [Kind] { lock.lock(); defer { lock.unlock() }; return attempts }
+    func closeCount() -> Int { lock.lock(); defer { lock.unlock() }; return closeCalls }
+    func close() {
+        lock.lock(); guard !closed else { lock.unlock(); return }
+        closed = true; closeCalls += 1
+        let pending = reader, blocked = pendingWrite; reader = nil; pendingWrite = nil; queuedReads = []
+        lock.unlock(); pending?.resume(throwing: NativeFailure.transport)
+        // Deliberately deliver late success to prove the model cannot re-admit
+        // work after cancellation even if an already submitted write completed.
+        blocked?.1.resume()
+    }
 }
 
 @Test func completedOperationReleasesOwnedDeadlineImmediately() async throws {
@@ -172,7 +208,100 @@ private final class InertChannel: NativeChannel, @unchecked Sendable {
     for _ in 0..<50 { if transport.snapshot().contains(where: { $0.kind == .releaseAll }) { break }; try await Task.sleep(for: .milliseconds(10)) }
     #expect(transport.snapshot().contains(where: { $0.kind == .releaseAll }))
     model.disconnect()
-    for _ in 0..<50 { if transport.snapshot().filter({ $0.kind == .releaseAll }).count >= 2 { break }; try await Task.sleep(for: .milliseconds(10)) }
     #expect(model.phase == .idle && !model.active)
-    #expect(transport.snapshot().filter({ $0.kind == .releaseAll }).count >= 2)
+    #expect(transport.closeCount() == 1)
+    #expect(transport.snapshot().filter({ $0.kind == .releaseAll }).count == 1)
+}
+
+@MainActor
+private final class InertPresenter: NativePresenter {
+    var onFailure: (() -> Void)?
+    var results: [PresentationResult]
+    var cleared = 0
+    init(_ results: [PresentationResult]) { self.results = results }
+    func display(_ image: CVPixelBuffer) -> PresentationResult { results.isEmpty ? .presented : results.removeFirst() }
+    func clear() { cleared += 1 }
+    func forgetHeldKeys() {}
+}
+
+@MainActor private func beginInert(_ transport: InertChannel, presenter: InertPresenter? = nil) -> SessionModel {
+    let model = SessionModel(makeChannel: { _ in transport }); model.surface = presenter
+    let token = Invitation.encodeBase64URL(Data(repeating: 4, count: 32))
+    let json = "{\"v\":1,\"address\":\"10.0.0.1\",\"port\":48631,\"certificateSHA256\":\"\(String(repeating: "a", count: 64))\",\"token\":\"\(token)\"}"
+    model.review("knot-native:v1:" + Invitation.encodeBase64URL(Data(json.utf8))); model.connect(); return model
+}
+@MainActor private func approveInert(_ transport: InertChannel, _ model: SessionModel) async throws {
+    for _ in 0..<100 { if model.phase == .approval { break }; try await Task.sleep(for: .milliseconds(5)) }
+    try #require(model.phase == .approval)
+    let ready = Packet(kind: .ready, payload: Data("{\"v\":1,\"codec\":\"h264-annexb\",\"width\":64,\"height\":64,\"fps\":30,\"bitrate\":1000000,\"hardwareEncoder\":true}".utf8))
+    transport.feed(Data(ready.encoded.prefix(5))); transport.feed(ready.payload)
+    for _ in 0..<100 { if model.phase == .decoding { break }; try await Task.sleep(for: .milliseconds(5)) }
+    try #require(model.phase == .decoding)
+}
+private func syntheticPresentationPixel() throws -> CVPixelBuffer {
+    var pixel: CVPixelBuffer?
+    try #require(CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixel) == kCVReturnSuccess)
+    return try #require(pixel)
+}
+
+@Test @MainActor func disconnectRevokesBlockedHelloSynchronously() async throws {
+    let transport = InertChannel(blockedKind: .hello)
+    let model = beginInert(transport)
+    for _ in 0..<100 { if transport.attemptedKinds().contains(.hello) { break }; try await Task.sleep(for: .milliseconds(5)) }
+    try #require(transport.attemptedKinds() == [.hello] && model.phase == .connecting)
+    let start = ContinuousClock.now
+    model.disconnect()
+    #expect(ContinuousClock.now - start < .milliseconds(100))
+    #expect(transport.closeCount() == 1 && model.phase == .idle)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(model.phase == .idle && transport.attemptedKinds() == [.hello])
+    #expect(transport.snapshot().isEmpty)
+}
+
+@Test @MainActor func disconnectBeforeReaderStartsCannotCreateLateConnection() async throws {
+    let transport = InertChannel()
+    let model = beginInert(transport)
+    model.disconnect() // no suspension: the MainActor reader has not started
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(model.phase == .idle && transport.closeCount() == 0 && transport.attemptedKinds().isEmpty)
+}
+
+@Test @MainActor func disconnectRevokesBlockedWriterAndQueuedInputSynchronously() async throws {
+    let transport = InertChannel(blockedKind: .key), presenter = InertPresenter([.presented])
+    let model = beginInert(transport, presenter: presenter)
+    try await approveInert(transport, model)
+    model.presentDecodedImage(try syntheticPresentationPixel())
+    try #require(model.phase == .streaming)
+    model.send(try Input.key(down: true, scan: 0x1e, extended: false))
+    for _ in 0..<100 { if transport.attemptedKinds().contains(.key) { break }; try await Task.sleep(for: .milliseconds(5)) }
+    try #require(transport.attemptedKinds() == [.hello, .key])
+    model.send(try Input.key(down: true, scan: 0x30, extended: false))
+    let start = ContinuousClock.now; model.disconnect()
+    #expect(ContinuousClock.now - start < .milliseconds(100) && transport.closeCount() == 1)
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(model.phase == .idle && transport.attemptedKinds() == [.hello, .key])
+    #expect(transport.snapshot().map(\.kind) == [.hello])
+}
+
+@Test @MainActor func presentationFailureAfterStreamingRevokesTransportAndInput() async throws {
+    let transport = InertChannel(), presenter = InertPresenter([.backpressure, .presented, .failed])
+    let model = beginInert(transport, presenter: presenter)
+    try await approveInert(transport, model)
+    let image = try syntheticPresentationPixel()
+    model.presentDecodedImage(image); #expect(model.phase == .decoding)
+    model.presentDecodedImage(image); try #require(model.phase == .streaming)
+    model.presentDecodedImage(image)
+    #expect(model.phase == .failed && !model.active && transport.closeCount() == 1 && presenter.cleared == 1)
+    model.send(try Input.key(down: true, scan: 0x1e, extended: false))
+    try await Task.sleep(for: .milliseconds(10))
+    #expect(transport.attemptedKinds() == [.hello])
+}
+
+@Test @MainActor func asynchronousRendererFailureRevokesPriorStreaming() async throws {
+    let transport = InertChannel(), presenter = InertPresenter([.presented])
+    let model = beginInert(transport, presenter: presenter)
+    try await approveInert(transport, model)
+    model.presentDecodedImage(try syntheticPresentationPixel()); try #require(model.phase == .streaming)
+    presenter.onFailure?()
+    #expect(model.phase == .failed && transport.closeCount() == 1 && presenter.onFailure == nil)
 }

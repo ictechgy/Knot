@@ -294,6 +294,9 @@ HRESULT Encoder::Receive(AccessUnit& output) {
         if (parameterSets_.empty()) { hr = ReadSequenceHeader(); if (FAILED(hr)) return hr; }
         if (parameterSets_.size() + output.bytes.size() > kMaxAccessUnit) return E_FAIL;
         output.bytes.insert(output.bytes.begin(), parameterSets_.begin(), parameterSets_.end());
+        // Cached sets are additional NALs. Validate the final wire AU against
+        // the same limits as the normalizer and both language consumers.
+        if (!AnalyzeH264(output.bytes, output.idr, sps, pps, nullptr)) return MF_E_INVALIDMEDIATYPE;
     }
     LONGLONG time = 0;
     hr = sample->GetSampleTime(&time);

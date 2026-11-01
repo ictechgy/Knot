@@ -20,7 +20,8 @@ claim.
 The hardware MFT must accept low-latency mode, a two-second GOP and periodic
 force-keyframe requests. Baseline profile prevents reordered B frames. Event
 polling is nonblocking, with at most two submitted samples and bounded event,
-NAL, parameter-set and access-unit counts/sizes. Output is normalized to AnnexB;
+NAL, parameter-set and access-unit counts/sizes: at most 128 NALs per access unit,
+8 SPS and 8 PPS, and 65,536 bytes per parameter-set NAL. Output is normalized to AnnexB;
 SPS/PPS from MFT sequence headers or encoded samples are repeated for IDRs.
 Native read refuses to return a flagged IDR without both SPS and PPS. A stalled
 codec fails the session after two seconds of pending output; no raw/encoded

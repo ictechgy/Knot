@@ -12,15 +12,18 @@ private final class EncodedSamples: @unchecked Sendable {
     func samples() -> [CMSampleBuffer] { lock.lock(); defer { lock.unlock() }; return storage }
 }
 
+// Explicit nonisolation also on SDKs whose C callback imports lack Sendable.
+private nonisolated func syntheticCompressionOutput(_ context: UnsafeMutableRawPointer?, _ source: UnsafeMutableRawPointer?, _ status: OSStatus, _ flags: VTEncodeInfoFlags, _ sample: CMSampleBuffer?) {
+    guard status == noErr, let context, let sample else { return }
+    Unmanaged<EncodedSamples>.fromOpaque(context).takeUnretainedValue().append(sample)
+}
+
 /// Fresh software-encoded pixels are a codec fixture, never a runtime fallback.
 @Test @MainActor func freshSyntheticH264EncodeDecode() async throws {
     let output = EncodedSamples()
     var encoder: VTCompressionSession?
     let specification = [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: false] as CFDictionary
-    let result = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: 64, height: 64, codecType: kCMVideoCodecType_H264, encoderSpecification: specification, imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: { context, _, status, _, sample in
-        guard status == noErr, let context, let sample else { return }
-        Unmanaged<EncodedSamples>.fromOpaque(context).takeUnretainedValue().append(sample)
-    }, refcon: Unmanaged.passUnretained(output).toOpaque(), compressionSessionOut: &encoder)
+    let result = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: 64, height: 64, codecType: kCMVideoCodecType_H264, encoderSpecification: specification, imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: syntheticCompressionOutput, refcon: Unmanaged.passUnretained(output).toOpaque(), compressionSessionOut: &encoder)
     #expect(result == noErr)
     let session = try #require(encoder)
     defer { VTCompressionSessionInvalidate(session) }

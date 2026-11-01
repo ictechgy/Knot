@@ -52,7 +52,7 @@ class Builder:
             "scope": "Build inputs only; not successful checks or runtime acceptance"
         }, indent=2) + "\n")
 
-    def run(self, label, argv, cwd=None, env=None, timeout=600):
+    def run(self, label, argv, cwd=None, env=None, timeout=600, command_inputs=()):
         print(label, flush=True)
         start = datetime.now(timezone.utc).isoformat()
         result = subprocess.run([str(x) for x in argv], cwd=cwd or ROOT, env=env,
@@ -63,6 +63,7 @@ class Builder:
                               "cwd": str(cwd or ROOT), "startedUTC": start,
                               "endedUTC": datetime.now(timezone.utc).isoformat(),
                               "exitCode": result.returncode,
+                              "commandInputs": {p.name: digest(p) for p in command_inputs},
                               "stdoutSHA256": hashlib.sha256(result.stdout).hexdigest(),
                               "stderrSHA256": hashlib.sha256(result.stderr).hexdigest()})
         (self.evidence / "invocations.json").write_text(json.dumps(self.commands, indent=2) + "\n")
@@ -147,7 +148,13 @@ class Builder:
         cmd.write_text('@echo off\ncall "' + str(vs / "Common7/Tools/VsDevCmd.bat") +
                        '" -arch=x64 -host_arch=x64 >nul\nif errorlevel 1 exit /b 1\n"' +
                        str(compiler) + '" @"' + str(rsp) + '"\nexit /b %errorlevel%\n', encoding="utf-8")
-        self.run(label, [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(cmd)], cwd=self.output)
+        recorded_inputs = []
+        for path in [cmd, rsp]:
+            recorded = self.evidence / path.name
+            shutil.copy2(path, recorded)
+            recorded_inputs.append(recorded)
+        self.run(label, [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(cmd)],
+                 cwd=self.output, command_inputs=recorded_inputs)
 
     def csharp(self, label, sources, main, target):
         refs = Path(os.environ["ProgramFiles(x86)"]) / "Reference Assemblies/Microsoft/Framework/.NETFramework/v4.8"
@@ -189,7 +196,9 @@ class Builder:
         executable = self.csharp("Knot-Native-Preview", sources, "Knot.NativePreview.Program", "winexe")
         checks = self.csharp("KnotNativeChecks", sources + sorted((ROOT / "native-engine/windows/tests").glob("*.cs")),
                              "Knot.NativePreview.NativeChecks", "exe")
-        result = self.run("native-host-checks", [checks], timeout=180).decode("utf-8-sig").strip()
+        public_certificate = self.output / "native-test-public.cer"
+        result = self.run("native-host-checks", [checks, "--export-certificate", public_certificate],
+                          timeout=180).decode("utf-8-sig").strip()
         parsed = json.loads(result)
         if (parsed.get("status") != "passed" or parsed.get("freshSyntheticOnly") is not True or
                 parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False):
@@ -210,7 +219,8 @@ class Builder:
         setup = self.output / ("Knot-Native-" + VERSION + "-windows-x64-setup.exe")
         if not setup.is_file():
             raise ValueError("Native installer output is missing")
-        return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record]
+        return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record,
+                self.output / "native-host-checks.json", public_certificate]
 
     def finish(self, files):
         if source_snapshot(ROOT) != self.sources:
@@ -218,7 +228,7 @@ class Builder:
         source = self.output / ("Knot-Native-" + VERSION + "-source.tar.gz")
         self.run("native-corresponding-source", ["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf",
                  "archive", "--format=tar.gz", "--prefix=Knot-Native-source/", "--output", source, self.head])
-        files = [*files, source]
+        files = [*files, source, self.output / "NATIVE-INPUTS.json"]
         record = {"schema": 1, "version": VERSION, "platform": self.platform, "head": self.head,
                   "mode": "media-only" if self.media_only else "complete-experiment",
                   "checksPassed": True, "sourceManifest": self.sources, "invocations": self.commands,

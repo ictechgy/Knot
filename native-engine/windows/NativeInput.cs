@@ -14,6 +14,7 @@ namespace Knot.NativePreview
     {
         bool Key(ushort scanCode, bool extended, bool down);
         bool Text(string text);
+        bool ReleaseUnicode();
         bool Pointer(byte action, ushort x, ushort y, CaptureRectangle rectangle);
         bool ReleaseButton(byte button);
         bool Wheel(int vertical, int horizontal);
@@ -84,13 +85,15 @@ namespace Knot.NativePreview
                 }
             }
         }
-        private void Release()
+        private bool Release()
         {
             // Failed releases remain owned and are retried on session teardown.
+            bool unicodeReleased = sink.ReleaseUnicode();
             foreach (ushort key in new List<ushort>(keys))
                 if (sink.Key((ushort)(key & 255), (key & 256) != 0, false)) keys.Remove(key);
             foreach (byte button in new List<byte>(buttons))
                 if (sink.ReleaseButton(button)) buttons.Remove(button);
+            return unicodeReleased && keys.Count == 0 && buttons.Count == 0;
         }
         internal void Close()
         {
@@ -100,7 +103,7 @@ namespace Knot.NativePreview
                 closed = true;
                 // SendInput can fail during a desktop transition. Bound retries and never
                 // release physical inputs that were not accepted by this session.
-                for (int i = 0; i < 3 && (keys.Count != 0 || buttons.Count != 0); ++i) Release();
+                for (int i = 0; i < 3; ++i) if (Release()) break;
             }
         }
     }
@@ -108,36 +111,58 @@ namespace Knot.NativePreview
     internal sealed class WindowsInputSink : IInputSink
     {
         private const uint KeyUp = 2, Unicode = 4, ScanCode = 8, Extended = 1;
-        [StructLayout(LayoutKind.Sequential)] private struct MouseInput
+        [StructLayout(LayoutKind.Sequential)] internal struct MouseInput
         { internal int dx, dy; internal uint data, flags, time; internal UIntPtr extra; }
-        [StructLayout(LayoutKind.Sequential)] private struct KeyboardInput
+        [StructLayout(LayoutKind.Sequential)] internal struct KeyboardInput
         { internal ushort virtualKey, scan; internal uint flags, time; internal UIntPtr extra; }
-        [StructLayout(LayoutKind.Explicit)] private struct InputUnion
+        [StructLayout(LayoutKind.Explicit)] internal struct InputUnion
         { [FieldOffset(0)] internal MouseInput mouse; [FieldOffset(0)] internal KeyboardInput keyboard; }
-        [StructLayout(LayoutKind.Sequential)] private struct Input
+        [StructLayout(LayoutKind.Sequential)] internal struct Input
         { internal uint type; internal InputUnion value; }
+        internal delegate uint InputSender(uint count, Input[] inputs, int size);
+        private readonly InputSender sender;
+        private readonly HashSet<ushort> unicodeDown = new HashSet<ushort>();
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
         [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+        internal WindowsInputSink() : this(SendInput) { }
+        internal WindowsInputSink(InputSender sender)
+        {
+            if (sender == null) throw new ArgumentNullException("sender");
+            this.sender = sender;
+        }
         private static Input Keyboard(ushort scan, uint flags)
         {
             Input i = new Input(); i.type = 1; i.value.keyboard.scan = scan; i.value.keyboard.flags = flags; return i;
         }
-        private static bool Send(Input value) { return SendInput(1, new Input[] { value }, Marshal.SizeOf(typeof(Input))) == 1; }
+        private bool Send(Input value) { return sender(1, new Input[] { value }, Marshal.SizeOf(typeof(Input))) == 1; }
         public bool Key(ushort scanCode, bool extended, bool down)
         { return Send(Keyboard(scanCode, ScanCode | (extended ? Extended : 0) | (down ? 0 : KeyUp))); }
         public bool Text(string text)
         {
+            // A failed pair ends input delivery. Do not accept more text while an
+            // earlier successfully injected Unicode down still belongs to us.
+            if (unicodeDown.Count != 0) return false;
             foreach (char c in text)
             {
                 Input up = Keyboard(c, Unicode | KeyUp);
-                uint accepted = SendInput(2, new Input[] { Keyboard(c, Unicode), up }, Marshal.SizeOf(typeof(Input)));
+                uint accepted = sender(2, new Input[] { Keyboard(c, Unicode), up }, Marshal.SizeOf(typeof(Input)));
                 if (accepted != 2)
                 {
-                    if (accepted == 1) for (int retry = 0; retry < 3; ++retry) if (Send(up)) break;
+                    if (accepted == 1)
+                    {
+                        unicodeDown.Add(c);
+                        for (int retry = 0; retry < 3; ++retry) if (ReleaseUnicode()) break;
+                    }
                     return false;
                 }
             }
             return true;
+        }
+        public bool ReleaseUnicode()
+        {
+            foreach (ushort unit in new List<ushort>(unicodeDown))
+                if (Send(Keyboard(unit, Unicode | KeyUp))) unicodeDown.Remove(unit);
+            return unicodeDown.Count == 0;
         }
         internal static int Normalize(int physical, int origin, int extent)
         {

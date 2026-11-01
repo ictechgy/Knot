@@ -375,6 +375,33 @@ class BuildSnapshotTests(unittest.TestCase):
     def test_unchanged_build_is_accepted(self):
         self.assertEqual(self.validate(True)[0]["configuration"], "release")
 
+    def test_untracked_native_swift_input_is_not_corresponding_source(self):
+        path = self.root / "native-engine/macos/Sources/Viewer/Extra.swift"
+        path.parent.mkdir(parents=True)
+        path.write_text("struct FreshUntrackedCompilerInput {}\n")
+        with self.isolated():
+            snapshot = source_snapshot(self.root)
+            self.assertIn(path.relative_to(self.root).as_posix(), snapshot)
+            with self.assertRaises(BuildSnapshotError):
+                validate_corresponding_source(self.root, snapshot)
+        with self.assertRaises(BuildSnapshotError):
+            self.validate()
+
+    def test_ignored_native_swift_input_is_not_corresponding_source(self):
+        relative = "native-engine/macos/Sources/Viewer/Ignored.swift"
+        (self.root / ".git/info/exclude").write_text(relative + "\n")
+        path = self.root / relative
+        path.parent.mkdir(parents=True)
+        path.write_text("struct FreshIgnoredCompilerInput {}\n")
+        self.git("check-ignore", "-q", relative)
+        with self.isolated():
+            snapshot = source_snapshot(self.root)
+            self.assertIn(relative, snapshot)
+            with self.assertRaises(BuildSnapshotError):
+                validate_corresponding_source(self.root, snapshot)
+        with self.assertRaises(BuildSnapshotError):
+            self.validate()
+
     def test_each_required_suite_cannot_be_omitted(self):
         path = self.build / "build-invocations.json"
         records = json.loads(path.read_text())

@@ -17,6 +17,7 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "KnotNativePreview.tls")
     private let helloDeadline = ContinuousClock.now + .seconds(10)
+    private let lifetime = ChannelLifetime()
 
     convenience init(invitation: Invitation) throws {
         guard let port = NWEndpoint.Port(rawValue: invitation.port) else { throw NativeFailure.malformed }
@@ -54,16 +55,19 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
 
     func start() async throws {
         try await withCheckedThrowingContinuation { continuation in
-            let gate = CompletionGate<Void>(continuation)
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready: _ = gate.finish(.success(()))
-                case .failed, .cancelled: _ = gate.finish(.failure(NativeFailure.transport))
-                default: break
+            let id = UUID()
+            let gate = CompletionGate<Void>(continuation) { [lifetime] in lifetime.remove(id) }
+            guard lifetime.perform(id: id, cancel: { gate.finish(.failure(NativeFailure.transport)) }, operation: {
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: _ = gate.finish(.success(()))
+                    case .failed, .cancelled: _ = gate.finish(.failure(NativeFailure.transport))
+                    default: break
+                    }
                 }
-            }
-            gate.armDeadline(after: 10, on: queue) { [self] in connection.cancel() }
-            connection.start(queue: queue)
+                gate.armDeadline(after: 10, on: queue) { [weak self] in self?.close() }
+                connection.start(queue: queue)
+            }) else { gate.finish(.failure(NativeFailure.transport)); return }
         }
     }
 
@@ -85,13 +89,15 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
 
     private func receive(maximum: Int, timeout: Double) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            let gate = CompletionGate<Data>(continuation)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: maximum) { data, _, complete, error in
-                if let data, !data.isEmpty { _ = gate.finish(.success(data)) }
-                else if error != nil || complete { _ = gate.finish(.failure(NativeFailure.transport)) }
-                else { _ = gate.finish(.failure(NativeFailure.transport)) }
-            }
-            gate.armDeadline(after: max(0.001, timeout), on: queue) { [self] in connection.cancel() }
+            let id = UUID()
+            let gate = CompletionGate<Data>(continuation) { [lifetime] in lifetime.remove(id) }
+            guard lifetime.perform(id: id, cancel: { gate.finish(.failure(NativeFailure.transport)) }, operation: {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: maximum) { data, _, _, _ in
+                    if let data, !data.isEmpty { _ = gate.finish(.success(data)) }
+                    else { _ = gate.finish(.failure(NativeFailure.transport)) }
+                }
+                gate.armDeadline(after: max(0.001, timeout), on: queue) { [weak self] in self?.close() }
+            }) else { gate.finish(.failure(NativeFailure.transport)); return }
         }
     }
 
@@ -105,21 +111,47 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
         }
         let budget = timeout
         try await withCheckedThrowingContinuation { continuation in
-            let gate = CompletionGate<Void>(continuation)
-            connection.send(content: packet.encoded, completion: .contentProcessed { error in
-                _ = gate.finish(error == nil ? .success(()) : .failure(NativeFailure.transport))
-            })
-            gate.armDeadline(after: budget, on: queue) { [self] in connection.cancel() }
+            let id = UUID()
+            let gate = CompletionGate<Void>(continuation) { [lifetime] in lifetime.remove(id) }
+            guard lifetime.perform(id: id, cancel: { gate.finish(.failure(NativeFailure.transport)) }, operation: {
+                connection.send(content: packet.encoded, completion: .contentProcessed { error in
+                    _ = gate.finish(error == nil ? .success(()) : .failure(NativeFailure.transport))
+                })
+                gate.armDeadline(after: budget, on: queue) { [weak self] in self?.close() }
+            }) else { gate.finish(.failure(NativeFailure.transport)); return }
         }
     }
-    func close() { connection.cancel() }
+    func close() { lifetime.revoke { connection.cancel() } }
+}
+
+/// Serializes submission against permanent revocation. At most a handshake,
+/// reader and writer can be pending; close cancels their continuations/timers
+/// synchronously and all later submissions fail before reaching Network.
+private final class ChannelLifetime: @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private var closed = false
+    private var pending: [UUID: @Sendable () -> Void] = [:]
+    func perform(id: UUID, cancel: @escaping @Sendable () -> Void, operation: () -> Void) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, pending.count < 3 else { return false }
+        pending[id] = cancel; operation(); return true
+    }
+    func remove(_ id: UUID) { lock.lock(); pending.removeValue(forKey: id); lock.unlock() }
+    func revoke(_ cancelConnection: () -> Void) {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        closed = true; let operations = Array(pending.values); pending.removeAll(); lock.unlock()
+        cancelConnection()
+        for cancel in operations { cancel() }
+    }
 }
 
 final class CompletionGate<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, any Error>?
     private var timer: DispatchSourceTimer?
-    init(_ continuation: CheckedContinuation<Value, any Error>) { self.continuation = continuation }
+    private let onFinish: @Sendable () -> Void
+    init(_ continuation: CheckedContinuation<Value, any Error>, onFinish: @escaping @Sendable () -> Void = {}) { self.continuation = continuation; self.onFinish = onFinish }
     /// Only the pending operation owns a timer. Completion clears and cancels it,
     /// so fragmented reads cannot retain ten seconds of obsolete deadline work.
     func armDeadline(after seconds: Double, on queue: DispatchQueue, timeout: @escaping @Sendable () -> Void) {
@@ -135,6 +167,6 @@ final class CompletionGate<Value: Sendable>: @unchecked Sendable {
     @discardableResult func finish(_ result: Result<Value, any Error>) -> Bool {
         lock.lock(); let pending = continuation; continuation = nil; let deadline = timer; timer = nil; lock.unlock()
         deadline?.cancel()
-        guard let pending else { return false }; pending.resume(with: result); return true
+        guard let pending else { return false }; onFinish(); pending.resume(with: result); return true
     }
 }

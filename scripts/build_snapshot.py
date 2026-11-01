@@ -67,7 +67,7 @@ def source_snapshot(root):
     # These inputs are consumed outside the recursively scanned roots as well.
     paths.update(root / name for name in ["LICENSE", "INSTALLATION.md", "VERSION"])
     # Include new, not-yet-indexed compiler/resource inputs as well.
-    for name in ["Sources", "Assets", "Vendor/Glimmer", "Vendor/QRCodegen", "Vendor/ZXingNet", "Vendor/WindowsRuntime", "Vendor/UpdateRuntime", "host/windows", "host/macos", "host/linux", "client", "scripts", "packaging", ".github"]:
+    for name in ["Sources", "Assets", "Vendor/Glimmer", "Vendor/QRCodegen", "Vendor/ZXingNet", "Vendor/WindowsRuntime", "Vendor/UpdateRuntime", "host/windows", "host/macos", "host/linux", "client", "native-engine", "scripts", "packaging", ".github"]:
         for path in (root / name).rglob("*"):
             # Only tooling bytecode is generated bookkeeping. A cache-named directory
             # under compiler/resource roots may still contain actual shipped inputs.

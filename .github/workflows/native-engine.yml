@@ -29,6 +29,7 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 scripts/check_source_checkout.py
+      - run: python3 -B -m unittest discover -s scripts/tests -p test_build_snapshot.py
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
         with:
           name: native-windows-preview
@@ -47,6 +48,28 @@ jobs:
             build/native-engine/macos/SHA256SUMS
             build/native-engine/macos/evidence/
           if-no-files-found: error
+      - name: Collect only this fresh test process's crash diagnostics
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          output=Path('build/native-engine/macos/evidence/crashes')
+          output.mkdir(parents=True,exist_ok=True)
+          root=Path.home()/'Library/Logs/DiagnosticReports'
+          for pattern in ['KnotNativePreviewPackageTests*.ips','swiftpm-testing-helper*.ips']:
+              for path in sorted(root.glob(pattern))[-4:]:
+                  if path.is_file() and not path.is_symlink() and path.stat().st_size<=2_000_000:
+                      shutil.copy2(path,output/path.name)
+          PY
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: failure()
+        with:
+          name: native-macos-failed-diagnostics
+          path: |
+            build/native-engine/macos/evidence/
+            build/native-engine/macos/NATIVE-INPUTS.json
+          if-no-files-found: warn
   windows-native:
     runs-on: windows-2025
     timeout-minutes: 25
@@ -55,6 +78,7 @@ jobs:
         with:
           persist-credentials: false
       - run: python scripts/check_source_checkout.py
+      - run: python -B -m unittest discover -s scripts/tests -p test_build_snapshot.py
       - name: Install pinned Inno Setup compiler on the disposable build runner
         if: github.event_name != 'workflow_dispatch' || !inputs.media_only
         shell: powershell
@@ -81,6 +105,7 @@ jobs:
             build/native-engine/windows/*.tar.gz
             build/native-engine/windows/*.json
             build/native-engine/windows/*.h264
+            build/native-engine/windows/*.cer
             build/native-engine/windows/SHA256SUMS
             build/native-engine/windows/evidence/
           if-no-files-found: error

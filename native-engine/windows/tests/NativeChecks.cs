@@ -19,6 +19,7 @@ namespace Knot.NativePreview
     {
         private static int assertions, tlsFixtures;
         private static string stage = "protocol";
+        private static string certificateExportPath;
         private static void Check(bool result) { ++assertions; if (!result) throw new InvalidOperationException("Synthetic assertion failed."); }
         private static void Reject(Action action)
         {
@@ -26,11 +27,14 @@ namespace Knot.NativePreview
             try { action(); } catch (ProtocolException) { rejected = true; }
             Check(rejected);
         }
-        private static int Main()
+        private static int Main(string[] args)
         {
             try
             {
+                if (args.Length == 2 && args[0] == "--export-certificate") certificateExportPath = args[1];
+                else if (args.Length != 0) throw new ArgumentException("Unsupported synthetic check arguments.");
                 ProtocolChecks(); stage = "invitation"; InvitationChecks(); stage = "input"; InputChecks();
+                stage = "unicode-ownership"; UnicodeOwnershipChecks();
                 stage = "fresh-certificate"; FreshCertificateChecks();
                 stage = "tls-pin-mismatch"; TlsPinMismatch(); stage = "tls-approval-stop"; TlsApprovalStop();
                 stage = "tls-decline"; TlsDecline(); stage = "tls-expired"; TlsExpired(); stage = "tls-single-use"; TlsSingleUse();
@@ -85,6 +89,27 @@ namespace Knot.NativePreview
             Reject(delegate { AnnexB.Validate(new byte[] { 0, 0, 1, 0x65, 1 }, 5, 1); });
             Reject(delegate { AnnexB.Validate(new byte[] { 0, 0, 1, 0xff, 1 }, 5, 0); });
             Reject(delegate { AnnexB.Validate(accessUnit, accessUnit.Length, 2); });
+            byte[] boundary128 = NalFixture(128, 1, 2); AnnexB.Validate(boundary128, boundary128.Length, 0); Check(true);
+            byte[] boundary129 = NalFixture(129, 1, 2); Reject(delegate { AnnexB.Validate(boundary129, boundary129.Length, 0); });
+            foreach (byte parameterType in new byte[] { 7, 8 })
+            {
+                byte[] eight = NalFixture(8, parameterType, 2); AnnexB.Validate(eight, eight.Length, 0); Check(true);
+                byte[] nine = NalFixture(9, parameterType, 2); Reject(delegate { AnnexB.Validate(nine, nine.Length, 0); });
+                byte[] maxParameter = NalFixture(1, parameterType, 65536); AnnexB.Validate(maxParameter, maxParameter.Length, 0); Check(true);
+                byte[] oversizeParameter = NalFixture(1, parameterType, 65537); Reject(delegate { AnnexB.Validate(oversizeParameter, oversizeParameter.Length, 0); });
+            }
+        }
+        private static byte[] NalFixture(int count, byte type, int size)
+        {
+            using (MemoryStream result = new MemoryStream())
+            {
+                for (int n = 0; n < count; ++n)
+                {
+                    result.Write(new byte[] { 0, 0, 0, 1, (byte)(0x60 | type) }, 0, 5);
+                    for (int i = 1; i < size; ++i) result.WriteByte(0x55);
+                }
+                return result.ToArray();
+            }
         }
         private static Dictionary<string, object> InvitationObject(string text)
         {
@@ -172,6 +197,13 @@ namespace Knot.NativePreview
                 Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateNameMismatch, cert.Pin));
                 stage = "fresh-certificate-pin-reject";
                 Check(!RunCertificate.VerifyPinned(cert.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, new string('0', 64)));
+                if (certificateExportPath != null)
+                {
+                    stage = "fresh-certificate-public-der-export";
+                    byte[] der = cert.Certificate.Export(X509ContentType.Cert);
+                    Check(der.Length > 0 && der.Length <= 16384);
+                    using (FileStream output = new FileStream(certificateExportPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) output.Write(der, 0, der.Length);
+                }
             }
             stage = "fresh-certificate-owned-key-cleanup";
             bool deleted = false;
@@ -181,6 +213,51 @@ namespace Knot.NativePreview
             try { using (RSACryptoServiceProvider residual = new RSACryptoServiceProvider(onlyOwned)) { residual.PersistKeyInCsp = false; } }
             catch (CryptographicException) { deleted = true; }
             Check(deleted); // Lookup is solely this fixture's random owned name, never enumeration.
+        }
+        private static void UnicodeOwnershipChecks()
+        {
+            int pairs = 0, ups = 0;
+            WindowsInputSink sink = new WindowsInputSink(delegate(uint count, WindowsInputSink.Input[] inputs, int size)
+            {
+                Check(size == 40);
+                if (count == 2)
+                {
+                    ++pairs;
+                    Check(inputs.Length == 2 && inputs[0].type == 1 && inputs[1].type == 1);
+                    Check(inputs[0].value.keyboard.scan == '가' && inputs[0].value.keyboard.flags == 4);
+                    Check(inputs[1].value.keyboard.scan == '가' && inputs[1].value.keyboard.flags == 6);
+                    return 1; // Only the Unicode down was accepted.
+                }
+                Check(count == 1 && inputs.Length == 1 && inputs[0].type == 1);
+                Check(inputs[0].value.keyboard.scan == '가' && inputs[0].value.keyboard.flags == 6);
+                return ++ups <= 4 ? 0U : 1U;
+            });
+            InputSession partial = new InputSession(sink, new CaptureRectangle(0, 0, 1920, 1080));
+            Reject(delegate { partial.Accept(new Packet(0x21, Bytes("가"))); });
+            Check(pairs == 1 && ups == 3);
+            partial.Close(); Check(ups == 5); // No physical key/button was held.
+            Check(sink.ReleaseUnicode() && ups == 5); partial.Close(); Check(ups == 5);
+
+            int failedDownCalls = 0;
+            WindowsInputSink failedDown = new WindowsInputSink(delegate(uint count, WindowsInputSink.Input[] inputs, int size)
+            { ++failedDownCalls; Check(count == 2); return 0; });
+            InputSession rejected = new InputSession(failedDown, new CaptureRectangle(0, 0, 1920, 1080));
+            Reject(delegate { rejected.Accept(new Packet(0x21, Bytes("A"))); }); rejected.Close();
+            Check(failedDownCalls == 1); // An unaccepted down must never produce an up.
+
+            int boundedUps = 0;
+            bool permitRelease = false;
+            WindowsInputSink bounded = new WindowsInputSink(delegate(uint count, WindowsInputSink.Input[] inputs, int size)
+            { if (count == 2) return 1; ++boundedUps; return permitRelease ? 1U : 0U; });
+            InputSession exhausted = new InputSession(bounded, new CaptureRectangle(0, 0, 1920, 1080));
+            Reject(delegate { exhausted.Accept(new Packet(0x21, Bytes("A"))); }); exhausted.Close(); Check(boundedUps == 6);
+            permitRelease = true; Check(bounded.ReleaseUnicode() && boundedUps == 7);
+
+            int completePairs = 0;
+            WindowsInputSink complete = new WindowsInputSink(delegate(uint count, WindowsInputSink.Input[] inputs, int size)
+            { Check(count == 2); ++completePairs; return 2; });
+            InputSession surrogate = new InputSession(complete, new CaptureRectangle(0, 0, 1920, 1080));
+            surrogate.Accept(new Packet(0x21, Bytes("😀"))); surrogate.Close(); Check(completePairs == 2);
         }
         private static HostServer Server(FakeMediaFactory media, FakeInput sink, Invitation invitation)
         {
@@ -397,6 +474,7 @@ namespace Knot.NativePreview
                 }
             }
             public bool Text(string text) { LastText = text; lock (Events) Events.Add("text"); return true; }
+            public bool ReleaseUnicode() { return true; }
             public bool Pointer(byte action, ushort x, ushort y, CaptureRectangle rectangle) { lock (Events) Events.Add("pointer:" + action); return true; }
             public bool ReleaseButton(byte button) { lock (Events) Events.Add("pointer:" + (button * 2)); return true; }
             public bool Wheel(int vertical, int horizontal) { lock (Events) Events.Add("wheel"); return true; }

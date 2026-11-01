@@ -10,10 +10,12 @@ struct NativeDesktop: NSViewRepresentable {
 }
 
 @MainActor
-final class DesktopView: NSView, @MainActor NSTextInputClient {
+final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     weak var model: SessionModel?
     var imageSize = CGSize(width: 1920, height: 1080)
     private let video = AVSampleBufferDisplayLayer()
+    private var statusObservation: NSKeyValueObservation?
+    var onFailure: (() -> Void)?
     private var observers: [NSObjectProtocol] = []
     private var heldModifiers: Set<UInt16> = []
     private var marked = NSAttributedString(string: "")
@@ -23,6 +25,13 @@ final class DesktopView: NSView, @MainActor NSTextInputClient {
         super.init(frame: frame)
         wantsLayer = true; layer?.backgroundColor = NSColor.black.cgColor
         video.videoGravity = .resizeAspect; layer?.addSublayer(video)
+        statusObservation = video.sampleBufferRenderer.observe(\.status, options: [.new]) { @Sendable [weak self] _, change in
+            guard change.newValue == .failed else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.video.sampleBufferRenderer.status == .failed else { return }
+                self.onFailure?()
+            }
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     override func layout() { super.layout(); video.frame = bounds }
@@ -40,17 +49,17 @@ final class DesktopView: NSView, @MainActor NSTextInputClient {
         observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in Task { @MainActor in self?.model?.disconnect() } })
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.model?.releaseInput() } })
     }
-    func display(_ image: CVPixelBuffer) -> Bool {
+    func display(_ image: CVPixelBuffer) -> PresentationResult {
         let renderer = video.sampleBufferRenderer
-        if renderer.status == .failed { renderer.flush(removingDisplayedImage: true, completionHandler: nil); return false }
-        guard renderer.isReadyForMoreMediaData else { return false }
+        guard renderer.status != .failed else { return .failed }
+        guard renderer.isReadyForMoreMediaData else { return .backpressure }
         var format: CMVideoFormatDescription?, sample: CMSampleBuffer?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image, formatDescriptionOut: &format) == noErr, let format else { return false }
+        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image, formatDescriptionOut: &format) == noErr, let format else { return .failed }
         var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
-        guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image, formatDescription: format, sampleTiming: &timing, sampleBufferOut: &sample) == noErr, let sample else { return false }
+        guard CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: image, formatDescription: format, sampleTiming: &timing, sampleBufferOut: &sample) == noErr, let sample else { return .failed }
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true) as? [NSMutableDictionary], let first = attachments.first { first[kCMSampleAttachmentKey_DisplayImmediately] = true }
         renderer.enqueue(sample)
-        return true
+        return renderer.status == .failed ? .failed : .presented
     }
     func clear() { video.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil); marked = NSAttributedString(string: "") }
     func forgetHeldKeys() { heldModifiers.removeAll(); marked = NSAttributedString(string: "") }

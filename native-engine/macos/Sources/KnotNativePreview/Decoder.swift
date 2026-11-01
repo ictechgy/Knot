@@ -50,7 +50,7 @@ final class NativeDecoder {
         guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample) == noErr, let sample else { throw NativeFailure.decoder }
         let expectedGeneration = generation
         inFlight += 1
-        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [._EnableAsynchronousDecompression], infoFlagsOut: nil) { [weak self] status, _, image, _, _ in
+        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [._EnableAsynchronousDecompression], infoFlagsOut: nil) { @Sendable [weak self] status, _, image, _, _ in
             let transferred = image.map { PixelTransfer(buffer: $0) }
             Task { @MainActor [weak self] in
                 guard let self, self.generation == expectedGeneration else { return }

@@ -103,18 +103,18 @@ namespace Knot.NativePreview
         internal static void Validate(byte[] bytes, int count, uint flags)
         {
             if (count < 4 || count > NativeProtocol.VideoLimit - 17 || flags > 1 || Prefix(bytes, 0, count) == 0) throw new ProtocolException("encoder");
-            int at = 0, nals = 0;
+            int at = 0, nals = 0, spsCount = 0, ppsCount = 0;
             bool sps = false, pps = false, idr = false;
             while (at < count)
             {
                 int prefix = Prefix(bytes, at, count), payload = at + prefix;
-                if (prefix == 0 || payload >= count || ++nals > 1024) throw new ProtocolException("encoder");
+                if (prefix == 0 || payload >= count || ++nals > 128) throw new ProtocolException("encoder");
                 int next = payload + 1;
                 while (next < count && Prefix(bytes, next, count) == 0) ++next;
                 int type = bytes[payload] & 31;
                 if ((bytes[payload] & 128) != 0 || type < 1 || type > 23 || (type == 7 || type == 8) && next - payload > 65536) throw new ProtocolException("encoder");
-                if (type == 7) sps = true;
-                if (type == 8) pps = true;
+                if (type == 7) { sps = true; if (++spsCount > 8) throw new ProtocolException("encoder"); }
+                if (type == 8) { pps = true; if (++ppsCount > 8) throw new ProtocolException("encoder"); }
                 if (type == 5) idr = true;
                 at = next;
             }

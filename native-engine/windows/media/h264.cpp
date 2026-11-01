@@ -3,6 +3,15 @@
 namespace knot {
 namespace {
 struct Nal { size_t begin, end; };
+struct ParameterLimits {
+    size_t sps = 0, pps = 0;
+    bool Accept(uint8_t type, size_t size) {
+        if (type != 7 && type != 8) return true;
+        if (size > kMaxParameterSetBytes) return false;
+        size_t& count = type == 7 ? sps : pps;
+        return ++count <= kMaxParameterSetsPerType;
+    }
+};
 size_t Prefix(const uint8_t* p, size_t size, size_t at) {
     if (at + 3 <= size && p[at] == 0 && p[at + 1] == 0 && p[at + 2] == 1) return 3;
     if (at + 4 <= size && p[at] == 0 && p[at + 1] == 0 && p[at + 2] == 0 && p[at + 3] == 1) return 4;
@@ -11,6 +20,7 @@ size_t Prefix(const uint8_t* p, size_t size, size_t at) {
 bool Split(const uint8_t* p, size_t size, std::vector<Nal>& nals) {
     if (!p || size == 0 || size > kMaxAccessUnit || Prefix(p, size, 0) == 0) return false;
     size_t at = 0;
+    ParameterLimits parameters;
     while (at < size) {
         const size_t prefix = Prefix(p, size, at);
         if (prefix == 0 || nals.size() == kMaxNals) return false;
@@ -21,7 +31,7 @@ bool Split(const uint8_t* p, size_t size, std::vector<Nal>& nals) {
         while (end > begin && p[end - 1] == 0) --end; // AnnexB trailing_zero_8bits
         if (end == begin || (p[begin] & 0x80U) != 0) return false;
         const uint8_t type = p[begin] & 31U;
-        if (type == 0 || type >= 24) return false;
+        if (type == 0 || type >= 24 || !parameters.Accept(type, end - begin)) return false;
         nals.push_back({begin, end});
     }
     return !nals.empty();
@@ -40,6 +50,7 @@ bool NormalizeH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out) 
         for (const auto& n : nals) Append(out, data + n.begin, n.end - n.begin);
     } else {
         size_t at = 0, count = 0;
+        ParameterLimits parameters;
         while (at < size) {
             if (size - at < 4 || ++count > kMaxNals) return false;
             const uint32_t length = (static_cast<uint32_t>(data[at]) << 24U) |
@@ -47,12 +58,17 @@ bool NormalizeH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out) 
                 (static_cast<uint32_t>(data[at + 2]) << 8U) | data[at + 3];
             at += 4;
             if (length == 0 || length > size - at) return false;
-            if ((data[at] & 0x80U) != 0 || (data[at] & 31U) == 0 || (data[at] & 31U) >= 24) return false;
+            const uint8_t type = data[at] & 31U;
+            if ((data[at] & 0x80U) != 0 || type == 0 || type >= 24 ||
+                !parameters.Accept(type, length)) return false;
             Append(out, data + at, length);
             at += length;
         }
     }
-    return !out.empty() && out.size() <= kMaxAccessUnit;
+    // Length-prefixed input must also satisfy the final AnnexB wire bounds;
+    // malformed unescaped payload bytes must not bypass the consumer's count.
+    std::vector<Nal> normalized;
+    return !out.empty() && out.size() <= kMaxAccessUnit && Split(out.data(), out.size(), normalized);
 }
 
 bool AnalyzeH264(const std::vector<uint8_t>& bytes, bool& idr, bool& sps,
@@ -86,16 +102,18 @@ bool SequenceHeaderH264(const uint8_t* data, size_t size, std::vector<uint8_t>& 
     const uint32_t spsCount = data[5] & 31U;
     for (uint32_t group = 0; group < 2; ++group) {
         const uint32_t count = group == 0 ? spsCount : (at < size ? data[at++] : 0);
-        if (count == 0 || count > 32) return false;
+        if (count == 0 || count > kMaxParameterSetsPerType) return false;
         for (uint32_t i = 0; i < count; ++i) {
             if (size - at < 2) return false;
             const size_t length = (static_cast<size_t>(data[at]) << 8U) | data[at + 1];
             at += 2;
-            if (length == 0 || length > size - at || (data[at] & 31U) != (group == 0 ? 7U : 8U)) return false;
+            if (length == 0 || length > size - at || length > kMaxParameterSetBytes ||
+                (data[at] & 0x80U) != 0 || (data[at] & 31U) != (group == 0 ? 7U : 8U)) return false;
             Append(out, data + at, length);
             at += length;
         }
     }
-    return out.size() <= kMaxParameterSets;
+    std::vector<Nal> normalized;
+    return out.size() <= kMaxParameterSets && Split(out.data(), out.size(), normalized);
 }
 } // namespace knot

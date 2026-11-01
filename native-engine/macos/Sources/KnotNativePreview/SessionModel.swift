@@ -12,7 +12,12 @@ final class SessionModel: ObservableObject {
     @Published var videoSize = CGSize(width: 1920, height: 1080)
     @Published var inputRecovery = false
     @Published var textMode = false
-    weak var surface: DesktopView?
+    weak var surface: (any NativePresenter)? {
+        didSet {
+            oldValue?.onFailure = nil
+            if [.decoding, .streaming].contains(phase) { armPresentationFailure() }
+        }
+    }
     private var channel: (any NativeChannel)?
     private let makeChannel: @Sendable (Invitation) throws -> any NativeChannel
     private var reader: Task<Void, Never>?
@@ -44,14 +49,14 @@ final class SessionModel: ObservableObject {
         receiveState = ReceiveState(); input = InputBuffer(); inputRecovery = false
         connectedAt = .now; lastIncoming = .now; lastHeartbeat = .now
         reader = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled, self.identity == id else { return }
             do {
                 let transport = try self.makeChannel(invitation); self.channel = transport
                 try await transport.start()
-                guard self.identity == id else { transport.close(); return }
+                guard self.identity == id, !Task.isCancelled else { transport.close(); return }
                 // This write completes before the sole post-Hello writer starts.
                 try await transport.send(invitation.hello())
-                guard self.identity == id else { transport.close(); return }
+                guard self.identity == id, !Task.isCancelled else { transport.close(); return }
                 self.invitation = nil // one-use token must not become reusable trust
                 self.connectedAt = .now
                 self.lastIncoming = .now
@@ -59,9 +64,10 @@ final class SessionModel: ObservableObject {
                 self.startTicker(id: id)
                 while !Task.isCancelled, self.identity == id {
                     let header = try await transport.readExactly(5)
+                    guard self.identity == id, !Task.isCancelled else { return }
                     let (kind, size) = try Packet.serverHeader(header)
                     let bytes = try await transport.readExactly(size)
-                    guard self.identity == id else { return }
+                    guard self.identity == id, !Task.isCancelled else { return }
                     self.lastIncoming = .now
                     let packet = Packet(kind: kind, payload: bytes)
                     let video = try self.receiveState.accept(packet)
@@ -72,14 +78,14 @@ final class SessionModel: ObservableObject {
                         let decoder = NativeDecoder(width: ready.width, height: ready.height)
                         decoder.onImage = { [weak self] image in
                             guard let self, self.identity == id else { return }
-                            guard self.surface?.display(image) == true else { return }
-                            self.phase = .streaming; self.status = "Receiving the host desktop. Temporary trust; no saved pairing."
+                            self.presentDecodedImage(image)
                         }
                         decoder.onFailure = { [weak self] in
                             guard let self, self.identity == id else { return }
                             self.fail("The native decoder stopped. Create a new invitation to reconnect.")
                         }
                         self.decoder = decoder; self.phase = .decoding
+                        self.armPresentationFailure()
                         self.readyAt = .now
                         self.status = "Host approved and encoder ready. Waiting for the first decoded image…"
                     case .video: if let video { try self.decoder?.decode(video.accessUnit) }
@@ -92,6 +98,27 @@ final class SessionModel: ObservableObject {
             } catch {
                 if self.identity == id { self.fail("Connection ended or validation failed. Ask the host for a new invitation.") }
             }
+        }
+    }
+    func presentDecodedImage(_ image: CVPixelBuffer) {
+        guard [.decoding, .streaming].contains(phase) else { return }
+        switch surface?.display(image) ?? .backpressure {
+        case .presented:
+            phase = .streaming
+            if !inputRecovery { status = "Receiving the host desktop. Temporary trust; no saved pairing." }
+        case .backpressure: break
+        case .failed: presentationFailed()
+        }
+    }
+    private func presentationFailed() {
+        guard [.decoding, .streaming].contains(phase) else { return }
+        fail("The native display stopped. Create a new invitation to reconnect.")
+    }
+    private func armPresentationFailure() {
+        let id = identity
+        surface?.onFailure = { [weak self] in
+            guard let self, self.identity == id else { return }
+            self.presentationFailed()
         }
     }
     private static func message(_ code: String) -> String {
@@ -165,6 +192,7 @@ final class SessionModel: ObservableObject {
                     try Task.checkCancellation()
                     guard self.inputEpoch == epoch else { continue }
                     try await channel.send(packet)
+                    guard self.identity == id, !Task.isCancelled else { return }
                     self.nextInput = .now + .milliseconds(2) // <=500 input envelopes/second
                 }
                 if self.identity == id { self.writerBusy = false }
@@ -174,14 +202,15 @@ final class SessionModel: ObservableObject {
     func disconnect() { close(message: "Disconnected. Reconnect with a fresh invitation.", failed: false) }
     private func fail(_ message: String) { close(message: message, failed: true) }
     private func close(message: String, failed: Bool) {
-        identity = UUID(); ticker?.cancel(); reader?.cancel(); writer?.cancel()
-        let oldWriter = writer
+        identity = UUID(); inputEpoch &+= 1
+        input = InputBuffer()
+        ticker?.cancel(); reader?.cancel(); writer?.cancel()
         ticker = nil; reader = nil; writer = nil; writerBusy = false
-        let old = channel; channel = nil
-        // The final release follows the sole writer's completion, preserving the
-        // single sender invariant. The host also releases when TLS closes.
-        Task { await oldWriter?.value; if let old { try? await old.send(Packet(kind: .releaseAll)); old.close() } }
-        decoder?.stop(); decoder = nil; surface?.clear(); surface?.forgetHeldKeys()
+        // Revocation closes TLS synchronously, including an in-flight Hello or
+        // blocked input write. Host EOF cleanup releases accepted input. Waiting
+        // to send a final packet could otherwise keep a revoked session alive.
+        channel?.close(); channel = nil
+        decoder?.stop(); decoder = nil; surface?.onFailure = nil; surface?.clear(); surface?.forgetHeldKeys()
         invitation = nil; input = InputBuffer(); inputRecovery = false
         phase = failed ? .failed : .idle; status = message
     }
