@@ -111,6 +111,22 @@ private final class PortGate: @unchecked Sendable {
     #expect(!TLSChannel.evaluate(try wrongPurpose.trust(), expectedPin: wrongPurpose.pin))
 }
 
+@Test func freshWrongPinDisablesNetworkFetchBeforeTrustChainEvaluation() throws {
+    let fixture = try CertificateFixture()
+    let trust = try fixture.trust()
+    // Only this new self-signed fixture can anchor the regression probe. The
+    // fixture contains no issuer/AIA URL and its identity is memory-only.
+    try #require(SecTrustSetAnchorCertificates(trust, [fixture.certificate] as CFArray) == errSecSuccess)
+    try #require(SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess)
+    var allowed = DarwinBoolean(false)
+    try #require(SecTrustGetNetworkFetchAllowed(trust, &allowed) == errSecSuccess)
+    try #require(allowed.boolValue) // Exercise the SSL policy's initial fetch-enabled state.
+    #expect(!TLSChannel.evaluate(trust, expectedPin: String(repeating: "0", count: 64)))
+    allowed = DarwinBoolean(true)
+    try #require(SecTrustGetNetworkFetchAllowed(trust, &allowed) == errSecSuccess)
+    #expect(!allowed.boolValue) // The wrong-pin early return must retain the offline policy.
+}
+
 @Test func freshLoopbackTLSCorrectAndMismatchedPin() async throws {
     let fixture = try CertificateFixture()
     let server = try LoopbackHost(identity: fixture.identity)

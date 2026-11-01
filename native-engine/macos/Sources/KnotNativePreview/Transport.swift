@@ -46,13 +46,15 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
     /// Exact leaf DER pin plus OS validity, server purpose and DNS verification.
     /// No ambient trust anchors, revocation/network fetch or persisted trust.
     static func evaluate(_ trust: SecTrust, expectedPin: String) -> Bool {
+        // Policy replacement must precede the offline option: the latter lives
+        // in those policy options. Copying the chain can itself evaluate trust.
+        guard SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, "knot-native" as CFString)) == errSecSuccess,
+              SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess else { return false }
         guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = chain.first else { return false }
         let digest = SHA256.hash(data: SecCertificateCopyData(leaf) as Data).map { String(format: "%02x", $0) }.joined()
         guard digest == expectedPin,
-              SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, "knot-native" as CFString)) == errSecSuccess,
               SecTrustSetAnchorCertificates(trust, [leaf] as CFArray) == errSecSuccess,
-              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
-              SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess else { return false }
+              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess else { return false }
         return SecTrustEvaluateWithError(trust, nil)
     }
 
