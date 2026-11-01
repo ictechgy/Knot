@@ -217,7 +217,22 @@ class Builder:
         if self.platform == "macos":
             configure.extend(["-DCMAKE_OSX_ARCHITECTURES=arm64", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.0"])
         else:
-            configure.extend(["-G", "Visual Studio 17 2022", "-A", "x64"])
+            # Match the installed MSVC instance instead of assuming one VS release
+            # remains present on the runner or a contributor's machine.
+            installer = Path(os.environ["ProgramFiles(x86)"]) / "Microsoft Visual Studio/Installer/vswhere.exe"
+            instances = json.loads(self.run("pairing-find-visual-studio", [installer, "-latest", "-products", "*",
+                "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-format", "json"]).decode("utf-8-sig"))
+            capabilities = json.loads(self.run("pairing-cmake-capabilities", [cmake, "-E", "capabilities"]).decode("utf-8-sig"))
+            if not isinstance(instances, list) or len(instances) != 1:
+                raise ValueError("One installed Visual Studio C++ x64 instance is required")
+            instance = instances[0]
+            major = str(instance.get("installationVersion", "")).split(".")[0]
+            generators = [item["name"] for item in capabilities.get("generators", [])
+                          if re.fullmatch(r"Visual Studio " + re.escape(major) + r" [0-9]{4}", item.get("name", ""))]
+            installation = Path(instance.get("installationPath", ""))
+            if not major.isdigit() or len(generators) != 1 or not installation.is_dir():
+                raise ValueError("Installed MSVC release needs a matching supported CMake generator")
+            configure.extend(["-G", generators[0], "-A", "x64", "-DCMAKE_GENERATOR_INSTANCE=" + str(installation)])
         inputs = [self.input(path) for path in [source / "CMakeLists.txt", source / "knot_pairing.cpp",
                   source / "include/knot_pairing.h", provenance_path,
                   source / "tests/crypto_checks.cpp", source / "tests/upstream_main.cpp"]]
