@@ -24,7 +24,7 @@ namespace Knot.NativePreview
             internal bool Help;
             internal int Width, Height;
             internal float Scale;
-            internal string StatusOverride;
+            internal string StatusOverride, ViewerLabelOverride;
             internal Frame(string name, HostViewPhase phase, bool help, int width, int height, float scale)
             { Name = name; Phase = phase; Help = help; Width = width; Height = height; Scale = scale; }
         }
@@ -100,6 +100,8 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-ended-error-compact.png", HostViewPhase.Stopped, false, 800, 620, 1) { StatusOverride = PreviewCopy.Status(HostServer.Guidance("encoder")) });
                 frames.Add(new Frame("windows-request-scale150.png", HostViewPhase.Request, false, 1040, 740, 1.5f));
                 frames.Add(new Frame("windows-request-scale200.png", HostViewPhase.Request, false, 1040, 740, 2f));
+                frames.Add(new Frame("windows-request-long-name-scale200.png", HostViewPhase.Request, false, 1040, 740, 2f) { ViewerLabelOverride = new string('W', 64) });
+                frames.Add(new Frame("windows-ended-error-scale200.png", HostViewPhase.Stopped, false, 1040, 740, 2f) { StatusOverride = PreviewCopy.Status(HostServer.Guidance("encoder")) });
                 List<string> records = new List<string>();
                 using (Icon icon = new Icon(iconPath, 256, 256))
                 {
@@ -115,10 +117,11 @@ namespace Knot.NativePreview
                             form.StartPosition = FormStartPosition.Manual; form.Location = new Point(20, 20);
                             form.ClientSize = new Size((int)(frame.Width * frame.Scale), (int)(frame.Height * frame.Scale));
                             HostViewSnapshot state = Snapshot(frame.Phase);
-                            if (frame.StatusOverride != null)
-                                state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, state.ViewerLabel, state.ObservedAddress, frame.StatusOverride, state.CanCopy);
+                            if (frame.StatusOverride != null || frame.ViewerLabelOverride != null)
+                                state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy);
                             form.SetFixturePresentation(state, frame.Help);
                             form.Show(); form.PerformLayout(); Pump();
+                            for (int layoutPass = 0; layoutPass < 3; ++layoutPass) { form.PrepareFixtureLayout(); Pump(); }
                             if (frame.Phase == HostViewPhase.Invitation)
                             {
                                 form.SetFixturePresentation(state, true); Pump();
@@ -131,6 +134,7 @@ namespace Knot.NativePreview
                                 ",copyVisible=" + form.CopyVisible + ",copyEnabled=" + form.CopyEnabled +
                                 ",approvalVisible=" + form.ApprovalVisible + ",approvalEnabled=" + form.ApprovalEnabled +
                                 ",stopVisible=" + form.StopVisible + ",help=" + form.HelpVisible + "]";
+                            currentFrame += " layout[" + form.FixtureLayoutDiagnostic + "]";
                             if (!form.FixtureMode || !form.Visible || form.HelpVisible != frame.Help)
                                 throw new InvalidOperationException("Synthetic form state is not visible.");
                             if (form.DisplayedPin != state.Pin) throw new InvalidOperationException("Synthetic pin was not retained exactly.");
@@ -145,6 +149,8 @@ namespace Knot.NativePreview
                             if (form.ApprovalEnabled != expectedApproval)
                                 throw new InvalidOperationException("Approval must be an explicit pending-request action.");
                             if (form.StopVisible != state.RunPresent) throw new InvalidOperationException("Stop action is not lifecycle-bound.");
+                            if (!form.FixtureFooterFits) throw new InvalidOperationException("Fixed status text and stop action must fit the actual client viewport.");
+                            if (expectedApproval && !form.FixtureConsentFits) throw new InvalidOperationException("The full pin, observed address, unverified name and consent actions must fit the request viewport.");
                             float actualDpi;
                             using (Graphics graphics = form.CreateGraphics()) actualDpi = graphics.DpiX;
                             string path = Path.Combine(output, frame.Name);
@@ -160,6 +166,9 @@ namespace Knot.NativePreview
                                 records.Add("{\"name\":" + Q(frame.Name) + ",\"sha256\":" + Q(Digest(path)) +
                                     ",\"bytes\":" + new FileInfo(path).Length + ",\"width\":" + bitmap.Width + ",\"height\":" + bitmap.Height +
                                     ",\"clientWidth\":" + form.ClientSize.Width + ",\"clientHeight\":" + form.ClientSize.Height +
+                                    ",\"requestedClientWidth\":" + (int)(frame.Width * frame.Scale) + ",\"requestedClientHeight\":" + (int)(frame.Height * frame.Scale) +
+                                    ",\"logicalClientWidth\":" + form.FixtureLogicalWidth.ToString(CultureInfo.InvariantCulture) + ",\"responsiveCompact\":" + (form.FixtureCompactMode ? "true" : "false") +
+                                    ",\"footerFits\":true,\"consentFits\":" + (expectedApproval ? "true" : "null") +
                                     ",\"layoutFontScale\":" + frame.Scale.ToString(CultureInfo.InvariantCulture) +
                                     ",\"actualDrawingDpi\":" + actualDpi.ToString(CultureInfo.InvariantCulture) +
                                     ",\"state\":" + Q(frame.Phase.ToString()) + ",\"controlCount\":" + CountControls(form) +

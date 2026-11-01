@@ -24,25 +24,26 @@ namespace Knot.NativePreview
         private readonly float scale;
         private readonly bool fixtureMode;
         private readonly ComboBox addresses = new ComboBox();
-        private readonly PreviewButton share, copy, stop, approve, decline, desktopNavigation, helpNavigation, networkDisclosure;
+        private readonly PreviewButton share, copy, stop, approve, decline, desktopNavigation, helpNavigation, networkDisclosure, compactDesktopNavigation, compactHelpNavigation;
         private readonly TextBox status = new TextBox(), pin = new TextBox();
-        private readonly Label headerTitle, headerSubtitle, badge, stateStep, stateTitle, stateDescription, requestName, requestAddress, requestWarning, networkValue;
+        private readonly Label headerTitle, headerSubtitle, badge, stateStep, stateTitle, stateDescription, requestName, requestAddress, requestWarning, networkValue, privacy, trustTitle;
         private readonly Panel scroll = new Panel();
-        private readonly TableLayoutPanel body, helpBody, networkSettings;
-        private readonly FlowLayoutPanel actions;
-        private readonly PreviewCard taskCard;
+        private readonly TableLayoutPanel body, helpBody, networkSettings, shell, header;
+        private readonly FlowLayoutPanel actions, compactNavigation;
+        private readonly PreviewCard taskCard, networkCard;
+        private readonly Panel main, rail, footer;
         private readonly TableLayoutPanel requestPanel, trustPanel;
         private readonly MonitorIllustration illustration = new MonitorIllustration();
         private readonly List<Label> wrappingLabels = new List<Label>();
         private readonly RunPresentation presentation = new RunPresentation();
         private readonly Timer lifecycleTimer = new Timer();
         private Icon ownedIcon;
-        private KnotBrandMark brandMark;
+        private KnotBrandMark brandMark, compactBrandMark;
         private HostServer server;
         private HostViewPhase phase;
         private HostViewSnapshot fixture;
         private string rawStatus = "";
-        private bool closing, helpVisible, settingWrapWidths, invitationAvailable;
+        private bool closing, helpVisible, settingWrapWidths, invitationAvailable, responsiveLayout, compactMode, densityApplied;
 
         internal PreviewForm() : this(PrivateAddresses(), false, null, 1f) { }
 
@@ -53,7 +54,7 @@ namespace Knot.NativePreview
             if (layoutScale < 1 || layoutScale > 2) throw new ArgumentException("Invalid fixture layout scale.");
             fixtureMode = visualFixture; scale = visualFixture ? layoutScale : 1f;
             Text = "Knot Native Preview"; ClientSize = new Size(P(1040), P(740));
-            MinimumSize = new Size(P(800), P(620)); StartPosition = FormStartPosition.CenterScreen;
+            MinimumSize = new Size(P(500), P(360)); StartPosition = FormStartPosition.CenterScreen;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = visualFixture ? AutoScaleMode.None : AutoScaleMode.Dpi;
             Font = PreviewStyle.Type(10.5f, FontStyle.Regular, scale); BackColor = PreviewStyle.Canvas;
             try
@@ -74,21 +75,24 @@ namespace Knot.NativePreview
             decline = ActionButton("거절", PreviewButtonKind.Secondary);
             desktopNavigation = ActionButton("이 PC 공유", PreviewButtonKind.Navigation);
             helpNavigation = ActionButton("연결 안내", PreviewButtonKind.Navigation);
+            compactDesktopNavigation = ActionButton("이 PC 공유", PreviewButtonKind.Navigation);
+            compactHelpNavigation = ActionButton("연결 안내", PreviewButtonKind.Navigation);
             networkDisclosure = ActionButton("연결 경로 변경", PreviewButtonKind.Secondary);
             networkDisclosure.Font = PreviewStyle.Type(9, FontStyle.Regular, scale);
             networkDisclosure.MinimumSize = new Size(0, P(34));
 
-            TableLayoutPanel shell = Column(); shell.Dock = DockStyle.Fill; shell.AutoSize = false;
+            shell = Column(); shell.Dock = DockStyle.Fill; shell.AutoSize = false;
             shell.ColumnCount = 2; shell.ColumnStyles.Clear();
             shell.RowCount = 1; shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, P(204)));
             shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             Controls.Add(shell);
-            shell.Controls.Add(BuildSidebar(), 0, 0);
+            rail = (Panel)BuildSidebar(); shell.Controls.Add(rail, 0, 0);
 
-            Panel main = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = PreviewStyle.Canvas };
+            main = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = PreviewStyle.Canvas };
             shell.Controls.Add(main, 1, 0);
-            TableLayoutPanel header = Column(); header.Dock = DockStyle.Top; header.Padding = new Padding(P(32), P(28), P(32), P(20));
+            header = Column(); header.Dock = DockStyle.Top; header.Padding = new Padding(P(32), P(28), P(32), P(20));
+            compactNavigation = BuildCompactNavigation(); compactNavigation.Visible = false; header.Controls.Add(compactNavigation);
             headerTitle = MakeLabel("이 PC를 Mac에서 열기", 24, FontStyle.Bold); headerTitle.Margin = new Padding(0, 0, 0, P(8));
             header.Controls.Add(headerTitle);
             headerSubtitle = MakeLabel("원하는 순간에만 화면과 입력을 공유하세요.", 10.5f, FontStyle.Regular); header.Controls.Add(headerSubtitle);
@@ -96,7 +100,7 @@ namespace Knot.NativePreview
             badge.Margin = new Padding(0, P(12), 0, 0); header.Controls.Add(badge);
             main.Controls.Add(header);
 
-            Panel footer = BuildFooter(); main.Controls.Add(footer);
+            footer = BuildFooter(); main.Controls.Add(footer);
             scroll.Dock = DockStyle.Fill; scroll.AutoScroll = true; scroll.BackColor = PreviewStyle.Canvas;
             main.Controls.Add(scroll); scroll.BringToFront();
             body = Column(); body.Padding = new Padding(P(32), 0, P(32), P(20)); body.Dock = DockStyle.Top;
@@ -121,7 +125,7 @@ namespace Knot.NativePreview
             taskCard.Content.Controls.Add(requestPanel);
 
             trustPanel = Column(); trustPanel.Dock = DockStyle.Top; trustPanel.Margin = new Padding(0, 0, 0, P(18));
-            Label trustTitle = MakeLabel("인증서 지문 · Mac에 표시된 값과 비교해주세요", 9, FontStyle.Bold);
+            trustTitle = MakeLabel("인증서 지문 · Mac에 표시된 값과 비교해주세요", 9, FontStyle.Bold);
             trustTitle.Margin = new Padding(0, 0, 0, P(8)); trustPanel.Controls.Add(trustTitle);
             pin.ReadOnly = true; pin.Multiline = true; pin.WordWrap = true; pin.BorderStyle = BorderStyle.None;
             pin.Font = new Font("Consolas", 10 * scale); pin.BackColor = PreviewStyle.Surface; pin.ForeColor = PreviewStyle.Ink;
@@ -133,7 +137,7 @@ namespace Knot.NativePreview
             actions.Controls.AddRange(new Control[] { share, copy, approve, decline });
             taskCard.Content.Controls.Add(actions);
 
-            PreviewCard networkCard = new PreviewCard(scale); networkCard.Dock = DockStyle.Top; body.Controls.Add(networkCard);
+            networkCard = new PreviewCard(scale); networkCard.Dock = DockStyle.Top; body.Controls.Add(networkCard);
             TableLayoutPanel networkHeading = Column(); networkHeading.ColumnCount = 2; networkHeading.ColumnStyles.Clear();
             networkHeading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); networkHeading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             Label networkTitle = MakeLabel("연결 네트워크", 9, FontStyle.Bold); networkTitle.ForeColor = PreviewStyle.Muted;
@@ -150,17 +154,22 @@ namespace Knot.NativePreview
             if (addresses.Items.Count > 0) addresses.SelectedIndex = 0;
             networkSettings.Controls.Add(addresses); networkSettings.Visible = false; networkCard.Content.Controls.Add(networkSettings);
 
-            Label privacy = MakeLabel("허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.", 9, FontStyle.Regular);
+            privacy = MakeLabel("허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.", 9, FontStyle.Regular);
             privacy.Margin = new Padding(P(2), 0, P(2), P(12)); body.Controls.Add(privacy);
 
             helpBody = BuildHelp(); helpBody.Dock = DockStyle.Top; helpBody.Visible = false; scroll.Controls.Add(helpBody);
             desktopNavigation.Click += delegate { ShowHelp(false); };
             helpNavigation.Click += delegate { ShowHelp(true); };
+            compactDesktopNavigation.Click += delegate { ShowHelp(false); };
+            compactHelpNavigation.Click += delegate { ShowHelp(true); };
             networkDisclosure.Click += delegate { networkSettings.Visible = !networkSettings.Visible; UpdateWrapWidths(); };
             addresses.SelectedIndexChanged += delegate { UpdateNetwork(); };
-            SizeChanged += delegate { UpdateWrapWidths(); };
+            SizeChanged += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
+            Shown += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
             body.SizeChanged += delegate { UpdateWrapWidths(); };
             helpBody.SizeChanged += delegate { UpdateWrapWidths(); };
+            pin.SizeChanged += delegate { ApplyResponsiveLayout(); };
+            status.SizeChanged += delegate { ApplyResponsiveLayout(); };
             lifecycleTimer.Interval = 250;
             lifecycleTimer.Tick += delegate
             {
@@ -215,6 +224,20 @@ namespace Knot.NativePreview
             footer.Dock = DockStyle.Bottom; footer.Margin = new Padding(P(8), 0, 0, 0); rail.Controls.Add(footer);
             return rail;
         }
+        private FlowLayoutPanel BuildCompactNavigation()
+        {
+            FlowLayoutPanel navigation = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
+            compactBrandMark = new KnotBrandMark(ownedIcon) { Width = P(24), Height = P(24), MinimumSize = new Size(P(24), P(24)), Margin = new Padding(0, P(4), P(8), 0) };
+            navigation.Controls.Add(compactBrandMark);
+            Label name = MakeLabel("Knot", 12, FontStyle.Bold); name.Dock = DockStyle.None; name.Margin = new Padding(0, P(5), P(16), 0); navigation.Controls.Add(name);
+            foreach (PreviewButton button in new PreviewButton[] { compactDesktopNavigation, compactHelpNavigation })
+            {
+                Font old = button.Font; button.Font = PreviewStyle.Type(9, FontStyle.Bold, scale); old.Dispose();
+                button.Padding = new Padding(P(8), P(5), P(8), P(5)); button.MinimumSize = new Size(0, P(32));
+                button.Margin = new Padding(0, 0, P(6), 0); navigation.Controls.Add(button);
+            }
+            return navigation;
+        }
         private Panel BuildFooter()
         {
             Panel footer = new Panel { Dock = DockStyle.Bottom, Height = P(88), Padding = new Padding(P(32), P(18), P(32), P(18)), BackColor = PreviewStyle.Canvas };
@@ -252,9 +275,95 @@ namespace Knot.NativePreview
             headerTitle.Text = show ? "Mac 연결 안내" : "이 PC를 Mac에서 열기";
             headerSubtitle.Text = show ? "처음 연결부터, 공유를 마칠 때까지." : "원하는 순간에만 화면과 입력을 공유하세요.";
             desktopNavigation.Selected = !show; helpNavigation.Selected = show; desktopNavigation.Invalidate(); helpNavigation.Invalidate();
+            compactDesktopNavigation.Selected = !show; compactHelpNavigation.Selected = show; compactDesktopNavigation.Invalidate(); compactHelpNavigation.Invalidate();
             desktopNavigation.AccessibleDescription = show ? "이 PC 공유 화면으로 이동" : "현재 선택한 화면";
             helpNavigation.AccessibleDescription = show ? "현재 선택한 화면" : "연결 안내 화면으로 이동";
-            scroll.AutoScrollPosition = Point.Empty; UpdateWrapWidths();
+            compactDesktopNavigation.AccessibleDescription = desktopNavigation.AccessibleDescription;
+            compactHelpNavigation.AccessibleDescription = helpNavigation.AccessibleDescription;
+            scroll.AutoScrollPosition = Point.Empty; ApplyResponsiveLayout(); UpdateWrapWidths();
+        }
+        private float CurrentLayoutScale { get { return fixtureMode ? scale : DeviceDpi / 96f; } }
+        private int R(float value) { return (int)Math.Round(value * CurrentLayoutScale); }
+        private static void SetOwnedFont(Control control, Font next)
+        {
+            Font previous = control.Font; control.Font = next; previous.Dispose();
+        }
+        private int StatusTextHeight(int width)
+        {
+            return TextRenderer.MeasureText(status.Text.Length == 0 ? " " : status.Text, status.Font,
+                new Size(Math.Max(40, width), 32767), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPadding).Height;
+        }
+        private int PinTextHeight()
+        {
+            int width = Math.Max(R(40), pin.Width - R(8));
+            int textWidth = TextRenderer.MeasureText(pin.Text.Length == 0 ? "0" : pin.Text, pin.Font, Size.Empty,
+                TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+            int lines = Math.Max(1, (textWidth + width - 1) / width);
+            int lineHeight = TextRenderer.MeasureText("Ag", pin.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Height;
+            return lines * lineHeight + R(8);
+        }
+        private void ApplyResponsiveLayout()
+        {
+            if (responsiveLayout || shell == null || footer == null || body == null || helpBody == null || networkCard == null) return;
+            responsiveLayout = true;
+            try
+            {
+                HostViewSnapshot view = CurrentSnapshot();
+                bool compact = ClientSize.Width / CurrentLayoutScale < 920 || ClientSize.Height / CurrentLayoutScale < 680;
+                bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
+                if (!densityApplied || compactMode != compact)
+                {
+                    SetOwnedFont(stateTitle, PreviewStyle.Type(compact ? 14 : 17, FontStyle.Bold, scale));
+                    SetOwnedFont(requestName, PreviewStyle.Type(compact ? 9.5f : 13, FontStyle.Bold, scale));
+                    SetOwnedFont(requestAddress, PreviewStyle.Type(compact ? 9.5f : 10.5f, FontStyle.Regular, scale));
+                    SetOwnedFont(trustTitle, PreviewStyle.Type(compact ? 8.5f : 9, FontStyle.Bold, scale));
+                    SetOwnedFont(stop, PreviewStyle.Type(compact ? 9.5f : 10.5f, FontStyle.Bold, scale));
+                    SetOwnedFont(pin, new Font("Consolas", (compact ? 9 : 10) * scale));
+                    foreach (PreviewButton action in new PreviewButton[] { share, copy, approve, decline })
+                    {
+                        SetOwnedFont(action, PreviewStyle.Type(compact ? 9.5f : 10.5f, FontStyle.Bold, scale));
+                        action.MinimumSize = new Size(0, R(compact ? 36 : 44));
+                        action.Padding = compact ? new Padding(R(12), R(8), R(12), R(8)) : new Padding(R(18), R(10), R(18), R(10));
+                    }
+                    densityApplied = true;
+                }
+                compactMode = compact;
+                rail.Visible = !compact; shell.ColumnStyles[0].Width = compact ? 0 : R(204);
+                compactNavigation.Visible = compact; headerTitle.Visible = headerSubtitle.Visible = !compact;
+                header.Padding = compact ? new Padding(R(16), R(8), R(16), R(6)) : new Padding(R(32), R(28), R(32), R(20));
+                badge.Margin = new Padding(0, R(compact ? 4 : 12), 0, 0);
+                body.Padding = helpBody.Padding = new Padding(R(compact ? 16 : 32), 0, R(compact ? 16 : 32), R(compact ? 12 : 20));
+                taskCard.Padding = networkCard.Padding = new Padding(R(compact ? 12 : 24));
+                taskCard.Margin = networkCard.Margin = new Padding(0, 0, 0, R(compact ? 12 : 16));
+                foreach (Control control in helpBody.Controls)
+                {
+                    PreviewCard card = control as PreviewCard;
+                    if (card != null) { card.Padding = new Padding(R(compact ? 12 : 24)); card.Margin = new Padding(0, 0, 0, R(compact ? 12 : 16)); }
+                }
+                illustration.Visible = idle && !compact; stateStep.Visible = !compact;
+                stateTitle.Visible = !compact || idle;
+                stateDescription.Visible = !compact || idle || view.Phase == HostViewPhase.Invitation;
+                stateTitle.Margin = new Padding(0, 0, 0, R(compact ? 8 : 10));
+                stateDescription.Margin = new Padding(0, 0, 0, R(compact ? 12 : 20));
+                requestName.Margin = new Padding(0, 0, 0, R(4)); requestAddress.Margin = new Padding(0, 0, 0, R(6));
+                requestWarning.Visible = view.Phase == HostViewPhase.Request && !compact;
+                trustTitle.Margin = new Padding(0, 0, 0, R(compact ? 4 : 8));
+                trustPanel.Margin = new Padding(0, 0, 0, R(compact ? 8 : 18));
+                networkCard.Visible = !compact || !view.RunPresent;
+                privacy.Visible = !compact || idle;
+                stop.MinimumSize = new Size(0, R(compact ? 36 : 44));
+                stop.Padding = compact ? new Padding(R(12), R(8), R(12), R(8)) : new Padding(R(18), R(10), R(18), R(10));
+                footer.Padding = compact ? new Padding(R(16), R(10), R(16), R(10)) : new Padding(R(32), R(18), R(32), R(18));
+                status.Margin = new Padding(0, R(2), R(compact ? 12 : 18), 0);
+                shell.PerformLayout(); header.PerformLayout(); UpdateWrapWidths();
+                if (view.Pin.Length > 0) pin.Height = Math.Max(R(24), PinTextHeight());
+                Size stopSize = view.RunPresent ? stop.GetPreferredSize(Size.Empty) : Size.Empty;
+                int statusWidth = main.ClientSize.Width - footer.Padding.Horizontal - stopSize.Width - status.Margin.Horizontal;
+                int contentHeight = Math.Max(stopSize.Height, StatusTextHeight(statusWidth) + status.Margin.Vertical + R(4));
+                footer.Height = Math.Max(R(compact ? 64 : 88), contentHeight + footer.Padding.Vertical);
+                footer.PerformLayout();
+            }
+            finally { responsiveLayout = false; }
         }
         private void UpdateWrapWidths()
         {
@@ -306,7 +415,7 @@ namespace Knot.NativePreview
             stop.Visible = view.RunPresent; stop.Enabled = view.RunPresent && view.Phase != HostViewPhase.Stopping;
             addresses.Enabled = networkDisclosure.Enabled = !view.RunPresent;
             if (status.Text != view.Status) status.Text = view.Status;
-            UpdateWrapWidths();
+            ApplyResponsiveLayout(); UpdateWrapWidths();
         }
         internal void SetFixturePresentation(HostViewSnapshot snapshot, bool showHelp)
         {
@@ -323,7 +432,42 @@ namespace Knot.NativePreview
         internal bool CopyVisible { get { return copy.Visible; } }
         internal bool CopyEnabled { get { return copy.Visible && copy.Enabled; } }
         internal bool ApprovalEnabled { get { return approve.Visible && approve.Enabled && decline.Visible && decline.Enabled; } }
-        internal bool FixtureBrandPainted { get { return brandMark != null && brandMark.Visible && brandMark.DrawCalls > 0; } }
+        internal bool FixtureBrandPainted { get { return brandMark != null && brandMark.Visible && brandMark.DrawCalls > 0 || compactBrandMark != null && compactBrandMark.Visible && compactBrandMark.DrawCalls > 0; } }
+        internal bool FixtureCompactMode { get { return compactMode; } }
+        internal float FixtureLogicalWidth { get { return ClientSize.Width / CurrentLayoutScale; } }
+        private static Rectangle BoundsWithin(Control child, Control ancestor)
+        {
+            Point point = Point.Empty;
+            for (Control cursor = child; cursor != ancestor; cursor = cursor.Parent)
+            {
+                if (cursor == null) throw new InvalidOperationException("Control does not belong to the fixture ancestor.");
+                point.Offset(cursor.Left, cursor.Top);
+            }
+            return new Rectangle(point, child.Size);
+        }
+        internal bool FixtureFooterFits
+        {
+            get { return ClientRectangle.Contains(BoundsWithin(footer, this)) && footer.ClientRectangle.Contains(BoundsWithin(status, footer)) && status.ClientSize.Height >= StatusTextHeight(status.ClientSize.Width) && (!stop.Visible || footer.ClientRectangle.Contains(BoundsWithin(stop, footer))); }
+        }
+        internal bool FixtureConsentFits
+        {
+            get
+            {
+                return trustPanel.Visible && pin.ClientSize.Height >= PinTextHeight() - R(8) &&
+                    scroll.ClientRectangle.Contains(BoundsWithin(pin, scroll)) && scroll.ClientRectangle.Contains(BoundsWithin(requestName, scroll)) &&
+                    scroll.ClientRectangle.Contains(BoundsWithin(requestAddress, scroll)) && scroll.ClientRectangle.Contains(BoundsWithin(approve, scroll)) &&
+                    scroll.ClientRectangle.Contains(BoundsWithin(decline, scroll));
+            }
+        }
+        internal void PrepareFixtureLayout()
+        {
+            if (!fixtureMode) throw new InvalidOperationException("Synthetic layout preparation is unavailable in production.");
+            ApplyResponsiveLayout(); PerformLayout(); UpdateWrapWidths();
+        }
+        internal string FixtureLayoutDiagnostic
+        {
+            get { return "client=" + ClientSize + ",compact=" + compactMode + ",header=" + header.Bounds + ",footer=" + footer.Bounds + ",status=" + status.Bounds + ",statusTextHeight=" + StatusTextHeight(status.ClientSize.Width) + ",scroll=" + scroll.ClientRectangle + ",name=" + BoundsWithin(requestName, scroll) + ",pin=" + BoundsWithin(pin, scroll) + ",approve=" + BoundsWithin(approve, scroll) + ",decline=" + BoundsWithin(decline, scroll); }
+        }
 
         private void BindActions()
         {

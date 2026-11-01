@@ -140,12 +140,16 @@ private final class InertChannel: NativeChannel, @unchecked Sendable {
     private var pendingWrite: (Packet, CheckedContinuation<Void, any Error>)?
     private var attempts: [Kind] = []
     private let blockedKind: Kind?
+    private let readRegistrationDelay: Duration
     private var closeCalls = 0
     private var closed = false
-    init(blockedKind: Kind? = nil) { self.blockedKind = blockedKind }
+    init(blockedKind: Kind? = nil, readRegistrationDelay: Duration = .zero) {
+        self.blockedKind = blockedKind; self.readRegistrationDelay = readRegistrationDelay
+    }
     func start() async throws {}
     func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
-        try await withCheckedThrowingContinuation { value in
+        if readRegistrationDelay > .zero { try await Task.sleep(for: readRegistrationDelay) }
+        return try await withCheckedThrowingContinuation { value in
             lock.lock(); budgets.append(timeout)
             if closed { lock.unlock(); value.resume(throwing: NativeFailure.transport) }
             else if !queuedReads.isEmpty { let bytes = queuedReads.removeFirst(); lock.unlock(); value.resume(returning: bytes) }
@@ -335,16 +339,27 @@ private func syntheticPresentationPixel() throws -> CVPixelBuffer {
 }
 
 @Test @MainActor func startupUsesStageBudgetsAndSurvivesVirtualElevenSecondInitialization() async throws {
-    let transport = InertChannel(), presenter = InertPresenter([.presented])
+    // A published model phase precedes async read registration. Deliberately
+    // delay the latter so this test cannot pass only by scheduler coincidence.
+    let transport = InertChannel(readRegistrationDelay: .milliseconds(20)), presenter = InertPresenter([.presented])
     let model = beginInert(transport, presenter: presenter)
-    for _ in 0..<100 { if model.phase == .approval { break }; try await Task.sleep(for: .milliseconds(5)) }
+    let approvalReadDeadline = ContinuousClock.now + .seconds(2)
+    while ContinuousClock.now < approvalReadDeadline,
+          model.phase != .approval || transport.recordedBudgets().isEmpty {
+        try await Task.sleep(for: .milliseconds(5))
+    }
     try #require(model.phase == .approval)
+    try #require(!transport.recordedBudgets().isEmpty)
     #expect(transport.recordedBudgets().first == .seconds(65))
     // Virtual elapsed time exercises the real deadline policy without capture,
     // a real eleven-second delay or a fake claim of hardware startup evidence.
     #expect(model.checkDeadlines(now: .now + .seconds(11)))
     model.releaseInput()
     try await approveInert(transport, model)
+    let readyReadDeadline = ContinuousClock.now + .seconds(2)
+    while ContinuousClock.now < readyReadDeadline, !transport.recordedBudgets().contains(.seconds(10)) {
+        try await Task.sleep(for: .milliseconds(5))
+    }
     #expect(transport.recordedBudgets().contains(.seconds(10)))
     model.presentDecodedImage(try syntheticPresentationPixel())
     #expect(model.phase == .streaming && model.inputRecovery && model.status.contains("click"))
