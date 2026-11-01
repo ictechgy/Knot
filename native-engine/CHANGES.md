@@ -1,5 +1,13 @@
 # Native preview changes
 
+## 0.1.0-native.4
+
+- Rebuild both native interfaces around the approved Quiet Sidebar design: the actual Knot mark, calm surfaces, readable type, Korean guidance and a single task-focused primary action.
+- Mac shows invitation entry and explicit address/pin review before connecting. The active view keeps one stable native desktop, a compact toolbar and visible input recovery. Idle no longer shows a large empty black canvas. Help and Mac-name settings are secondary.
+- Windows presents share, code-copy and explicit request-approval stages with only the relevant controls, a selectable current pin and a fixed stop/status footer. Claimed viewer names remain unverified context; approval alone never claims a displayed remote image.
+- Add source-bound synthetic visual fixtures for light/dark, compact, error, approval and active states. The renderers use only new fake data and their own view trees; visual inspection remains separate from compile, synthetic render and real-device acceptance.
+- Keep the standalone engine, protocol, one-use trust and input/media lifecycle intact. Installation version is `0.1.0-native.4`, numeric PE version `0.1.0.4`, Mac bundle revision `4`.
+
 ## 0.1.0-native.3
 
 - Scan H.264 access units through borrowed bytes instead of an extra full-buffer array copy; NAL data remains independently owned and all parser limits are unchanged. Sliced-data regression checks cover nonzero source indices and lifetime independence.

@@ -12,6 +12,7 @@ on:
     paths:
       - 'native-engine/**'
       - 'scripts/build_native_engine.py'
+      - 'scripts/render_native_visual_fixture.py'
       - 'scripts/verify_native_installer.ps1'
       - 'scripts/build_snapshot.py'
       - 'scripts/check_source_checkout.py'
@@ -45,6 +46,15 @@ jobs:
       - run: python3 scripts/build_native_engine.py --platform macos
         env:
           KNOT_NATIVE_WINDOWS_FIXTURES: ${{ github.workspace }}/build/native-engine/windows-fixtures
+      - name: Upload only fresh synthetic Mac UI fixtures
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-macos-ui
+          path: |
+            build/native-engine/macos/visuals/
+            build/native-engine/macos/native-ui-visual-checks.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: native-macos-preview
@@ -104,6 +114,15 @@ jobs:
         run: python scripts/build_native_engine.py --platform windows
       - if: github.event_name == 'workflow_dispatch' && inputs.media_only
         run: python scripts/build_native_engine.py --platform windows --media-only
+      - name: Upload only fresh synthetic Windows UI fixtures
+        if: always() && (github.event_name != 'workflow_dispatch' || !inputs.media_only)
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-windows-ui
+          path: |
+            build/native-engine/windows/visuals/
+            build/native-engine/windows/native-ui-visual-checks.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: native-windows-preview

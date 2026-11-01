@@ -3,9 +3,11 @@ from pathlib import Path
 import json
 import os
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -31,6 +33,7 @@ class NativeRebuildTests(unittest.TestCase):
         self.git("config", "core.autocrlf", "false")
         for name in ["LICENSE", "INSTALLATION.md", "VERSION", ".gitignore", "fake-iscc",
                      "Assets/Brand/AppIcon.ico", "native-engine/windows/Native.iss", "scripts/verify_native_installer.ps1",
+                     "native-engine/windows/tests/NativeVisualFixtures.cs",
                      *["native-engine/windows/media/" + name for name in
                        ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp",
                         "h264_parser_test.cpp", "media_pacing_test.cpp", "media_activation_test.cpp"]]]:
@@ -46,7 +49,7 @@ class NativeRebuildTests(unittest.TestCase):
     def git(self, *args, **kwargs):
         return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE, **kwargs)
 
-    def build_with_inert_tools(self, corrupt_public_pin=False, corrupt_installer_version=False):
+    def build_with_inert_tools(self, corrupt_public_pin=False, corrupt_installer_version=False, invalid_visual=None):
         builder = native.Builder("windows", self.output)
         actual_run = builder.run
 
@@ -77,6 +80,26 @@ class NativeRebuildTests(unittest.TestCase):
                     fileVersion=native.NUMERIC_VERSION, fileParts=parts, productParts=parts,
                     inspectionOnly=True, installerExecuted=False,
                     inspector="INERT lifecycle test substitute; no PE inspected")).encode()
+            elif label == "native-ui-visual-checks":
+                self.assertEqual(argv[1], "--output")
+                visual_output = Path(argv[2])
+                self.assertEqual(argv[3:], ["--brand-icon", self.root / "Assets/Brand/AppIcon.ico"])
+                data = self.inert_visual_png()
+                rows = []
+                for state in ["idle", "invitation", "request", "preparing", "sharing", "failure", "help"]:
+                    image = visual_output / ("windows-" + state + ".png")
+                    image.write_bytes(data)
+                    rows.append(dict(name=image.name, sha256=native.digest(image), bytes=len(data), width=640, height=480))
+                report = dict(schema=1, status="passed", freshSyntheticOnly=True,
+                    productionEntryInvoked=False, networkInvoked=False, clipboardInvoked=False,
+                    certificateCreationInvoked=False, captureInvoked=False, actualInputInvoked=False,
+                    screenCaptureInvoked=False, existingUserUIRead=False, syntheticWindowsShown=False,
+                    visualAcceptance="manual-review-required", images=rows,
+                    renderMethod="INERT lifecycle test substitute; no native UI rendered")
+                if invalid_visual == "effects": report["networkInvoked"] = True
+                elif invalid_visual == "digest": rows[0]["sha256"] = "0" * 64
+                elif invalid_visual == "path": rows[0]["name"] = "../not-owned.png"
+                (visual_output / "visual-checks.json").write_text(json.dumps(report) + "\n")
             elif label in ["native-parser-checks", "native-pacing-checks", "native-activation-checks"]:
                 return b"INERT external-tool substitute for lifecycle checks only\n"
             else:
@@ -96,6 +119,15 @@ class NativeRebuildTests(unittest.TestCase):
              patch.object(builder, "msvc", side_effect=inert_msvc):
             builder.finish(builder.windows())
 
+    @staticmethod
+    def inert_visual_png():
+        """Valid synthetic bytes for build-boundary tests, never a UI screenshot."""
+        def chunk(kind, body):
+            return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xffffffff)
+        row = b"\0" + b"".join(bytes([x % 256, x * 3 % 256, x * 7 % 256]) for x in range(640))
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 640, 480, 8, 2, 0, 0, 0)) +
+                chunk(b"IDAT", zlib.compress(row * 480)) + chunk(b"IEND", b""))
+
     def test_same_owned_output_can_rebuild_with_create_new_public_fixture(self):
         self.build_with_inert_tools()
         self.build_with_inert_tools()
@@ -103,9 +135,14 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertTrue(record["checksPassed"])
         self.assertIn("native-test-public.cer", record["products"])
         self.assertIn("native-installer-metadata.json", record["products"])
+        self.assertIn("native-ui-visual-checks.json", record["products"])
         metadata = json.loads((self.output / "native-installer-metadata.json").read_text())
         self.assertEqual(metadata["productVersion"], native.VERSION)
         self.assertIn("INERT", metadata["inspector"])
+        visual = json.loads((self.output / "native-ui-visual-checks.json").read_text())
+        self.assertEqual(visual["visualAcceptance"], "manual-review-required")
+        self.assertIn("INERT", visual["rendererReport"]["renderMethod"])
+        self.assertEqual(len(visual["rendererReport"]["images"]), 7)
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
@@ -129,3 +166,22 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "SHA256SUMS").exists())
         self.assertFalse((self.output / "native-installer-metadata.json").exists())
+
+    def test_renderer_effect_claim_cannot_publish_success(self):
+        self.build_with_inert_tools()
+        with self.assertRaisesRegex(ValueError, "without production effects"):
+            self.build_with_inert_tools(invalid_visual="effects")
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+        self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
+
+    def test_renderer_digest_mismatch_cannot_publish_success(self):
+        with self.assertRaisesRegex(ValueError, "image bytes differ"):
+            self.build_with_inert_tools(invalid_visual="digest")
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+        self.assertFalse((self.output / "SHA256SUMS").exists())
+
+    def test_renderer_cannot_reference_outside_owned_output(self):
+        with self.assertRaisesRegex(ValueError, "Unsafe UI fixture image name"):
+            self.build_with_inert_tools(invalid_visual="path")
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+        self.assertFalse((self.output / "native-ui-visual-checks.json").exists())

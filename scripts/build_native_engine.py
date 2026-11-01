@@ -1,28 +1,67 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Build only the independent native-engine experiment; never launch its GUI/capture."""
+"""Build the independent engine and fresh synthetic UI fixtures; never run production GUI/capture."""
 from pathlib import Path
 import argparse
 import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
+import struct
 import subprocess
 import sys
+import zlib
 from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.3"
+VERSION = "0.1.0-native.4"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def png_dimensions(data):
+    """Bound and validate a fresh fixture PNG without third-party image code."""
+    if not 1024 <= len(data) <= 32 * 1024 * 1024 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("UI fixture must be an ordinary nonempty PNG")
+    at, dimensions, image_data, ended = 8, None, False, False
+    while at < len(data):
+        if at + 12 > len(data):
+            raise ValueError("Truncated UI fixture PNG")
+        size, kind = struct.unpack_from(">I4s", data, at)
+        if size > 32 * 1024 * 1024 or at + 12 + size > len(data):
+            raise ValueError("Oversized or truncated UI fixture PNG chunk")
+        body = data[at + 8:at + 8 + size]
+        if zlib.crc32(kind + body) & 0xffffffff != struct.unpack_from(">I", data, at + 8 + size)[0]:
+            raise ValueError("UI fixture PNG checksum differs")
+        if dimensions is None:
+            if kind != b"IHDR" or size != 13:
+                raise ValueError("UI fixture PNG has no initial dimensions")
+            width, height = struct.unpack_from(">II", body)
+            if not 320 <= width <= 8192 or not 240 <= height <= 8192 or width * height > 20_000_000:
+                raise ValueError("UI fixture dimensions are outside the bounded preview scope")
+            dimensions = width, height
+        elif kind == b"IHDR":
+            raise ValueError("Duplicate UI fixture PNG dimensions")
+        if kind == b"IDAT":
+            image_data = image_data or size > 0
+        if kind == b"IEND":
+            if size != 0 or at + 12 != len(data):
+                raise ValueError("UI fixture PNG has trailing data")
+            ended = True
+            break
+        at += 12 + size
+    if not dimensions or not image_data or not ended:
+        raise ValueError("UI fixture PNG is incomplete")
+    return dimensions
 
 
 class Builder:
@@ -44,7 +83,7 @@ class Builder:
         else:
             marker.write_text(json.dumps({"owner": "KnotNativeBuild", "schema": 1}) + "\n")
         # A failed rebuild must never leave an earlier success claim in place.
-        for name in ["NATIVE-BUILD.json", "SHA256SUMS"]:
+        for name in ["NATIVE-BUILD.json", "SHA256SUMS", "native-ui-visual-checks.json"]:
             (self.output / name).unlink(missing_ok=True)
         self.evidence = self.output / "evidence"
         self.evidence.mkdir(exist_ok=True)
@@ -84,6 +123,68 @@ class Builder:
             raise ValueError("Uncommitted or changed compiler input: " + relative)
         return path
 
+    def visual_directory(self):
+        path = self.output / "visuals"
+        if path.is_symlink() or path.exists() and not path.is_dir():
+            raise ValueError("Linked or non-directory native visual output is unsupported")
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir()
+        return path
+
+    def record_visual_checks(self, directory, source_inputs):
+        report_path = directory / "visual-checks.json"
+        if not report_path.is_file() or report_path.is_symlink() or report_path.stat().st_size > 2 * 1024 * 1024:
+            raise ValueError("Fresh UI renderer report is missing or unsafe")
+        raw = report_path.read_bytes()
+        report = json.loads(raw.decode("utf-8-sig"))
+        false_flags = ["productionEntryInvoked", "networkInvoked", "clipboardInvoked",
+                       "certificateCreationInvoked", "captureInvoked", "actualInputInvoked",
+                       "screenCaptureInvoked", "existingUserUIRead"]
+        if (report.get("schema") != 1 or report.get("status") != "passed" or
+                report.get("freshSyntheticOnly") is not True or
+                any(report.get(flag) is not False for flag in false_flags) or
+                type(report.get("syntheticWindowsShown")) is not bool or
+                report.get("visualAcceptance") != "manual-review-required" or
+                not isinstance(report.get("renderMethod"), str) or not report["renderMethod"].strip()):
+            raise ValueError("UI checks must identify fresh synthetic rendering without production effects")
+        rows = report.get("images")
+        if not isinstance(rows, list) or not 7 <= len(rows) <= 32:
+            raise ValueError("UI fixture state coverage is missing or excessive")
+        names = set()
+        for row in rows:
+            name = row.get("name") if isinstance(row, dict) else None
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.png", name):
+                raise ValueError("Unsafe UI fixture image name")
+            if name.casefold() in names:
+                raise ValueError("Duplicate UI fixture image name")
+            names.add(name.casefold())
+            image = directory / name
+            if not image.is_file() or image.is_symlink() or image.stat().st_size > 32 * 1024 * 1024:
+                raise ValueError("UI fixture image is missing or unsafe")
+            data = image.read_bytes()
+            width, height = png_dimensions(data)
+            if (row.get("sha256") != hashlib.sha256(data).hexdigest() or row.get("bytes") != len(data) or
+                    row.get("width") != width or row.get("height") != height):
+                raise ValueError("UI fixture image bytes differ from the renderer report")
+        required = ({"mac-" + name + ".png" for name in
+                     ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark"]}
+                    if self.platform == "macos" else
+                    {"windows-" + name + ".png" for name in
+                     ["idle", "invitation", "request", "preparing", "sharing", "failure", "help"]})
+        if not required.issubset(names):
+            raise ValueError("UI fixture omitted a required task state")
+        bound_sources = {self.input(path).relative_to(ROOT).as_posix(): digest(path) for path in source_inputs}
+        record = {"schema": 1, "status": "passed", "platform": self.platform,
+                  "head": self.head, "invocationLabel": "native-ui-visual-checks",
+                  "sourceManifest": bound_sources, "rendererReportSHA256": hashlib.sha256(raw).hexdigest(),
+                  "rendererReport": report, "imageDirectory": "visuals",
+                  "visualAcceptance": "manual-review-required",
+                  "scope": "Fresh synthetic UI rendering/layout and image-byte checks only; visual and physical-device acceptance are separate"}
+        path = self.output / "native-ui-visual-checks.json"
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+        return path
+
     def macos(self):
         package = ROOT / "native-engine/macos"
         scratch = self.output / "swift"
@@ -112,6 +213,14 @@ class Builder:
         binary_dir = Path(self.run("swift-bin-path", ["/usr/bin/swift", "build", "--package-path", package,
                                                      "--scratch-path", scratch, "-c", "release",
                                                      "--show-bin-path"]).decode().strip())
+        visuals = self.visual_directory()
+        renderer = self.input(ROOT / "scripts/render_native_visual_fixture.py")
+        visual_inputs = [renderer, package / "Package.swift", ROOT / "Assets/Brand/AppIcon.icns",
+                         *sorted((package / "Sources").rglob("*.swift")),
+                         *sorted((package / "VisualFixtures").rglob("*.swift"))]
+        self.run("native-ui-visual-checks", [sys.executable, renderer, "--output", visuals],
+                 timeout=600, command_inputs=[self.input(path) for path in visual_inputs])
+        visual_record = self.record_visual_checks(visuals, visual_inputs)
         app = self.output / "Knot Native Preview.app"
         if app.exists():
             shutil.rmtree(app)
@@ -147,7 +256,7 @@ class Builder:
         self.run("native-dmg", ["/usr/bin/hdiutil", "create", "-ov", "-format", "UDZO", "-volname",
                                 "Knot Native Preview", "-srcfolder", image_root, dmg])
         self.run("verify-native-dmg", ["/usr/bin/hdiutil", "verify", dmg])
-        return [zip_path, dmg, cpp_record]
+        return [zip_path, dmg, cpp_record, visual_record]
 
     def record_cpp_checks(self):
         path = self.output / "native-cpp-checks.json"
@@ -254,6 +363,15 @@ class Builder:
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")
         if public_pin.read_text().strip() != digest(public_certificate):
             raise ValueError("Fresh Windows certificate pin differs from exported public DER")
+        visuals = self.visual_directory()
+        visual_fixture = ROOT / "native-engine/windows/tests/NativeVisualFixtures.cs"
+        visual_checks = self.csharp("KnotNativeVisualFixtures", sources + [visual_fixture],
+                                    "Knot.NativePreview.NativeVisualFixtures", "exe")
+        brand_icon = self.input(ROOT / "Assets/Brand/AppIcon.ico")
+        visual_inputs = [*sources, visual_fixture, brand_icon]
+        self.run("native-ui-visual-checks", [visual_checks, "--output", visuals, "--brand-icon", brand_icon],
+                 timeout=180, command_inputs=[self.input(path) for path in visual_inputs])
+        visual_record = self.record_visual_checks(visuals, visual_inputs)
         shutil.copy2(self.input(ROOT / "Assets/Brand/AppIcon.ico"), self.output / "AppIcon.ico")
         shutil.copy2(self.input(ROOT / "LICENSE"), self.output / "LICENSE")
         candidates = [Path(os.environ[k]) / (version + "/ISCC.exe")
@@ -283,7 +401,8 @@ class Builder:
             raise ValueError("Native installer version metadata differs from the checked preview version")
         installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
         return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record,
-                self.output / "native-host-checks.json", public_certificate, public_pin, cpp_record, installer_metadata]
+                self.output / "native-host-checks.json", public_certificate, public_pin, cpp_record, installer_metadata,
+                visual_record]
 
     def finish(self, files):
         if source_snapshot(ROOT) != self.sources:
