@@ -134,15 +134,25 @@ private struct WindowsCodecFixture: Decodable {
 @Test(.enabled(if: ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"] != nil,
                "Windows MF 4K artifact path not supplied locally; CI supplies and requires it."))
 @MainActor func windowsMediaFoundation4KFixtureDecodesWithNativeVideoToolbox() async throws {
+    try await checkWindows4KFixture(jsonName: "synthetic-codec-4k.json", videoName: "synthetic-4k.h264", fps: 30, frames: 6)
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"] != nil,
+               "Windows MF 4K60 artifact path not supplied locally; CI supplies and requires it."))
+@MainActor func windowsMediaFoundation4K60FixtureDecodesWithNativeVideoToolbox() async throws {
+    try await checkWindows4KFixture(jsonName: "synthetic-4k60.json", videoName: "synthetic-4k60.h264", fps: 60, frames: 12)
+}
+
+@MainActor private func checkWindows4KFixture(jsonName: String, videoName: String, fps: Int, frames: Int) async throws {
     let root = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"]), isDirectory: true)
-    let json = try Data(contentsOf: root.appendingPathComponent("synthetic-codec-4k.json"))
-    let data = try Data(contentsOf: root.appendingPathComponent("synthetic-4k.h264"))
+    let json = try Data(contentsOf: root.appendingPathComponent(jsonName))
+    let data = try Data(contentsOf: root.appendingPathComponent(videoName))
     try #require(json.count <= 131_072 && data.count <= 64 * 1024 * 1024)
     let fixture = try JSONDecoder().decode(WindowsCodecFixture.self, from: json)
     try #require(fixture.v == 1 && fixture.synthetic && !fixture.captureInvoked && fixture.parserChecks)
     try #require(fixture.codec == "h264-annexb" && fixture.width == 3840 && fixture.height == 2160)
-    try #require(fixture.fps == 30 && fixture.bitrate == 40_000_000 && !fixture.hardwareEncoder)
-    try #require(fixture.frames == 6 && fixture.accessUnits.count == fixture.frames && fixture.keyframes >= 1)
+    try #require(fixture.fps == fps && fixture.bitrate == 40_000_000 && !fixture.hardwareEncoder)
+    try #require(fixture.frames == frames && fixture.accessUnits.count == fixture.frames && fixture.keyframes >= 1)
     let encoderPeak = try #require(fixture.peakEncoderInFlight)
     try #require(fixture.encoderCapacity == 2 && (1...2).contains(encoderPeak))
     let scratchPeak = try #require(fixture.peakOutputScratchBytes)
@@ -182,5 +192,6 @@ private struct WindowsCodecFixture: Decodable {
     }
     let invalidAccess = try AccessUnit(annexB: damagedSPS)
     do { try await malformed.decode(invalidAccess); Issue.record("Malformed4K SPS accepted") } catch {}
-    print("Windows MF4K: decoded=\(decoded), width=\(fixture.width), height=\(fixture.height), peakOutstanding=\(decoder.maximumOutstanding), cap=\(DecodeAdmission.capacity), keyframes=\(keyframes); synthetic pixels only")
+    let label = fps == 60 ? "Windows MF4K60" : "Windows MF4K"
+    print("\(label): decoded=\(decoded), width=\(fixture.width), height=\(fixture.height), peakOutstanding=\(decoder.maximumOutstanding), cap=\(DecodeAdmission.capacity), keyframes=\(keyframes), fps=\(fps); synthetic pixels only, no throughput claim")
 }

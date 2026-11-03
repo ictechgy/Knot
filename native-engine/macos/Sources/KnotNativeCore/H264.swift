@@ -4,10 +4,17 @@ public struct AccessUnit: Sendable {
     public let nals: [Data]
     public let isIDR: Bool
     public let sps: [Data], pps: [Data]
+    public let avcc: Data
     public init(annexB data: Data) throws {
         guard !data.isEmpty, data.count <= 4_194_287 else { throw NativeFailure.oversized }
         let parsed = try data.withUnsafeBytes { bytes in try Self.parse(bytes) }
         self.nals = parsed.nals; self.isIDR = parsed.isIDR; self.sps = parsed.sps; self.pps = parsed.pps
+        // Construct once on the serial media reader, rather than copying and
+        // growing this buffer during a MainActor decoder submission.
+        var avcc = Data()
+        avcc.reserveCapacity(parsed.nals.reduce(0) { $0 + 4 + $1.count })
+        for nal in parsed.nals { avcc.appendBE(UInt32(nal.count)); avcc.append(nal) }
+        self.avcc = avcc
     }
     // The borrowed buffer is zero-based even when Data is a nonzero-index slice.
     // Only owned NAL copies escape this closure; no whole-access-unit Array copy.
@@ -44,5 +51,4 @@ public struct AccessUnit: Sendable {
         guard hasSlice else { throw NativeFailure.malformed }
         return (nals, hasIDR, setsSPS, setsPPS)
     }
-    public var avcc: Data { var bytes = Data(); for nal in nals { bytes.appendBE(UInt32(nal.count)); bytes.append(nal) }; return bytes }
 }

@@ -5,6 +5,7 @@ import Testing
 enum WindowsFixtureRequirement {
     enum Failure: Error, Equatable { case missingDirectory, invalidArtifact(String) }
     static let files = ["synthetic.h264", "synthetic-codec.json", "synthetic-4k.h264", "synthetic-codec-4k.json",
+                        "synthetic-4k60.h264", "synthetic-4k60.json",
                         "native-test-public.cer", "native-test-public.sha256"]
     static func validate(environment: [String: String],
                          attributes: (String) throws -> [FileAttributeKey: Any] = {

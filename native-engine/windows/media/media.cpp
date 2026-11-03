@@ -2,11 +2,13 @@
 #define KN_MEDIA_EXPORTS
 #endif
 #include "media_internal.h"
+#include "media_wait.h"
 
 namespace {
 struct Session {
     // Destruction order is encoder, capture, runtime; COM outlives interfaces.
     knot::Runtime runtime;
+    knot::MediaPollWait pollWait;
     knot::DesktopCapture capture;
     knot::Encoder encoder;
     KnMediaConfig config{};
@@ -33,6 +35,8 @@ extern "C" KN_MEDIA_API void* KN_MEDIA_CALL kn_media_create(const KnMediaConfig*
     try {
         auto session = std::make_unique<Session>();
         HRESULT hr = session->runtime.Start();
+        if (FAILED(hr)) { *error = KN_MEDIA_ERROR; return nullptr; }
+        hr = session->pollWait.Start();
         if (FAILED(hr)) { *error = KN_MEDIA_ERROR; return nullptr; }
         KnMediaInfo result{};
         hr = session->capture.Start(*config, result, session->config);
@@ -106,7 +110,8 @@ extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* opaque, uint8_
                 return session->failure = KN_MEDIA_DEVICE_FAILURE;
             if (FAILED(submitStatus) && submitStatus != MF_E_NOTACCEPTING)
                 return session->failure = KN_MEDIA_DEVICE_FAILURE;
-            Sleep(1);
+            if (FAILED(session->pollWait.WaitUntil(deadline)))
+                return session->failure = KN_MEDIA_DEVICE_FAILURE;
         }
         return KN_MEDIA_TRY_AGAIN;
     } catch (...) { return session->failure = KN_MEDIA_ERROR; }

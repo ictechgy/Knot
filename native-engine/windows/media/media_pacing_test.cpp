@@ -230,14 +230,34 @@ bool StaticToActiveDuration() {
     }
     return forced == 2;
 }
+
+uint32_t PollCadenceWithWait(uint64_t waitMicros) {
+    knot::CapturePacer pacer(60);
+    uint32_t submitted = 0;
+    for (uint64_t now = 0; now < 1000000; now += waitMicros) {
+        pacer.Pump(now, true, true, false,
+            [] { return CaptureReadiness::Fresh; },
+            [&](bool fresh) { if (fresh) ++submitted; return fresh; });
+    }
+    return submitted;
+}
+
+bool SchedulerQuantization() {
+    // Same production policy and synthetic changing pixels. Only the caller's
+    // wake schedule differs: this models why requesting Sleep(1) is not proof
+    // that 60 capture opportunities occur. Actual Windows timings are measured
+    // separately by media_wait_test, not inferred from these fake schedules.
+    return PollCadenceWithWait(1000) == 59 && PollCadenceWithWait(15625) == 32;
+}
 }
 
 int main() {
     if (!VideoBounds() || !PointerOnlyCadence() || !PendingReadback() || !StartupAndBackpressure() || !PendingLiveness() || !StaticCadenceAndTimeline() ||
-        !KeyframeDeadlineOverridesIdle() || !ExplicitFixtureTimeline() || !StaticToActiveDuration()) {
+        !KeyframeDeadlineOverridesIdle() || !ExplicitFixtureTimeline() || !StaticToActiveDuration() || !SchedulerQuantization()) {
         std::cerr << "FAIL: production media pacing/timeline policy\n"; return 1;
     }
     std::cout << "PASS: production Pump pending16666us->fresh17666us with no stale submit; static1Hz; "
-        "2s IDR target; backpressure/retry; strictPTS/nominal current-frame duration; static->active/120-frame timeline\n";
+        "2s IDR target; backpressure/retry; strictPTS/nominal current-frame duration; static->active/120-frame timeline; "
+        "60fps policy under synthetic1ms/15.625ms wakes=59/32 submissions\n";
     return 0;
 }

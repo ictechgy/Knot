@@ -37,7 +37,8 @@ class NativeRebuildTests(unittest.TestCase):
                      "native-engine/windows/tests/NativeVisualFixtures.cs",
                      *["native-engine/windows/media/" + name for name in
                        ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp",
-                        "h264_parser_test.cpp", "media_pacing_test.cpp", "media_activation_test.cpp", "media_limits.h"]]]:
+                        "h264_parser_test.cpp", "media_pacing_test.cpp", "media_activation_test.cpp", "media_limits.h",
+                        "media_wait.h", "media_wait_test.cpp"]]]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("build/\n" if name == ".gitignore" else "Fresh inert fixture\n")
@@ -51,7 +52,7 @@ class NativeRebuildTests(unittest.TestCase):
         return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE, **kwargs)
 
     def build_with_inert_tools(self, corrupt_public_pin=False, corrupt_installer_version=False, invalid_visual=None,
-                               invalid_four_k=None):
+                               invalid_four_k=None, invalid_four_k60=None, invalid_wait=None):
         builder = native.Builder("windows", self.output)
         actual_run = builder.run
 
@@ -70,6 +71,34 @@ class NativeRebuildTests(unittest.TestCase):
                 elif invalid_four_k == "capture": data["captureInvoked"] = True
                 elif invalid_four_k == "scratch": data["peakOutputScratchBytes"] = 24883201
                 Path(argv[-1]).write_text(json.dumps(data))
+            elif label == "native-media-synthetic-4k60":
+                self.assertEqual(argv[1], "--software-4k60")
+                self.assertEqual(Path(argv[-2]).name, "synthetic-4k60.h264")
+                self.assertEqual(Path(argv[-1]).name, "synthetic-4k60.json")
+                Path(argv[-2]).write_bytes(b"INERT 4K60 codec fixture; no media executed")
+                data = dict(v=1, synthetic=True, captureInvoked=False, hardwareEncoder=False,
+                            codec="h264-annexb", width=3840, height=2160, fps=60,
+                            bitrate=40000000, frames=12, keyframes=1, parserChecks=True,
+                            peakEncoderInFlight=1, encoderCapacity=2, peakOutputScratchBytes=0)
+                if invalid_four_k60 == "thirty-fps": data["fps"] = 30
+                elif invalid_four_k60 == "six-frames": data["frames"] = 6
+                Path(argv[-1]).write_text(json.dumps(data))
+            elif label == "native-wait-checks":
+                self.assertEqual(argv[1], "--json")
+                data = dict(schema=1, status="PASS", freshSyntheticOnly=True,
+                            captureInvoked=False, inputInvoked=False, codecInvoked=False,
+                            clock="QueryPerformanceCounter", iterations=64, requestedMicros=1000,
+                            unstartedRejected=True, expiredBudgetSkipped=True,
+                            idempotentStartSingleHandle=True, handlesRestored=True,
+                            scope="INERT lifecycle substitute; no timer or timing executed")
+                for method in ["baselineSleep1", "ownedHighResolutionTimer"]:
+                    data[method] = dict(p50Micros=1000, p95Micros=1500, maximumMicros=2000,
+                                        totalMicros=64000, over16667Micros=0)
+                if invalid_wait == "capture": data["captureInvoked"] = True
+                elif invalid_wait == "distribution": data["ownedHighResolutionTimer"]["p95Micros"] = 999
+                elif invalid_wait == "boolean": data["baselineSleep1"]["totalMicros"] = True
+                with Path(argv[-1]).open("x") as report:
+                    json.dump(data, report)
             elif label == "native-host-checks":
                 self.assertEqual(argv[1], "--export-certificate")
                 with Path(argv[2]).open("xb") as fixture:
@@ -163,6 +192,9 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertIn("native-ui-visual-checks.json", record["products"])
         self.assertIn("synthetic-4k.h264", record["products"])
         self.assertIn("synthetic-codec-4k.json", record["products"])
+        self.assertIn("synthetic-4k60.h264", record["products"])
+        self.assertIn("synthetic-4k60.json", record["products"])
+        self.assertIn("native-wait-checks.json", record["products"])
         metadata = json.loads((self.output / "native-installer-metadata.json").read_text())
         self.assertEqual(metadata["productVersion"], native.VERSION)
         self.assertIn("INERT", metadata["inspector"])
@@ -187,7 +219,8 @@ class NativeRebuildTests(unittest.TestCase):
         for name in ["NATIVE-INPUTS.json", "native-ui-visual-checks.json", "native-cpp-checks.json",
                      "native-host-checks.json", "native-installer-metadata.json",
                      "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
-                     "synthetic-codec.json", "synthetic-codec-4k.json"]:
+                     "synthetic-codec.json", "synthetic-codec-4k.json", "synthetic-4k60.json",
+                     "native-wait-checks.json"]:
             self.assertFalse((self.output / name).exists(), name)
         self.assertTrue((self.output / "native-test-public.cer").is_file())
         for record in nested:
@@ -241,6 +274,20 @@ class NativeRebuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "4K codec evidence"):
             self.build_with_inert_tools(invalid_four_k="scratch")
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+
+    def test_four_k60_fixture_cannot_relabel_thirty_fps_or_six_frames(self):
+        for corrupt in ["thirty-fps", "six-frames"]:
+            with self.subTest(corrupt=corrupt), self.assertRaisesRegex(ValueError, "4K codec evidence"):
+                self.build_with_inert_tools(invalid_four_k60=corrupt)
+            self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+            self.assertFalse((self.output / "SHA256SUMS").exists())
+
+    def test_timer_evidence_cannot_claim_capture_or_invalid_measurements(self):
+        for corrupt in ["capture", "distribution", "boolean"]:
+            with self.subTest(corrupt=corrupt), self.assertRaisesRegex(ValueError, "Wait evidence"):
+                self.build_with_inert_tools(invalid_wait=corrupt)
+            self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+            self.assertFalse((self.output / "SHA256SUMS").exists())
 
     def test_synthetic_windows_may_be_shown_only_by_windows_fixture(self):
         self.build_with_inert_tools(invalid_visual="shown-synthetic")

@@ -51,6 +51,16 @@ Video uses backpressure: capture/encode the next frame after previouswrite, no u
 
 Owned C++ DLL `KnotNativeMedia.dll`, C cdecl exports, fixedwidth types/pack4; create/read/close called on one dedicated MTA thread. Config uint32 width,height,fps,bitrate. Info uint32 width,height,fps,bitrate; int32 left,top,desktopWidth,desktopHeight; uint32 hardwareEncoder. `void* kn_media_create(const KnMediaConfig*,KnMediaInfo*,int32_t*error)`. `int32_t kn_media_read(void*,uint8_t*buffer,uint32_tcapacity,uint32_t*written,uint32_t*flags,uint64_t*timestampMicros)`. `void kn_media_close(void*)`. status0=sample,1=tryagain;-1generic,-2unsupporteddisplay,-3nohardwareencoder,-4devicefailure,-5invalidargument. Readbounded <=500ms and never writesbeyondcapacity. Native media headers are authoritative for actual struct names; coordinate/ABI edits require notifying otherworker. Syntheticmedia tests use a separate test entry, not any remoteflag.
 
+## Native.6 latency policy
+
+The client explicitly disables Nagle aggregation for small input envelopes. Input is selected after its existing pacing wait so the latest consecutive move remains eligible; the500/s limit, action barriers, revocation epochs and sole writer are unchanged.
+
+A single serial media reader actor owns framed reads, stream-order validation, Annex B parsing and one-time AVCC construction. It prepares at most one next unit while the existing MainActor decoder submission and three-ticket admission apply backpressure. It creates no per-frame tasks and does not drop compressed predictive frames. UI/input and stop/revocation can progress while media preparation runs; returned work is still checked against the current session identity.
+
+The Windows media session owns one unnamed high-resolution waitable timer for its bounded poll waits. It replaces `Sleep(1)` without a global timer-resolution change or busy-spin; the450ms read and existing2s progress/pending limits remain. A separate fresh QPC comparison records actual waits; it is not production capture or input-to-display evidence. The normal hardware-only encode path still includes GPU readback and CPU NV12 copies. Full GPU-surface encoding and asynchronous retained-sample reuse require separate ownership/capability evidence.
+
+CI additionally requires a twelve-frame3840×2160/60fps software-MFT-to-Mac decode fixture, alongside the existing30fps4K and120-frame fixtures. This proves codec/profile interoperability and resource bounds, not sustained hardware4K60 performance.
+
 ## Acceptance evidence
 
 Compile host+DLL with WindowsSDK/MSVC and native Macviewer using only system frameworks. Cross-language framing/strictparser tests, actual freshTLS pin/mismatchedpin/expiredtoken/oneuse/approval/stop tests, input validation with injected fake sink (NO actual SendInput inCI), and H264 codec fixtures generated from synthetic pixels (NO realdesktop capture inagent tests). VM/softwarecodec evidence is distinct from realhardware DesktopDuplication/MF acceptance. No actual private state, service, capture, installer or LocalMedia history is an input. Record exactsource/commands/results and explicitly state untested GPU/Home/Wi-Fi/IME/securedesktop and unsignedpreview limitations.

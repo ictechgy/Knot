@@ -42,30 +42,34 @@ struct Entry { uint64_t offset; uint32_t length; bool idr; uint64_t timestamp; }
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 4 || (std::wstring(argv[1]) != L"--software" && std::wstring(argv[1]) != L"--hardware" && std::wstring(argv[1]) != L"--software-4k")) {
-        std::cerr << "usage: KnotNativeMediaSynthetic.exe --software|--hardware|--software-4k fixture.h264 fixture.json\n";
+    if (argc != 4 || (std::wstring(argv[1]) != L"--software" && std::wstring(argv[1]) != L"--hardware" &&
+        std::wstring(argv[1]) != L"--software-4k" && std::wstring(argv[1]) != L"--software-4k60")) {
+        std::cerr << "usage: KnotNativeMediaSynthetic.exe --software|--hardware|--software-4k|--software-4k60 fixture.h264 fixture.json\n";
         return 2;
     }
     if (!ParserChecks()) { std::cerr << "H264 parser checks failed\n"; return 1; }
     knot::Runtime runtime;
     if (FAILED(runtime.Start())) { std::cerr << "COM/MF startup failed\n"; return 1; }
     knot::Encoder encoder;
-    const bool fourK = std::wstring(argv[1]) == L"--software-4k";
-    const KnMediaConfig config = fourK ? KnMediaConfig{3840, 2160, 30, 40000000} : KnMediaConfig{320, 180, 30, 2000000};
+    const bool fourK60 = std::wstring(argv[1]) == L"--software-4k60";
+    const bool fourK = fourK60 || std::wstring(argv[1]) == L"--software-4k";
+    const KnMediaConfig config = fourK ? KnMediaConfig{3840, 2160, fourK60 ? 60U : 30U, 40000000} :
+        KnMediaConfig{320, 180, 30, 2000000};
     const bool software = std::wstring(argv[1]) != L"--hardware";
     HRESULT hr = encoder.Start(config, software);
     if (FAILED(hr)) { std::cerr << "Synthetic MFT initialization failed: " << std::hex << static_cast<unsigned long>(hr) << '\n'; return 1; }
     if (encoder.Hardware() == software) return 1;
     std::ofstream video(argv[2], std::ios::binary | std::ios::trunc);
     if (!video) { std::cerr << "Cannot create synthetic fixture\n"; return 1; }
-    const uint32_t frames = fourK ? 6U : 120U;
+    const uint32_t frames = fourK60 ? 12U : (fourK ? 6U : 120U);
     uint32_t submitted = 0;
     uint32_t peakInFlight = 0;
     uint64_t offset = 0;
     std::vector<Entry> entries;
     std::vector<uint8_t> pixels;
     bool drained = false;
-    const auto deadline = knot::Clock::now() + std::chrono::seconds(30);
+    const auto began = knot::Clock::now();
+    const auto deadline = began + std::chrono::seconds(30);
     while (entries.size() < frames && knot::Clock::now() < deadline) {
         hr = encoder.Poll();
         if (FAILED(hr)) break;
@@ -113,7 +117,8 @@ int wmain(int argc, wchar_t** argv) {
         << (encoder.Hardware() ? "true" : "false") << ",\"frames\":" << entries.size()
         << ",\"keyframes\":" << keyframes << ",\"parserChecks\":true";
     if (fourK) manifest << ",\"peakEncoderInFlight\":" << peakInFlight << ",\"encoderCapacity\":" << knot::Encoder::Capacity
-        << ",\"peakOutputScratchBytes\":" << encoder.PeakOutputScratch();
+        << ",\"peakOutputScratchBytes\":" << encoder.PeakOutputScratch()
+        << ",\"fixtureWallMicros\":" << std::chrono::duration_cast<std::chrono::microseconds>(knot::Clock::now() - began).count();
     manifest << ",\"accessUnits\":[";
     for (size_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];

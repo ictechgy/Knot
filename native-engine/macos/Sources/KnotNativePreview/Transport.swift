@@ -38,7 +38,11 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
             let peer = sec_trust_copy_ref(trust).takeRetainedValue()
             complete(Self.evaluate(peer, expectedPin: expected))
         }, queue)
-        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        let tcp = NWProtocolTCP.Options()
+        // Input envelopes are small and time-sensitive; do not wait for a
+        // previous packet's ACK before transmitting the next pointer action.
+        tcp.noDelay = true
+        let parameters = NWParameters(tls: tls, tcp: tcp)
         parameters.includePeerToPeer = false
         connection = NWConnection(to: endpoint, using: parameters)
     }

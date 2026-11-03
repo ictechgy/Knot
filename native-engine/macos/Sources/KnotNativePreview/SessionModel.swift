@@ -26,12 +26,12 @@ final class SessionModel: ObservableObject {
     }
     private var channel: (any NativeChannel)?
     private let makeChannel: @Sendable (Invitation) throws -> any NativeChannel
+    private let waitForInputDeadline: @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void
     private var reader: Task<Void, Never>?
     private var writer: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
     private var decoder: NativeDecoder?
     private var input = InputBuffer()
-    private var receiveState = ReceiveState()
     private var identity = UUID()
     private var connectedAt = ContinuousClock.now
     private var lastIncoming = ContinuousClock.now
@@ -45,7 +45,11 @@ final class SessionModel: ObservableObject {
     private var displayBehind = false
     var active: Bool { [.connecting, .approval, .decoding, .streaming].contains(phase) }
 
-    init(makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) }) { self.makeChannel = makeChannel }
+    init(makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) },
+         waitForInputDeadline: @escaping @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void = { try await Task.sleep(until: $0) }) {
+        self.makeChannel = makeChannel
+        self.waitForInputDeadline = waitForInputDeadline
+    }
 
     func review(_ secret: String) {
         guard !active else { return }
@@ -75,7 +79,7 @@ final class SessionModel: ObservableObject {
         let label = viewerLabel
         guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
         let id = UUID(); identity = id; phase = .connecting; status = "Verifying the host certificate…"
-        receiveState = ReceiveState(); input = InputBuffer(); inputRecovery = false
+        input = InputBuffer(); inputRecovery = false
         presentationBackpressureSince = nil; displayBehind = false
         connectedAt = .now; lastIncoming = .now; lastHeartbeat = .now
         reader = Task { [weak self] in
@@ -93,19 +97,14 @@ final class SessionModel: ObservableObject {
                 self.phase = .approval
                 self.status = self.numberAuthorized ? "Number verified. Preparing the host desktop…" : "Certificate verified. Waiting for host approval and native encoder startup…"
                 self.startTicker(id: id)
+                let packets = NativePacketReader(channel: transport)
                 while !Task.isCancelled, self.identity == id {
                     let budget: Duration = self.phase == .approval ? .seconds(65) : .seconds(10)
-                    let header = try await transport.readExactly(5, timeout: budget)
-                    guard self.identity == id, !Task.isCancelled else { return }
-                    let (kind, size) = try Packet.serverHeader(header)
-                    let bytes = try await transport.readExactly(size, timeout: budget)
+                    let incoming = try await packets.next(timeout: budget)
                     guard self.identity == id, !Task.isCancelled else { return }
                     self.lastIncoming = .now
-                    let packet = Packet(kind: kind, payload: bytes)
-                    let video = try self.receiveState.accept(packet)
-                    switch kind {
-                    case .ready:
-                        guard let ready = self.receiveState.ready else { throw NativeFailure.state }
+                    switch incoming {
+                    case .ready(let ready):
                         self.videoSize = CGSize(width: ready.width, height: ready.height)
                         let decoder = NativeDecoder(width: ready.width, height: ready.height)
                         decoder.onImage = { [weak self] image in
@@ -120,11 +119,10 @@ final class SessionModel: ObservableObject {
                         self.armPresentationFailure()
                         self.readyAt = .now
                         self.status = "Host approved and encoder ready. Waiting for the first decoded image…"
-                    case .video: if let video { try await self.decoder?.decode(video.accessUnit) }
-                    case .error:
-                        let code = try StrictJSON.object(bytes, keys: ["code"], limit: 128).string("code")
+                    case .video(let video): try await self.decoder?.decode(video.accessUnit)
+                    case .error(let code):
                         self.fail(Self.message(code)); return
-                    default: break
+                    case .heartbeat: break
                     }
                 }
             } catch {
@@ -233,14 +231,18 @@ final class SessionModel: ObservableObject {
             guard let self else { return }
             do {
                 while !Task.isCancelled, self.identity == id {
-                    let packet: Packet
+                    guard self.input.count > 0 || ContinuousClock.now - self.lastHeartbeat >= .seconds(2) else { break }
                     let epoch = self.inputEpoch
+                    if ContinuousClock.now < self.nextInput { try await self.waitForInputDeadline(self.nextInput) }
+                    try Task.checkCancellation()
+                    guard self.identity == id else { return }
+                    guard self.inputEpoch == epoch else { continue }
+                    // Select after pacing so moves received during the wait can
+                    // coalesce to the newest position without crossing barriers.
+                    let packet: Packet
                     if ContinuousClock.now - self.lastHeartbeat >= .seconds(2) { packet = Packet(kind: .heartbeat) }
                     else if let pending = self.input.pop() { packet = pending }
                     else { break }
-                    if ContinuousClock.now < self.nextInput { try await Task.sleep(until: self.nextInput) }
-                    try Task.checkCancellation()
-                    guard self.inputEpoch == epoch else { continue }
                     try await channel.send(packet)
                     guard self.identity == id, !Task.isCancelled else { return }
                     if packet.kind == .heartbeat { self.lastHeartbeat = .now }

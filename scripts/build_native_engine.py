@@ -19,13 +19,47 @@ sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.5"
+VERSION = "0.1.0-native.6"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def validate_wait_measurement(record):
+    if (record.get("schema") != 1 or record.get("status") != "PASS" or
+            record.get("freshSyntheticOnly") is not True or
+            any(record.get(key) is not False for key in ["captureInvoked", "inputInvoked", "codecInvoked"]) or
+            record.get("clock") != "QueryPerformanceCounter" or record.get("iterations") != 64 or
+            record.get("requestedMicros") != 1000 or
+            any(record.get(key) is not True for key in ["unstartedRejected", "expiredBudgetSkipped",
+                "idempotentStartSingleHandle", "handlesRestored"])):
+        raise ValueError("Wait evidence must identify fresh bounded timer measurement without device acceptance")
+    for method in ["baselineSleep1", "ownedHighResolutionTimer"]:
+        row = record.get(method)
+        keys = ["p50Micros", "p95Micros", "maximumMicros", "totalMicros", "over16667Micros"]
+        if (not isinstance(row, dict) or any(type(row.get(key)) is not int or row[key] < 0 for key in keys) or
+                not row["p50Micros"] <= row["p95Micros"] <= row["maximumMicros"] <= row["totalMicros"] or
+                row["totalMicros"] > 64 * row["maximumMicros"] or row["over16667Micros"] > 64):
+            raise ValueError("Wait evidence must contain consistent measured timer distributions")
+
+
+def validate_four_k_fixture(record, fixture, fps, frames):
+    if (record.get("v") != 1 or record.get("synthetic") is not True or
+            record.get("captureInvoked") is not False or record.get("hardwareEncoder") is not False or
+            record.get("codec") != "h264-annexb" or
+            any(record.get(key) != value for key, value in
+                {"width": 3840, "height": 2160, "fps": fps, "bitrate": 40000000, "frames": frames}.items()) or
+            record.get("parserChecks") is not True or record.get("encoderCapacity") != 2 or
+            type(record.get("peakOutputScratchBytes")) is not int or
+            not 0 <= record["peakOutputScratchBytes"] <= 24883200 or
+            type(record.get("peakEncoderInFlight")) is not int or
+            not 1 <= record["peakEncoderInFlight"] <= 2 or
+            type(record.get("keyframes")) is not int or not 1 <= record["keyframes"] <= frames or
+            not fixture.is_file() or fixture.is_symlink() or not fixture.stat().st_size):
+        raise ValueError("4K codec evidence must prove its exact fresh software-only synthetic profile")
 
 
 def png_dimensions(data):
@@ -87,7 +121,8 @@ class Builder:
         for name in ["NATIVE-BUILD.json", "SHA256SUMS", "NATIVE-INPUTS.json", "native-ui-visual-checks.json",
                      "native-cpp-checks.json", "native-host-checks.json", "native-installer-metadata.json",
                      "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
-                     "synthetic-codec.json", "synthetic-codec-4k.json"]:
+                     "synthetic-codec.json", "synthetic-codec-4k.json", "synthetic-4k60.json",
+                     "native-wait-checks.json"]:
             (self.output / name).unlink(missing_ok=True)
         # These directories contain owned per-step success records too. Refuse
         # links/files rather than following them or deleting an external target.
@@ -424,6 +459,7 @@ class Builder:
     def windows(self):
         media = ROOT / "native-engine/windows/media"
         self.input(media / "media_limits.h")
+        self.input(media / "media_wait.h")
         crypto_products = self.pairing_crypto() if not self.media_only else []
         libs = ["d3d11.lib", "dxgi.lib", "mfplat.lib", "mf.lib", "mfuuid.lib", "ole32.lib",
                 "oleaut32.lib", "uuid.lib", "user32.lib", "strmiids.lib"]
@@ -441,6 +477,12 @@ class Builder:
         self.msvc("compile-native-activation-checks", [*common, self.input(media / "media_activation_test.cpp"),
                   "/Fe:" + str(activation_checks)])
         self.run("native-activation-checks", [activation_checks], timeout=60)
+        wait_checks = self.output / "KnotNativeWaitChecks.exe"
+        self.msvc("compile-native-wait-checks", [*common, self.input(media / "media_wait_test.cpp"),
+                  "/Fe:" + str(wait_checks)])
+        wait_record = self.output / "native-wait-checks.json"
+        self.run("native-wait-checks", [wait_checks, "--json", wait_record], timeout=60)
+        validate_wait_measurement(json.loads(wait_record.read_text()))
         cpp_record = self.record_cpp_checks()
         cpp = [media / n for n in ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp"]]
         self.msvc("compile-native-media", [*common, "/LD", "/DKN_MEDIA_EXPORTS", *map(self.input, cpp),
@@ -459,24 +501,15 @@ class Builder:
         self.run("native-media-synthetic-4k", [self.output / "KnotNativeMediaSynthetic.exe", "--software-4k",
                                              fixture_4k, fixture_record_4k], timeout=180)
         native_record_4k = json.loads(fixture_record_4k.read_text())
-        if (native_record_4k.get("v") != 1 or native_record_4k.get("synthetic") is not True or
-                native_record_4k.get("captureInvoked") is not False or
-                native_record_4k.get("hardwareEncoder") is not False or
-                native_record_4k.get("codec") != "h264-annexb" or
-                any(native_record_4k.get(key) != value for key, value in
-                    {"width": 3840, "height": 2160, "fps": 30, "bitrate": 40000000, "frames": 6}.items()) or
-                native_record_4k.get("parserChecks") is not True or
-                native_record_4k.get("encoderCapacity") != 2 or
-                type(native_record_4k.get("peakOutputScratchBytes")) is not int or
-                not 0 <= native_record_4k["peakOutputScratchBytes"] <= 24883200 or
-                type(native_record_4k.get("peakEncoderInFlight")) is not int or
-                not 1 <= native_record_4k["peakEncoderInFlight"] <= 2 or
-                type(native_record_4k.get("keyframes")) is not int or
-                not 1 <= native_record_4k["keyframes"] <= 6 or
-                not fixture_4k.is_file() or not fixture_4k.stat().st_size):
-            raise ValueError("4K codec evidence must prove its exact fresh software-only synthetic profile")
+        validate_four_k_fixture(native_record_4k, fixture_4k, 30, 6)
+        fixture_4k60 = self.output / "synthetic-4k60.h264"
+        fixture_record_4k60 = self.output / "synthetic-4k60.json"
+        self.run("native-media-synthetic-4k60", [self.output / "KnotNativeMediaSynthetic.exe", "--software-4k60",
+                                               fixture_4k60, fixture_record_4k60], timeout=180)
+        validate_four_k_fixture(json.loads(fixture_record_4k60.read_text()), fixture_4k60, 60, 12)
         if self.media_only:
-            return [self.output / "KnotNativeMedia.dll", fixture, fixture_record, fixture_4k, fixture_record_4k, cpp_record]
+            return [self.output / "KnotNativeMedia.dll", fixture, fixture_record, fixture_4k, fixture_record_4k,
+                    fixture_4k60, fixture_record_4k60, wait_record, cpp_record]
         sources = sorted((ROOT / "native-engine/windows").glob("*.cs"))
         executable = self.csharp("Knot-Native-Preview", sources, "Knot.NativePreview.Program", "winexe")
         managed_crypto = self.csharp("KnotNativePairingBridgeChecks",
@@ -545,6 +578,7 @@ class Builder:
             raise ValueError("Native installer version metadata differs from the checked preview version")
         installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
         return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record, fixture_4k, fixture_record_4k,
+                fixture_4k60, fixture_record_4k60, wait_record,
                 self.output / "native-host-checks.json", public_certificate, public_pin, cpp_record, installer_metadata,
                 visual_record, managed_record, *crypto_products]
 

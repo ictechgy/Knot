@@ -15,6 +15,8 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 
 ## Connect
 
+Native.6 targets the reported delay between an immediate local Mac pointer and a following Windows window at4K60: serial video parsing/AVCC preparation runs away from the UI actor, input TCP uses `noDelay`, input selection follows pacing, and Windows uses a session-owned high-resolution poll timer. Actual timer measurements and a separate4K60 software-codec interoperability fixture are recorded by CI. Update both apps. These changes do not claim measured two-device latency, remove GPU readback or guarantee every GPU can sustain4K60.
+
 Use a private network or an already configured Tailscale connection. The Korean interface follows the Quiet Sidebar design, with advanced settings and help secondary.
 
 1. Open `Knot Native Preview` on Windows and start sharing. The eight-digit number lasts120seconds and authorizes one matching Mac for screen/input. Quality is frozen for that run: maximum4K/30fps/40Mbps by default, optional maximum4K/60fps/40Mbps or1080p/60fps/20Mbps compatibility mode.

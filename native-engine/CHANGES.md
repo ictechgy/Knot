@@ -1,5 +1,13 @@
 # Native preview changes
 
+## 0.1.0-native.6
+
+- Prepare framed video, strict stream validation, Annex B parsing and AVCC bytes on one serial media actor. Keep compressed-frame preparation off the AppKit/input actor without parallel frame tasks, reordered units or dropped H.264 references. Decoder submission and native presentation retain their bounded lifecycle.
+- Set client TCP `noDelay` for small input messages. Select the latest queued action after the existing pacing wait, preserving the 500/s limit, input epochs, release ordering and button/key/wheel barriers. Fresh blocked-writer tests include an old-source failure for stale drag selection.
+- Replace production `Sleep(1)` polling with one unnamed high-resolution waitable timer owned by the Windows media session. Preserve the 450ms read budget and existing progress limits; do not change a system-wide timer resolution or busy-spin.
+- Measure fresh Windows timer waits with QPC and compare the old and new wait mechanisms. Add a separate twelve-frame 3840×2160/60fps software-MFT fixture decoded by the Mac; retain the 30fps and 120-frame fixtures. These are scheduler and codec checks, not a claim of real GPU 4K60 throughput or input-to-display latency.
+- Advance installation version to `0.1.0-native.6`, numeric PE version to `0.1.0.6` and Mac bundle revision to `6`. Update both apps. Normal encoding remains hardware-only; GPU readback, CPU NV12 copies and TCP backpressure remain explicit performance tradeoffs.
+
 ## 0.1.0-native.5
 
 - Lift capture/Ready/SPS admission to3840×2160 and8,294,400pixels. Offer4K30/40Mbps,4K60/40Mbps and1080p60/20Mbps compatibility profiles. Preserve aspect and never upscale a smaller physical source.
