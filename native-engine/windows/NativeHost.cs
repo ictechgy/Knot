@@ -21,6 +21,7 @@ namespace Knot.NativePreview
         private readonly Invitation invitation;
         private readonly bool enrollmentMode;
         private readonly Func<long> clock;
+        private readonly Func<long> inputClock;
         private readonly EnrollmentServer enrollment;
         private Invitation enrollmentInvitation;
         private int enrollmentGrantsIssued;
@@ -58,12 +59,13 @@ namespace Knot.NativePreview
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback, Invitation invitation)
             : this(address, port, mediaFactory, inputSink, syntheticLoopback, invitation, false, Stopwatch.GetTimestamp, null) { }
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback,
-                            Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName)
+                            Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
             this.address = address; this.syntheticLoopback = syntheticLoopback;
             this.enrollmentMode = enrollmentMode; this.clock = clock ?? new Func<long>(Stopwatch.GetTimestamp);
+            this.inputClock = inputClock ?? new Func<long>(Stopwatch.GetTimestamp);
             this.mediaFactory = mediaFactory; this.inputSink = inputSink;
             this.invitation = invitation ?? new Invitation(this.clock);
             certificate = new RunCertificate();
@@ -189,10 +191,14 @@ namespace Knot.NativePreview
                     NativeProtocol.Write(tls, 2, ready);
                     lock (gate) { if (isStopped) return; active = true; }
                     Notify("Sharing with claimed viewer label (UNVERIFIED): " + peerName + ". Stop revokes this temporary session.");
-                    Interlocked.Exchange(ref lastRead, Stopwatch.GetTimestamp());
+                    Interlocked.Exchange(ref lastRead, inputClock());
                     watchdog = new Timer(delegate
                     {
-                        if (Stopwatch.GetTimestamp() - Interlocked.Read(ref lastRead) >= 10L * Stopwatch.Frequency) Stop();
+                        if (inputClock() - Interlocked.Read(ref lastRead) >= 10L * Stopwatch.Frequency)
+                        {
+                            if (!Stopping) Notify(Guidance("timeout"));
+                            Stop();
+                        }
                     }, null, 250, 250);
                     reader = new Thread(ReadInput); reader.IsBackground = true; reader.Name = "Knot native input reader"; reader.Start();
                     byte[] encoded = new byte[NativeProtocol.VideoLimit - 17];
@@ -357,14 +363,14 @@ namespace Knot.NativePreview
                 while (!Stopping)
                 {
                     Packet packet = NativeProtocol.ReadClient(stream, false);
-                    long now = Stopwatch.GetTimestamp();
+                    long now = inputClock();
                     if (!rate.TryConsume()) throw new ProtocolException("input", "input-rate");
                     Interlocked.Exchange(ref lastRead, now);
                     input.Accept(packet);
                 }
             }
             catch (ProtocolException error) { if (!Stopping) Notify(Guidance(error.GuidanceCategory)); Stop(); }
-            catch (Exception) { Stop(); }
+            catch (Exception) { if (!Stopping) Notify("Connection ended. Create a new invitation."); Stop(); }
         }
         private void SendError(string code)
         {

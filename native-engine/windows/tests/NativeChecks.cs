@@ -43,6 +43,7 @@ namespace Knot.NativePreview
                 stage = "tls-pin-mismatch"; TlsPinMismatch(); stage = "tls-approval-stop"; TlsApprovalStop();
                 stage = "tls-decline"; TlsDecline(); stage = "tls-expired"; TlsExpired(); stage = "tls-single-use"; TlsSingleUse();
                 stage = "tls-wrong-token"; TlsWrongToken(); stage = "tls-disconnect"; TlsDisconnect(false); stage = "tls-malformed-input"; TlsDisconnect(true);
+                stage = "tls-silent-watchdog-status"; TlsSilentWatchdogStatus();
                 stage = "tls-delayed-approval"; TlsDelayedApproval();
                 stage = "tls-approved-before-blocking-open-stop-race"; TlsApprovedBeforeBlockingOpen();
                 stage = "tls-release-failure-stop"; TlsReleaseFailureStopsInput();
@@ -675,6 +676,7 @@ namespace Knot.NativePreview
         }
         private static void TlsDisconnect(bool malformed)
         {
+            if (!malformed) { TlsReaderEofTerminalStatus(); return; }
             FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
             using (HostServer server = Server(media, sink, null))
             {
@@ -689,6 +691,99 @@ namespace Knot.NativePreview
                     Check(server.WaitStopped(4000));
                     Check(sink.Events.Contains("key:30:up") && media.Closed == 1);
                 }
+            }
+        }
+        private static void TlsReaderEofTerminalStatus()
+        {
+            FakeInput sink = new FakeInput(); string latest = null;
+            using (TerminalStatusMediaFactory media = new TerminalStatusMediaFactory())
+            using (ManualResetEvent terminal = new ManualResetEvent(false))
+            using (HostServer server = new HostServer(IPAddress.Loopback, 0, media, sink, true, null))
+            {
+                ++tlsFixtures;
+                server.StatusChanged = delegate(string text)
+                {
+                    Interlocked.Exchange(ref latest, text);
+                    if (text == "Connection ended. Create a new invitation.") terminal.Set();
+                };
+                server.ApprovalRequested = delegate { server.RespondToApproval(true); };
+                string token = Token(server), pin = server.Pin; server.Start();
+                try
+                {
+                    using (TlsClient client = new TlsClient(server, pin))
+                    {
+                        client.Send(1, Hello(token)); Check(client.ReadNonHeartbeat().Kind == 2);
+                        Check(media.Entered.WaitOne(3000));
+                        client.Send(0x20, Key(1, 30).Payload); Check(sink.Down.WaitOne(3000));
+                        client.Client.Close();
+                        // Media remains held, so its writer cannot produce a
+                        // fallback disconnect status or finish the host run.
+                        Check(terminal.WaitOne(4000));
+                        WaitFor(delegate { return !server.IsActive; });
+                        Check(Interlocked.CompareExchange(ref latest, null, null) == "Connection ended. Create a new invitation.");
+                        media.Continue.Set(); Check(server.WaitStopped(4000));
+                        Check(!server.IsActive && media.Closed == 1 && sink.Events.Contains("key:30:up"));
+                        Check(Interlocked.CompareExchange(ref latest, null, null) == "Connection ended. Create a new invitation.");
+                    }
+                }
+                finally { media.Continue.Set(); }
+            }
+        }
+        private static void TlsSilentWatchdogStatus()
+        {
+            FakeInput sink = new FakeInput(); string latest = null; long inputTicks = 0;
+            using (TerminalStatusMediaFactory media = new TerminalStatusMediaFactory())
+            using (ManualResetEvent terminal = new ManualResetEvent(false))
+            using (HostServer server = new HostServer(IPAddress.Loopback, 0, media, sink, true, null,
+                false, Stopwatch.GetTimestamp, null, delegate { return Interlocked.Read(ref inputTicks); }))
+            {
+                ++tlsFixtures;
+                server.StatusChanged = delegate(string text)
+                {
+                    Interlocked.Exchange(ref latest, text);
+                    if (text == HostServer.Guidance("timeout")) terminal.Set();
+                };
+                server.ApprovalRequested = delegate { server.RespondToApproval(true); };
+                string token = Token(server), pin = server.Pin; server.Start();
+                try
+                {
+                    using (TlsClient client = new TlsClient(server, pin))
+                    {
+                        client.Send(1, Hello(token)); Check(client.ReadNonHeartbeat().Kind == 2);
+                        Check(media.Entered.WaitOne(3000));
+                        Check(server.IsActive);
+                        Interlocked.Exchange(ref inputTicks, 11L * Stopwatch.Frequency);
+                        // The actual periodic producer observes virtual silence;
+                        // no real10s sleep or racing TLS read timeout is needed.
+                        Check(terminal.WaitOne(4000));
+                        WaitFor(delegate { return !server.IsActive; });
+                        Check(Interlocked.CompareExchange(ref latest, null, null) == HostServer.Guidance("timeout"));
+                        media.Continue.Set(); Check(server.WaitStopped(4000));
+                        Check(!server.IsActive && media.Closed == 1 && sink.Events.Count == 0);
+                        Check(Interlocked.CompareExchange(ref latest, null, null) == HostServer.Guidance("timeout"));
+                    }
+                }
+                finally { media.Continue.Set(); }
+            }
+        }
+        private sealed class TerminalStatusMediaFactory : IMediaFactory, IDisposable
+        {
+            internal readonly ManualResetEvent Entered = new ManualResetEvent(false), Continue = new ManualResetEvent(false);
+            internal int Closed;
+            public IMediaSource Open() { return new Source(this); }
+            public void Dispose() { Continue.Set(); Entered.Dispose(); Continue.Dispose(); }
+            private sealed class Source : IMediaSource
+            {
+                private readonly TerminalStatusMediaFactory owner;
+                internal Source(TerminalStatusMediaFactory owner) { this.owner = owner; }
+                public MediaInfo Info { get { return new MediaInfo { Width = 1280, Height = 720, Fps = 60, Bitrate = 12000000, DesktopWidth = 1920, DesktopHeight = 1080, HardwareEncoder = 1 }; } }
+                public int Read(byte[] buffer, out uint written, out uint flags, out ulong timestamp)
+                {
+                    owner.Entered.Set();
+                    if (!owner.Continue.WaitOne(15000)) throw new IOException("Fresh synthetic media read wait expired.");
+                    written = flags = 0; timestamp = 0; return 1;
+                }
+                public void Dispose() { Interlocked.Increment(ref owner.Closed); }
             }
         }
         private static void TlsDelayedApproval()
