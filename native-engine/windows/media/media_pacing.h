@@ -25,6 +25,15 @@ public:
         return pending_ && nowMicros >= pendingSinceMicros_ && nowMicros - pendingSinceMicros_ >= 2000000U;
     }
 
+    // Only an idle, input-ready encoder and no outstanding capture/retry can
+    // wait for the next capture deadline. Encoder events and GPU readback have
+    // no waitable signal here, so pending work keeps the fast polling interval.
+    uint64_t PollWaitMicros(uint64_t nowMicros, bool canSubmit, uint32_t inFlight) const {
+        if (!canSubmit || inFlight != 0 || pending_ || freshReady_ || nowMicros >= nextPollMicros_)
+            return 1000U;
+        return nextPollMicros_ - nowMicros;
+    }
+
     template<class PollCapture, class SubmitPixels>
     bool Pump(uint64_t nowMicros, bool canSubmit, bool havePixels, bool keyframeDue,
         PollCapture&& pollCapture, SubmitPixels&& submitPixels) {

@@ -2,12 +2,15 @@
 from pathlib import Path
 import json
 import os
+import shutil
+import stat
 import subprocess
 import struct
 import sys
 import tempfile
 import unittest
 import zlib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,6 +37,7 @@ class NativeRebuildTests(unittest.TestCase):
         for name in ["LICENSE", "INSTALLATION.md", "VERSION", ".gitignore", "fake-iscc",
                      "Assets/Brand/AppIcon.ico", "native-engine/windows/Native.iss", "scripts/verify_native_installer.ps1",
                      "native-engine/pairing/tests/ManagedCryptoChecks.cs",
+                     "native-engine/windows/MonitorGeometry.cs",
                      "native-engine/windows/tests/NativeVisualFixtures.cs",
                      *["native-engine/windows/media/" + name for name in
                        ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp",
@@ -131,7 +135,8 @@ class NativeRebuildTests(unittest.TestCase):
                 self.assertEqual(argv[3:], ["--brand-icon", self.root / "Assets/Brand/AppIcon.ico"])
                 data = self.inert_visual_png()
                 rows = []
-                for state in ["idle", "invitation", "request", "preparing", "sharing", "failure", "help"]:
+                for state in ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
+                              "short-idle-scale150", "short-idle-scale200"]:
                     image = visual_output / ("windows-" + state + ".png")
                     image.write_bytes(data)
                     rows.append(dict(name=image.name, sha256=native.digest(image), bytes=len(data), width=640, height=480))
@@ -140,11 +145,20 @@ class NativeRebuildTests(unittest.TestCase):
                     certificateCreationInvoked=False, captureInvoked=False, actualInputInvoked=False,
                     screenCaptureInvoked=False, existingUserUIRead=False, syntheticWindowsShown=False,
                     visualAcceptance="manual-review-required", images=rows,
+                    monitorIllustrationChecks=dict(status="PASS", boundsCases=6, rasterCases=36,
+                        minimumDpi=96, maximumDpi=288, centered=True, paneAspectPreserved=True,
+                        panesContained=True, sameBoundsDpiPixelIdentity=True, degenerateBoundsSkipped=True,
+                        scope="INERT geometry evidence substitute; no Windows renderer executed"),
                     renderMethod="INERT lifecycle test substitute; no native UI rendered")
                 if invalid_visual == "effects": report["networkInvoked"] = True
                 elif invalid_visual == "shown-synthetic": report["syntheticWindowsShown"] = True
                 elif invalid_visual == "digest": rows[0]["sha256"] = "0" * 64
                 elif invalid_visual == "path": rows[0]["name"] = "../not-owned.png"
+                elif invalid_visual == "monitor-missing": del report["monitorIllustrationChecks"]
+                elif invalid_visual == "monitor-false": report["monitorIllustrationChecks"]["panesContained"] = False
+                elif invalid_visual == "monitor-count": report["monitorIllustrationChecks"]["rasterCases"] = 35
+                elif invalid_visual == "monitor-bool": report["monitorIllustrationChecks"]["boundsCases"] = True
+                elif invalid_visual == "monitor-scale-state": rows.pop()
                 (visual_output / "visual-checks.json").write_text(json.dumps(report) + "\n")
             elif label in ["native-parser-checks", "native-pacing-checks", "native-activation-checks"]:
                 return b"INERT external-tool substitute for lifecycle checks only\n"
@@ -201,7 +215,7 @@ class NativeRebuildTests(unittest.TestCase):
         visual = json.loads((self.output / "native-ui-visual-checks.json").read_text())
         self.assertEqual(visual["visualAcceptance"], "manual-review-required")
         self.assertIn("INERT", visual["rendererReport"]["renderMethod"])
-        self.assertEqual(len(visual["rendererReport"]["images"]), 7)
+        self.assertEqual(len(visual["rendererReport"]["images"]), 9)
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
@@ -255,6 +269,19 @@ class NativeRebuildTests(unittest.TestCase):
     def test_renderer_cannot_reference_outside_owned_output(self):
         with self.assertRaisesRegex(ValueError, "Unsafe UI fixture image name"):
             self.build_with_inert_tools(invalid_visual="path")
+        self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+        self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
+
+    def test_windows_monitor_geometry_evidence_is_required_and_measured(self):
+        for invalid in ["monitor-missing", "monitor-false", "monitor-count", "monitor-bool"]:
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "fresh measured geometry"):
+                self.build_with_inert_tools(invalid_visual=invalid)
+            self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+            self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
+
+    def test_windows_monitor_scaled_state_is_required(self):
+        with self.assertRaisesRegex(ValueError, "omitted a required task state"):
+            self.build_with_inert_tools(invalid_visual="monitor-scale-state")
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
 
@@ -316,7 +343,6 @@ class NativeRebuildTests(unittest.TestCase):
     def test_rebuild_refuses_unsafe_owned_evidence_directory(self):
         self.build_with_inert_tools()
         evidence = self.output / "evidence"
-        import shutil
         shutil.rmtree(evidence)
         with tempfile.TemporaryDirectory(prefix="knot-native-foreign-inert-") as temporary:
             foreign = Path(temporary)
@@ -333,3 +359,196 @@ class NativeRebuildTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), "Fresh foreign fixture must survive")
             self.assertTrue(evidence.is_symlink() or evidence.is_file())
             self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+
+    def assert_no_success_seals(self):
+        for name in ["NATIVE-BUILD.json", "SHA256SUMS", "NATIVE-INPUTS.json"]:
+            self.assertFalse((self.output / name).exists(), name)
+
+    def link_fixture(self, link, target, directory=False):
+        try:
+            link.symlink_to(target, target_is_directory=directory)
+        except OSError as error:
+            self.skipTest("Synthetic symlink fixture unavailable: " + str(error))
+
+    def test_rebuild_refuses_linked_product_destinations_before_writes(self):
+        self.build_with_inert_tools()
+        foreign = self.root / "fresh-foreign-products"
+        foreign.mkdir()
+        for name in ["LICENSE", "AppIcon.ico", "KnotNativePairing.dll", "KnotNativePairing-LICENSE.txt"]:
+            with self.subTest(product=name):
+                sentinel = foreign / name
+                sentinel.write_bytes(b"Fresh foreign bytes must survive")
+                product = self.output / name
+                product.unlink(missing_ok=True)
+                self.link_fixture(product, sentinel)
+                try:
+                    with self.assertRaisesRegex(ValueError, "Linked or reparse native output"):
+                        self.build_with_inert_tools()
+                    self.assertEqual(sentinel.read_bytes(), b"Fresh foreign bytes must survive")
+                    self.assertTrue(product.is_symlink())
+                    self.assert_no_success_seals()
+                finally:
+                    product.unlink()
+
+    def test_rebuild_refuses_nested_pairing_library_link(self):
+        self.build_with_inert_tools()
+        library = self.output / "pairing/lib/libcrypto.a"
+        library.parent.mkdir(parents=True)
+        sentinel = self.root / "fresh-foreign-library"
+        sentinel.write_bytes(b"Fresh foreign static library")
+        self.link_fixture(library, sentinel)
+        with self.assertRaisesRegex(ValueError, "Linked or reparse native output"):
+            self.build_with_inert_tools()
+        self.assertEqual(sentinel.read_bytes(), b"Fresh foreign static library")
+        self.assertTrue(library.is_symlink())
+        self.assert_no_success_seals()
+
+    def test_rebuild_refuses_shared_product_file(self):
+        self.build_with_inert_tools()
+        product = self.output / "LICENSE"
+        sentinel = self.root / "fresh-foreign-hardlink"
+        sentinel.write_bytes(b"Fresh foreign shared bytes")
+        product.unlink()
+        try:
+            os.link(sentinel, product)
+        except OSError as error:
+            self.skipTest("Synthetic hardlink fixture unavailable: " + str(error))
+        with self.assertRaisesRegex(ValueError, "Non-regular or shared native output"):
+            self.build_with_inert_tools()
+        self.assertEqual(sentinel.read_bytes(), b"Fresh foreign shared bytes")
+        self.assert_no_success_seals()
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO fixture requires a POSIX filesystem")
+    def test_rebuild_refuses_nonregular_product_before_copy_can_block(self):
+        self.build_with_inert_tools()
+        product = self.output / "LICENSE"
+        product.unlink()
+        os.mkfifo(product)
+        with self.assertRaisesRegex(ValueError, "Non-regular or shared native output"):
+            native.Builder("windows", self.output)
+        self.assertTrue(stat.S_ISFIFO(product.lstat().st_mode))
+        self.assert_no_success_seals()
+
+    def test_reparse_directory_is_rejected_without_traversal(self):
+        self.build_with_inert_tools()
+        directory = self.output / "pairing/lib"
+        directory.mkdir(parents=True)
+        sentinel = directory / "fresh-reparse-target-sentinel"
+        sentinel.write_bytes(b"Fresh reparse target bytes")
+        actual_stat = native.output_stat
+        actual_iterdir = Path.iterdir
+
+        def reparse_stat(path):
+            info = actual_stat(path)
+            if path == directory:
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_nlink=1,
+                                       st_file_attributes=0x410)
+            return info
+
+        def guarded_iterdir(path):
+            if path == directory:
+                self.fail("Builder traversed a Windows reparse directory")
+            return actual_iterdir(path)
+
+        with patch.object(native, "output_stat", reparse_stat), patch.object(Path, "iterdir", guarded_iterdir):
+            with self.assertRaisesRegex(ValueError, "Linked or reparse native output"):
+                self.build_with_inert_tools()
+        self.assertEqual(sentinel.read_bytes(), b"Fresh reparse target bytes")
+        self.assert_no_success_seals()
+
+    @unittest.skipUnless(os.name == "nt", "Actual directory junction requires Windows")
+    def test_windows_pairing_junction_cannot_write_foreign_directory(self):
+        self.build_with_inert_tools()
+        foreign = self.root / "fresh-foreign-junction-target"
+        foreign.mkdir()
+        sentinel = foreign / "libcrypto.a"
+        sentinel.write_bytes(b"Fresh foreign junction bytes")
+        pairing = self.output / "pairing"
+        pairing.mkdir()
+        junction = pairing / "lib"
+        result = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(foreign)],
+                                capture_output=True)
+        if result.returncode:
+            self.skipTest("Synthetic junction fixture unavailable")
+        try:
+            with self.assertRaisesRegex(ValueError, "Linked or reparse native output"):
+                self.build_with_inert_tools()
+            self.assertEqual(sentinel.read_bytes(), b"Fresh foreign junction bytes")
+            self.assert_no_success_seals()
+        finally:
+            junction.rmdir()
+
+    def test_linked_ownership_marker_is_rejected_before_read(self):
+        self.build_with_inert_tools()
+        marker = self.output / ".native-build-owned.json"
+        sentinel = self.root / "fresh-foreign-marker"
+        sentinel.write_text(marker.read_text())
+        marker.unlink()
+        self.link_fixture(marker, sentinel)
+        actual_read = Path.read_text
+
+        def guarded_read(path, *args, **kwargs):
+            if path == marker:
+                self.fail("Builder read linked ownership marker")
+            return actual_read(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", guarded_read):
+            with self.assertRaisesRegex(ValueError, "ownership marker must be an ordinary"):
+                native.Builder("windows", self.output)
+        self.assertEqual(sentinel.read_text(), '{"owner": "KnotNativeBuild", "schema": 1}\n')
+
+    def test_output_ancestor_link_is_rejected_before_target_is_touched(self):
+        (self.root / "build").mkdir()
+        # Stay within build/ so lexical confinement must detect the link;
+        # resolving it first would silently populate this unrelated directory.
+        foreign = self.root / "build/fresh-output-target"
+        foreign.mkdir()
+        sentinel = foreign / "fresh-sentinel"
+        sentinel.write_bytes(b"Fresh output ancestor bytes")
+        self.link_fixture(self.root / "build/native-engine", foreign, directory=True)
+        with self.assertRaisesRegex(ValueError, "Linked, reparse or non-directory native build output"):
+            native.Builder("windows", self.output)
+        self.assertEqual(sorted(p.name for p in foreign.iterdir()), [sentinel.name])
+        self.assertEqual(sentinel.read_bytes(), b"Fresh output ancestor bytes")
+
+    def test_stale_nested_evidence_and_mac_scratch_links_are_removed_without_following(self):
+        self.build_with_inert_tools()
+        foreign = self.root / "fresh-scratch-foreign"
+        foreign.mkdir()
+        sentinel = foreign / "fresh-sentinel"
+        sentinel.write_bytes(b"Fresh scratch target bytes")
+        for relative in ["evidence/old", "visuals/old", "swift/release", "dmg-input/Applications"]:
+            link = self.output / relative
+            link.parent.mkdir(parents=True, exist_ok=True)
+            self.link_fixture(link, foreign, directory=True)
+        # Failed source validation must still retire all old success records and
+        # remove nested scratch links, without traversing their foreign target.
+        (self.root / "native-engine/windows/fresh-uncommitted.cs").write_text("Fresh source mismatch")
+        with self.assertRaisesRegex(ValueError, "tracked|committed|source"):
+            native.Builder("windows", self.output)
+        self.assertEqual(sorted(p.name for p in foreign.iterdir()), [sentinel.name])
+        self.assertEqual(sentinel.read_bytes(), b"Fresh scratch target bytes")
+        self.assert_no_success_seals()
+        for relative in ["evidence/old", "visuals", "swift", "dmg-input"]:
+            self.assertFalse((self.output / relative).exists(), relative)
+
+    def test_legitimate_owned_rebuild_discards_mac_generated_scratch_links(self):
+        self.build_with_inert_tools()
+        scratch = self.output / "swift"
+        scratch.mkdir()
+        target = scratch / "x86_64-apple-macosx/release"
+        target.mkdir(parents=True)
+        (target / "fresh-scratch-file").write_bytes(b"Fresh owned scratch bytes")
+        self.link_fixture(scratch / "release", target, directory=True)
+        staging = self.output / "dmg-input"
+        staging.mkdir()
+        # The real staging link points to /Applications; use a fresh empty
+        # synthetic target here, never inspect an actual application directory.
+        applications = self.root / "fresh-applications"
+        applications.mkdir()
+        self.link_fixture(staging / "Applications", applications, directory=True)
+        self.build_with_inert_tools()
+        self.assertTrue((self.output / "NATIVE-BUILD.json").is_file())
+        self.assertEqual(list(applications.iterdir()), [])
+        self.assertFalse(scratch.exists())
+        self.assertFalse(staging.exists())

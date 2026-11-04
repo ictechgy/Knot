@@ -3,7 +3,7 @@ using System;
 
 namespace Knot.NativePreview
 {
-    internal enum EnrollmentFailure { Authentication, StaleCandidate, Protocol, Expired, Closed, Setup, Unavailable }
+    internal enum EnrollmentFailure { Authentication, StaleCandidate, Protocol, Expired, Closed, Setup, Unavailable, Delivery }
     internal sealed class EnrollmentAttemptException : Exception
     {
         internal readonly EnrollmentFailure Failure;
@@ -31,6 +31,7 @@ namespace Knot.NativePreview
                 case EnrollmentFailure.Closed: return "연결 준비가 중지됐어요. 다시 연결하려면 새로 공유해주세요.";
                 case EnrollmentFailure.Setup: return "보안 연결 구성요소를 불러오지 못했어요. 설치 파일과 Windows 보안의 차단 알림을 확인한 뒤 다시 공유해주세요.";
                 case EnrollmentFailure.Unavailable: return "연결번호가 만료됐거나 시도 횟수를 모두 사용했어요. 새 번호로 다시 공유해주세요.";
+                case EnrollmentFailure.Delivery: return "번호는 확인했지만 연결 정보를 전달하지 못했어요. 화면 공유를 중지한 뒤 새 번호로 다시 공유해주세요.";
                 default: return "연결 형식을 확인하지 못했어요. Mac에서 PC를 다시 선택하고 두 기기의 Knot Native Preview 버전을 확인해주세요.";
             }
         }

@@ -16,6 +16,7 @@ namespace Knot.NativePreview
         private static void EnrollmentChecks()
         {
             EnrollmentPolicyChecks(); EnrollmentWireChecks(); EnrollmentPreflightChecks();
+            EnrollmentOfferDeliveryFailure();
             EnrollmentWrongCodeThenClaim(); EnrollmentWrongName(); EnrollmentExpiredGrant();
             EnrollmentStopBeforeConfirm(); EnrollmentExpiredSlotBeforeConfirm(); EnrollmentAttemptLimit(); EnrollmentLegacyCrossClaim(); EnrollmentWrongSourceBeforeTls(); EnrollmentStopAfterOffer();
         }
@@ -39,6 +40,74 @@ namespace Knot.NativePreview
             Check(EnrollmentGuidance.For(EnrollmentFailure.Setup) != EnrollmentGuidance.For(EnrollmentFailure.Authentication));
             Check(EnrollmentGuidance.For(EnrollmentFailure.StaleCandidate) != EnrollmentGuidance.For(EnrollmentFailure.Authentication));
             Check(EnrollmentGuidance.For(EnrollmentFailure.Protocol) != EnrollmentGuidance.For(EnrollmentFailure.Authentication));
+        }
+        private static void EnrollmentOfferDeliveryFailure()
+        {
+            // A fresh PAKE attempt exercises only the enrollment listener: no
+            // HostServer, TLS certificate, desktop, capture or input is created.
+            int grants = 0, writes = 0, callbacks = 0, notices = 0;
+            bool authenticatedViewer = false, sealedOffer = false;
+            EnrollmentFailure terminal = EnrollmentFailure.Unavailable;
+            using (ManualResetEvent completed = new ManualResetEvent(false))
+            {
+                EnrollmentServer server = null;
+                using (server = new EnrollmentServer(IPAddress.Loopback, "Synthetic Windows", true, Stopwatch.GetTimestamp,
+                    delegate(byte[] slot, string name, IPAddress peer)
+                    {
+                        server.Slot.Confirm();
+                        authenticatedViewer = NativeProtocol.Equal(slot, server.Slot.Id) &&
+                            name == "Synthetic viewer" && IPAddress.IsLoopback(peer);
+                        Interlocked.Increment(ref grants);
+                        return new EnrollmentGrant(slot, new byte[16], "fresh-synthetic-invitation", 30000);
+                    },
+                    delegate(EnrollmentFailure failure)
+                    {
+                        terminal = failure; Interlocked.Increment(ref callbacks);
+                        // Mirror the owner's terminal callback: revoke and stop,
+                        // never reactivate this already consumed enrollment slot.
+                        server.Stop(); completed.Set();
+                    },
+                    delegate(string ignored) { Interlocked.Increment(ref notices); }, null,
+                    delegate(Stream ignored, byte[] payload)
+                    {
+                        sealedOffer = payload.Length > 0; Interlocked.Increment(ref writes);
+                        throw new IOException("Fresh synthetic offer delivery failure");
+                    }))
+                {
+                    ++enrollmentFixtures; server.Start();
+                    byte[] slot = (byte[])server.Slot.Id.Clone();
+                    using (PairingCryptoSession crypto = PairingCryptoSession.Create(false, Bytes(server.Code), slot))
+                    using (TcpClient client = new TcpClient())
+                    {
+                        client.Connect(IPAddress.Loopback, server.Port); client.ReceiveTimeout = client.SendTimeout = 3000;
+                        NetworkStream stream = client.GetStream(); stream.Write(EnrollmentProtocol.Preamble, 0, 8);
+                        byte[] hello = new byte[48]; Buffer.BlockCopy(slot, 0, hello, 0, 16); Buffer.BlockCopy(crypto.Message, 0, hello, 16, 32);
+                        EnrollmentProtocol.Write(stream, 1, hello); Packet response = EnrollmentProtocol.Read(stream, 2);
+                        byte[] returnedSlot = new byte[16], message = new byte[32];
+                        Buffer.BlockCopy(response.Payload, 0, returnedSlot, 0, 16); Buffer.BlockCopy(response.Payload, 16, message, 0, 32);
+                        Check(NativeProtocol.Equal(returnedSlot, slot)); crypto.Process(message);
+                        EnrollmentProtocol.Write(stream, 3, crypto.Seal(3, Confirm(slot, "Synthetic viewer")));
+                        Check(completed.WaitOne(4000));
+                        bool closed = false;
+                        try { closed = stream.ReadByte() == -1; }
+                        catch (IOException error)
+                        {
+                            SocketException socket = error.InnerException as SocketException;
+                            closed = socket != null && socket.SocketErrorCode == SocketError.ConnectionReset;
+                        }
+                        Check(closed);
+                    }
+                    Check(terminal == EnrollmentFailure.Delivery && callbacks == 1 && notices == 0);
+                    Check(authenticatedViewer && sealedOffer && grants == 1 && writes == 1);
+                    Check(server.Slot.IsConsumed && server.Slot.Attempts == 1 && !server.Slot.Busy && !server.Slot.Available);
+                    Check(server.Code == "" && server.Slot.LifetimeRemainingMilliseconds == 0);
+                    Reject(delegate { server.Slot.Begin(); }); Reject(delegate { server.Slot.Confirm(); });
+                    server.Start(); Check(grants == 1 && writes == 1 && callbacks == 1);
+                    Check(EnrollmentGuidance.For(terminal) != EnrollmentGuidance.For(EnrollmentFailure.Unavailable));
+                    Check(EnrollmentGuidance.For(terminal) != EnrollmentGuidance.For(EnrollmentFailure.Authentication));
+                    Check(EnrollmentGuidance.For(terminal) != EnrollmentGuidance.For(EnrollmentFailure.Expired));
+                }
+            }
         }
         private static void DiscoveryExclusiveBind(HostServer server)
         {

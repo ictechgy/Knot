@@ -1,5 +1,13 @@
 # Native preview changes
 
+## 0.1.0-native.7
+
+- Fit Windows monitor decoration through one shared canvas, preserving its proportions and centering the four square panes inside the screen. Clip decoration and repaint after resize/DPI changes. Add36 production-paint bitmap checks and150%/200% short-number idle scenes; physical per-monitor transitions remain untested.
+- Reject linked/reparse/shared build-output destinations before copying assets or compiling, and retire stale success records on failure. Fresh regression replays preserve external sentinel files that the previous builder overwrote. This assumes an owned single-writer build directory.
+- Distinguish an authenticated number whose connection information could not be delivered from an expired or incorrect number. End and revoke that run, retain one-use slot semantics and ask for fresh sharing; a deterministic loopback PAKE fixture forces the delivery failure.
+- Wait until the next useful capture deadline when no GPU readback or encoder output needs prompt polling. Retain fast pending-work polling and existing read/progress deadlines. A five-second synthetic policy trace changes5001 wait requests to306 with301 capture checks; actual CPU, power and two-device latency remain unmeasured.
+- Advance installation version to `0.1.0-native.7`, numeric PE version to `0.1.0.7` and Mac bundle revision to `7`. Correct documentation of the required30fps/60fps4K Windows-to-Mac codec fixtures.
+
 ## 0.1.0-native.6
 
 - Prepare framed video, strict stream validation, Annex B parsing and AVCC bytes on one serial media actor. Keep compressed-frame preparation off the AppKit/input actor without parallel frame tasks, reordered units or dropped H.264 references. Decoder submission and native presentation retain their bounded lifecycle.

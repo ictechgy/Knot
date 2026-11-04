@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Forms;
@@ -38,6 +39,73 @@ namespace Knot.NativePreview
                 return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", "").ToLowerInvariant();
         }
         private static string Q(string value) { return StrictJson.Quote(value); }
+        private static string IllustrationChecks()
+        {
+            Size[] sizes = { new Size(700, 88), new Size(700, 44), new Size(52, 88),
+                new Size(700, 176), new Size(700, 264), new Size(16, 12) };
+            int[] dpis = { 96, 120, 144, 192, 240, 288 };
+            int renders = 0;
+            foreach (Size size in sizes)
+            {
+                MonitorGeometry geometry;
+                if (!MonitorGeometry.TryFit(size, out geometry)) throw new InvalidOperationException("Valid illustration bounds were rejected.");
+                RectangleF client = new RectangleF(PointF.Empty, size);
+                if (!client.Contains(geometry.Screen) || geometry.BaseLeft.X < 0 || geometry.BaseRight.X > size.Width ||
+                    geometry.StemBottom.Y > size.Height ||
+                    Math.Abs(geometry.Screen.Width / geometry.Screen.Height - 118f / 72f) > 0.001f ||
+                    Math.Abs(geometry.Logo.Left + geometry.Logo.Width / 2 - geometry.Screen.Left - geometry.Screen.Width / 2) > 0.001f ||
+                    Math.Abs(geometry.Logo.Top + geometry.Logo.Height / 2 - geometry.Screen.Top - geometry.Screen.Height / 2) > 0.001f)
+                    throw new InvalidOperationException("Monitor geometry lost aspect, centering or containment.");
+                for (int row = 0; row < 2; ++row)
+                    for (int column = 0; column < 2; ++column)
+                    {
+                        RectangleF pane = geometry.Pane(column, row);
+                        if (!geometry.Screen.Contains(pane) || Math.Abs(pane.Width - pane.Height) > 0.001f)
+                            throw new InvalidOperationException("A Windows pane escaped or changed aspect.");
+                    }
+                string previousPixels = null;
+                foreach (int dpi in dpis)
+                {
+                    using (MonitorIllustration control = new MonitorIllustration())
+                    using (Bitmap bitmap = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb))
+                    {
+                        control.Size = size; bitmap.SetResolution(dpi, dpi);
+                        using (Graphics graphics = Graphics.FromImage(bitmap))
+                        { graphics.Clear(PreviewStyle.Surface); control.DrawIllustration(graphics); }
+                        for (int row = 0; row < 2; ++row)
+                            for (int column = 0; column < 2; ++column)
+                            {
+                                RectangleF pane = geometry.Pane(column, row);
+                                int x = (int)Math.Floor(pane.Left + pane.Width / 2), y = (int)Math.Floor(pane.Top + pane.Height / 2);
+                                if (bitmap.GetPixel(x, y).ToArgb() != PreviewStyle.Accent.ToArgb())
+                                    throw new InvalidOperationException("A centered Windows pane did not paint.");
+                            }
+                        BitmapData data = bitmap.LockBits(new Rectangle(Point.Empty, bitmap.Size), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                        byte[] pixels;
+                        try
+                        {
+                            if (data.Stride != size.Width * 4 || data.Height != size.Height)
+                                throw new InvalidOperationException("Unexpected owned bitmap row layout.");
+                            pixels = new byte[data.Stride * data.Height];
+                            Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
+                        }
+                        finally { bitmap.UnlockBits(data); }
+                        string digest;
+                        using (SHA256 hash = SHA256.Create()) digest = BitConverter.ToString(hash.ComputeHash(pixels));
+                        if (previousPixels != null && digest != previousPixels)
+                            throw new InvalidOperationException("Graphics DPI was applied a second time to fitted monitor pixels.");
+                        previousPixels = digest; ++renders;
+                    }
+                }
+            }
+            MonitorGeometry tiny;
+            if (MonitorGeometry.TryFit(Size.Empty, out tiny) || MonitorGeometry.TryFit(new Size(1, 1), out tiny))
+                throw new InvalidOperationException("Degenerate illustration bounds must skip painting.");
+            return "{\"status\":\"PASS\",\"boundsCases\":" + sizes.Length + ",\"rasterCases\":" + renders +
+                ",\"minimumDpi\":96,\"maximumDpi\":288,\"centered\":true,\"paneAspectPreserved\":true," +
+                "\"panesContained\":true,\"sameBoundsDpiPixelIdentity\":true,\"degenerateBoundsSkipped\":true," +
+                "\"scope\":\"Production drawing on fresh bitmaps; not a physical monitor transition test\"}";
+        }
         private static void Progress(Frame frame, string stage)
         {
             currentStage = stage;
@@ -108,6 +176,7 @@ namespace Knot.NativePreview
                 // Configure before creating any control or native window handle.
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                 Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+                string illustrationChecks = IllustrationChecks();
                 List<Frame> frames = new List<Frame>();
                 frames.Add(new Frame("windows-idle.png", HostViewPhase.Idle, false, 1040, 740, 1));
                 frames.Add(new Frame("windows-invitation.png", HostViewPhase.Invitation, false, 1040, 740, 1));
@@ -127,6 +196,8 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-request-long-name-scale200.png", HostViewPhase.Request, false, 1040, 740, 2f) { ViewerLabelOverride = new string('W', 64) });
                 frames.Add(new Frame("windows-ended-error-scale200.png", HostViewPhase.Stopped, false, 1040, 740, 2f) { StatusOverride = PreviewCopy.Status(HostServer.Guidance("encoder")) });
                 frames.Add(new Frame("windows-short-idle.png", HostViewPhase.Idle, false, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-idle-scale150.png", HostViewPhase.Idle, false, 1040, 740, 1.5f) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-idle-scale200.png", HostViewPhase.Idle, false, 1040, 740, 2f) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-code.png", HostViewPhase.Invitation, false, 1040, 740, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-code-compact.png", HostViewPhase.Invitation, false, 800, 620, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-code-scale200.png", HostViewPhase.Invitation, false, 1040, 740, 2f) { EnrollmentMode = true });
@@ -249,6 +320,7 @@ namespace Knot.NativePreview
                     "\"visualAcceptance\":\"manual-review-required\",\"renderMethod\":\"Owned fresh fixture Form.DrawToBitmap after Show and finite DoEvents; no screen capture\"," +
                     "\"uiExceptionPolicy\":\"ThrowException\"," +
                     "\"scaleScope\":\"layout/font geometry simulation only; actual drawing DPI recorded; not a per-monitor DPI acceptance test\"," +
+                    "\"monitorIllustrationChecks\":" + illustrationChecks + "," +
                     "\"brandIconSHA256\":" + Q(Digest(iconPath)) + ",\"images\":[" + string.Join(",", records.ToArray()) + "]}";
                 File.WriteAllText(Path.Combine(output, "visual-checks.json"), report + Environment.NewLine, new UTF8Encoding(false));
                 Console.WriteLine(report); return 0;

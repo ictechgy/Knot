@@ -117,7 +117,7 @@ namespace Knot.NativePreview
             scroll.Controls.Add(body);
 
             taskCard = new PreviewCard(scale); taskCard.Dock = DockStyle.Top; body.Controls.Add(taskCard);
-            illustration.LayoutScale = scale; illustration.Height = P(88); illustration.Dock = DockStyle.Top; illustration.Margin = new Padding(0, 0, 0, P(12));
+            illustration.Height = P(88); illustration.Dock = DockStyle.Top; illustration.Margin = new Padding(0, 0, 0, P(12));
             taskCard.Content.Controls.Add(illustration);
             stateStep = MakeLabel("01  화면 공유", 9, FontStyle.Bold); stateStep.ForeColor = PreviewStyle.Accent;
             stateStep.Margin = new Padding(0, 0, 0, P(8)); taskCard.Content.Controls.Add(stateStep);

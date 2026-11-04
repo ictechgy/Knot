@@ -1,6 +1,7 @@
 // Standalone timer measurement: never links capture, codec, input, or DLL entry.
 #include "media_wait.h"
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -79,6 +80,26 @@ int wmain(int argc, wchar_t** argv) {
                 return wait.WaitUntil(knot::MediaPollWait::Clock::now() +
                     std::chrono::milliseconds(450)) == S_OK;
             }, timer)) return 1;
+        // These contract checks follow the unchanged 64x default-1ms QPC
+        // comparison. Exact arithmetic proves clamping without asserting that
+        // an OS scheduler meets a synthetic elapsed-time threshold.
+        const uint64_t largest = (std::numeric_limits<uint64_t>::max)();
+        if (knot::MediaPollIntervalNanoseconds(450000000, 8000) != 8000000 ||
+            knot::MediaPollIntervalNanoseconds(450000000, largest) != 450000000 ||
+            knot::MediaPollIntervalNanoseconds(500000000, largest) != 450000000 ||
+            knot::MediaPollIntervalNanoseconds(10000000, largest) != 10000000 ||
+            knot::MediaPollIntervalNanoseconds(75, 1000) != 75 ||
+            knot::MediaPollIntervalNanoseconds(0, largest) != 0 ||
+            knot::MediaPollIntervalNanoseconds(-1, largest) != 0 ||
+            knot::MediaPollIntervalNanoseconds(450000000, 0) != 0 ||
+            wait.WaitUntil(knot::MediaPollWait::Clock::now() +
+                std::chrono::milliseconds(450), 0) != E_INVALIDARG ||
+            wait.WaitUntil(knot::MediaPollWait::Clock::now() -
+                std::chrono::milliseconds(1), largest) != S_FALSE ||
+            wait.WaitUntil(knot::MediaPollWait::Clock::now() +
+                std::chrono::milliseconds(450), 8000) != S_OK ||
+            FAILED(wait.WaitUntil(knot::MediaPollWait::Clock::now() +
+                std::chrono::milliseconds(10), largest))) return 1;
     }
     if (!GetProcessHandleCount(GetCurrentProcess(), &after) || after != before) return 1;
     std::ostringstream report;
@@ -94,6 +115,7 @@ int wmain(int argc, wchar_t** argv) {
         "\"scope\":\"Measured fresh timer waits only; no production GPU, network or 4K60 acceptance\"}\n";
     if (!WriteExclusive(argv[2], report.str())) return 1;
     std::cout << "PASS: owned unnamed high-resolution wait; " << Iterations
-        << " QPC samples per method; no capture/input/codec; measurements are not a hardware throughput guarantee\n";
+        << " QPC samples per method; adaptive 8ms request, zero rejection, expired/oversize deadline clamps; "
+        "no capture/input/codec; measurements are not a hardware throughput guarantee\n";
     return 0;
 }

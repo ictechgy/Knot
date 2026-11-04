@@ -249,11 +249,114 @@ bool SchedulerQuantization() {
     // separately by media_wait_test, not inferred from these fake schedules.
     return PollCadenceWithWait(1000) == 59 && PollCadenceWithWait(15625) == 32;
 }
+
+bool AdaptiveWaitEligibility() {
+    knot::CapturePacer pacer(60);
+    if (pacer.PollWaitMicros(0, true, 0) != 1000) return false;
+    if (!pacer.Pump(0, true, true, false, [] { return CaptureReadiness::Fresh; },
+        [](bool) { return true; })) return false;
+    if (pacer.PollWaitMicros(0, true, 0) != 16666 ||
+        pacer.PollWaitMicros(16665, true, 0) != 1 ||
+        pacer.PollWaitMicros(16666, true, 0) != 1000 ||
+        pacer.PollWaitMicros(0, true, 1) != 1000 ||
+        pacer.PollWaitMicros(0, false, 0) != 1000) return false;
+    // No accepted input is not sufficient for a long wait: a GPU copy already
+    // started by Pump must continue to be polled promptly until it completes.
+    if (pacer.Pump(16666, true, true, false, [] { return CaptureReadiness::Pending; },
+        [](bool) { return true; }) || pacer.PollWaitMicros(16666, true, 0) != 1000 ||
+        pacer.PollWaitMicros(2000000, true, 0) != 1000 || pacer.PendingTimedOut(2016665) ||
+        !pacer.PendingTimedOut(2016666)) return false;
+
+    knot::CapturePacer retry(60);
+    if (retry.Pump(0, true, false, false, [] { return CaptureReadiness::Fresh; },
+        [](bool) { return false; }) || retry.PollWaitMicros(0, true, 0) != 1000) return false;
+    bool repolled = false;
+    if (!retry.Pump(1000, true, true, false, [&] { repolled = true; return CaptureReadiness::Failed; },
+        [](bool fresh) { return fresh; }) || repolled ||
+        retry.PollWaitMicros(1000, true, 0) != 16666) return false;
+
+    knot::CapturePacer endOfClock(1);
+    const uint64_t almostEnd = (std::numeric_limits<uint64_t>::max)() - 100U;
+    return endOfClock.Pump(almostEnd, true, true, false, [] { return CaptureReadiness::Fresh; },
+        [](bool) { return true; }) && endOfClock.PollWaitMicros(almostEnd, true, 0) == 100 &&
+        endOfClock.PollWaitMicros((std::numeric_limits<uint64_t>::max)(), true, 0) == 1000;
+}
+
+struct WaitSchedule {
+    uint32_t waitRequests = 0, capturePolls = 0, pendingWaits = 0;
+    bool valid = true;
+    std::vector<uint64_t> submittedAt, freshAt, keyframes;
+};
+
+WaitSchedule SimulateWaitSchedule(bool adaptive, uint64_t activeFrom) {
+    constexpr uint64_t duration = 5000000;
+    knot::CapturePacer pacer(60);
+    knot::MediaTimeline timeline(60);
+    WaitSchedule schedule;
+    uint64_t outputReadyAt = 0;
+    uint32_t inFlight = 0;
+    bool havePixels = false;
+    for (uint64_t now = 0; now <= duration;) {
+        // Fresh synthetic output takes 1ms. This fake encoder remains input
+        // ready while one sample is in flight, as the real two-slot API can.
+        if (inFlight != 0 && now >= outputReadyAt) { inFlight = 0; pacer.OutputObserved(); }
+        pacer.Pump(now, true, havePixels, timeline.KeyframeDue(now), [&] {
+            ++schedule.capturePolls;
+            const bool fresh = !havePixels || now >= activeFrom;
+            havePixels = true;
+            return fresh ? CaptureReadiness::Fresh : CaptureReadiness::Unchanged;
+        }, [&](bool fresh) {
+            knot::MediaTiming timing;
+            if (!timeline.Plan(now, timing) || timing.duration != 166660 || inFlight != 0) {
+                schedule.valid = false; return false;
+            }
+            timeline.Commit(timing);
+            schedule.submittedAt.push_back(now);
+            if (fresh) schedule.freshAt.push_back(now);
+            if (timing.forceKeyframe) schedule.keyframes.push_back(now);
+            inFlight = 1; outputReadyAt = now + 1000;
+            return true;
+        });
+        const uint64_t requested = adaptive ? pacer.PollWaitMicros(now, true, inFlight) : 1000;
+        if (requested == 0 || requested > 16666 || (inFlight != 0 && requested > 1000))
+            schedule.valid = false;
+        if (inFlight != 0) ++schedule.pendingWaits;
+        ++schedule.waitRequests;
+        now += requested;
+    }
+    return schedule;
+}
+
+bool AdaptiveWaitCadence() {
+    const auto fixedIdle = SimulateWaitSchedule(false, (std::numeric_limits<uint64_t>::max)());
+    const auto adaptiveIdle = SimulateWaitSchedule(true, (std::numeric_limits<uint64_t>::max)());
+    const auto active = SimulateWaitSchedule(true, 0);
+    const auto transition = SimulateWaitSchedule(true, 2500000);
+    if (!fixedIdle.valid || !adaptiveIdle.valid || !active.valid || !transition.valid ||
+        fixedIdle.waitRequests != 5001 || adaptiveIdle.waitRequests >= 320 ||
+        adaptiveIdle.capturePolls != 301 || adaptiveIdle.submittedAt.size() < 5 ||
+        adaptiveIdle.submittedAt.size() > 7 || adaptiveIdle.keyframes.size() != 3 ||
+        adaptiveIdle.pendingWaits != adaptiveIdle.submittedAt.size() ||
+        active.freshAt.size() != 301 || active.pendingWaits != active.freshAt.size()) return false;
+    for (size_t i = 1; i < adaptiveIdle.keyframes.size(); ++i)
+        if (adaptiveIdle.keyframes[i] - adaptiveIdle.keyframes[i - 1] > 2016666) return false;
+    for (size_t i = 1; i < active.freshAt.size(); ++i)
+        if (active.freshAt[i] - active.freshAt[i - 1] != 16666) return false;
+    if (transition.freshAt.size() < 2 || transition.freshAt[1] < 2500000 ||
+        transition.freshAt[1] - 2500000 > 16666) return false;
+    for (size_t i = 2; i < transition.freshAt.size(); ++i)
+        if (transition.freshAt[i] - transition.freshAt[i - 1] != 16666) return false;
+    std::cout << "Synthetic 5s production wait policy: idle wait requests fixed1ms=" << fixedIdle.waitRequests
+        << ", adaptive=" << adaptiveIdle.waitRequests << "; capture polls=" << adaptiveIdle.capturePolls
+        << "; fresh cadence=16666us; pending encoder waits<=1000us (not measured CPU/power)\n";
+    return true;
+}
 }
 
 int main() {
     if (!VideoBounds() || !PointerOnlyCadence() || !PendingReadback() || !StartupAndBackpressure() || !PendingLiveness() || !StaticCadenceAndTimeline() ||
-        !KeyframeDeadlineOverridesIdle() || !ExplicitFixtureTimeline() || !StaticToActiveDuration() || !SchedulerQuantization()) {
+        !KeyframeDeadlineOverridesIdle() || !ExplicitFixtureTimeline() || !StaticToActiveDuration() || !SchedulerQuantization() ||
+        !AdaptiveWaitEligibility() || !AdaptiveWaitCadence()) {
         std::cerr << "FAIL: production media pacing/timeline policy\n"; return 1;
     }
     std::cout << "PASS: production Pump pending16666us->fresh17666us with no stale submit; static1Hz; "

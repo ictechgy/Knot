@@ -9,6 +9,7 @@ import os
 import plistlib
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -19,13 +20,61 @@ sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.6"
+VERSION = "0.1.0-native.7"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def output_stat(path):
+    """Inspect the entry, including broken links, without resolving its target."""
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def linked_output(info):
+    # Junctions and other Windows reparse points need not be POSIX symlinks.
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def ordinary_output(info):
+    return not linked_output(info) and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+
+
+def remove_output_entry(path):
+    """Remove owned scratch entries without descending through any kind of link."""
+    info = output_stat(path)
+    if info is None:
+        return
+    if linked_output(info):
+        if stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x10:
+            path.rmdir()  # Windows directory reparse point; remove the entry only.
+        else:
+            path.unlink()
+    elif stat.S_ISDIR(info.st_mode):
+        for child in path.iterdir():
+            remove_output_entry(child)
+        path.rmdir()
+    else:
+        path.unlink()
+
+
+def validate_output_tree(path):
+    info = output_stat(path)
+    if info is None:
+        return
+    if linked_output(info):
+        raise ValueError("Linked or reparse native output is unsupported: " + str(path))
+    if stat.S_ISDIR(info.st_mode):
+        for child in path.iterdir():
+            validate_output_tree(child)
+    elif not ordinary_output(info):
+        raise ValueError("Non-regular or shared native output is unsupported: " + str(path))
 
 
 def validate_wait_measurement(record):
@@ -102,37 +151,65 @@ class Builder:
     def __init__(self, platform, output, media_only=False):
         self.platform = platform
         self.media_only = media_only
-        self.output = output.resolve()
+        # This is a single-writer, owned build workspace. Check pre-existing
+        # entries before any compiler/copy writes; this is not a defense against
+        # concurrent hostile filesystem replacement during a build.
+        self.output = Path(os.path.abspath(output))
         if self.output == ROOT or not self.output.is_relative_to(ROOT / "build"):
             raise ValueError("Native outputs must be in this checkout's build directory")
+        directory = ROOT
+        for part in self.output.relative_to(ROOT).parts:
+            directory = directory / part
+            info = output_stat(directory)
+            if info is not None and (linked_output(info) or not stat.S_ISDIR(info.st_mode)):
+                raise ValueError("Linked, reparse or non-directory native build output is unsupported")
         marker = self.output / ".native-build-owned.json"
-        if self.output.exists() and any(self.output.iterdir()) and not marker.is_file():
+        marker_info = output_stat(marker)
+        if marker_info is not None and not ordinary_output(marker_info):
+            raise ValueError("Native build ownership marker must be an ordinary unshared file")
+        if self.output.exists() and any(self.output.iterdir()) and marker_info is None:
             raise ValueError("Refusing an existing output directory without our ownership marker")
         self.output.mkdir(parents=True, exist_ok=True)
-        if self.output.is_symlink():
-            raise ValueError("Linked native build output is unsupported")
-        if marker.exists():
+        if marker_info is not None:
             if json.loads(marker.read_text()) != {"owner": "KnotNativeBuild", "schema": 1}:
                 raise ValueError("Native build ownership marker differs")
         else:
             marker.write_text(json.dumps({"owner": "KnotNativeBuild", "schema": 1}) + "\n")
         # Start a fresh evidence epoch, including substep reports. A failed
         # rebuild must not pair new inputs with a previous run's passed JSON.
+        unsafe_seals = []
         for name in ["NATIVE-BUILD.json", "SHA256SUMS", "NATIVE-INPUTS.json", "native-ui-visual-checks.json",
                      "native-cpp-checks.json", "native-host-checks.json", "native-installer-metadata.json",
                      "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
                      "synthetic-codec.json", "synthetic-codec-4k.json", "synthetic-4k60.json",
                      "native-wait-checks.json"]:
-            (self.output / name).unlink(missing_ok=True)
+            path = self.output / name
+            info = output_stat(path)
+            if info is not None and stat.S_ISDIR(info.st_mode) and not linked_output(info):
+                unsafe_seals.append(path)
+            else:
+                remove_output_entry(path)
+        if unsafe_seals:
+            raise ValueError("Non-file native completion record is unsupported: " + str(unsafe_seals[0]))
         # These directories contain owned per-step success records too. Refuse
         # links/files rather than following them or deleting an external target.
         owned_directories = [self.output / name for name in ["evidence", "visuals"]]
         for directory in owned_directories:
-            if directory.is_symlink() or directory.exists() and not directory.is_dir():
+            info = output_stat(directory)
+            if info is not None and (linked_output(info) or not stat.S_ISDIR(info.st_mode)):
                 raise ValueError("Linked or non-directory native evidence output is unsupported")
         for directory in owned_directories:
-            if directory.exists():
-                shutil.rmtree(directory)
+            remove_output_entry(directory)
+        # SwiftPM and DMG staging legitimately create internal and Applications
+        # links. Discard these owned scratch trees without following any links;
+        # all retained destinations must be ordinary entries before reuse.
+        for name in ["swift", "dmg-input"]:
+            directory = self.output / name
+            info = output_stat(directory)
+            if info is not None and (linked_output(info) or not stat.S_ISDIR(info.st_mode)):
+                raise ValueError("Linked or non-directory native scratch output is unsupported")
+            remove_output_entry(directory)
+        validate_output_tree(self.output)
         self.evidence = self.output / "evidence"
         self.evidence.mkdir()
         self.commands = []
@@ -197,6 +274,17 @@ class Builder:
                 report.get("visualAcceptance") != "manual-review-required" or
                 not isinstance(report.get("renderMethod"), str) or not report["renderMethod"].strip()):
             raise ValueError("UI checks must identify fresh synthetic rendering without production effects")
+        if self.platform == "windows":
+            monitor = report.get("monitorIllustrationChecks")
+            measurements = {"boundsCases": 6, "rasterCases": 36, "minimumDpi": 96, "maximumDpi": 288}
+            if (not isinstance(monitor, dict) or monitor.get("status") != "PASS" or
+                    any(type(monitor.get(key)) is not int or monitor[key] != value
+                        for key, value in measurements.items()) or
+                    any(monitor.get(key) is not True for key in
+                        ["centered", "paneAspectPreserved", "panesContained",
+                         "sameBoundsDpiPixelIdentity", "degenerateBoundsSkipped"]) or
+                    not isinstance(monitor.get("scope"), str) or not monitor["scope"].strip()):
+                raise ValueError("Windows monitor illustration needs fresh measured geometry and DPI raster checks")
         rows = report.get("images")
         if not isinstance(rows, list) or not 7 <= len(rows) <= 32:
             raise ValueError("UI fixture state coverage is missing or excessive")
@@ -220,7 +308,8 @@ class Builder:
                      ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
-                     ["idle", "invitation", "request", "preparing", "sharing", "failure", "help"]})
+                     ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
+                      "short-idle-scale150", "short-idle-scale200"]})
         if not required.issubset(names):
             raise ValueError("UI fixture omitted a required task state")
         bound_sources = {self.input(path).relative_to(ROOT).as_posix(): digest(path) for path in source_inputs}

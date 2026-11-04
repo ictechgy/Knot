@@ -8,6 +8,14 @@
 #include <cstdint>
 
 namespace knot {
+// Pure conversion shared by the timer and its standalone contract checks.
+// Clamp before multiplication so even an untrusted uint64 request stays finite.
+inline int64_t MediaPollIntervalNanoseconds(int64_t remainingNanoseconds, uint64_t requestedMicros) {
+    if (remainingNanoseconds <= 0) return 0;
+    const uint64_t boundedMicros = std::min<uint64_t>(requestedMicros, 450000U);
+    return std::min<int64_t>(remainingNanoseconds, static_cast<int64_t>(boundedMicros * 1000U));
+}
+
 // One unnamed synchronization timer belongs to the media owner's session. A
 // high-resolution timer avoids quantizing every encoder/readback poll to the
 // process's ordinary Sleep tick. It never changes a global timer resolution.
@@ -26,17 +34,18 @@ public:
         return timer_ ? S_OK : LastFailure();
     }
 
-    // The normal poll interval is at most 1ms. The enclosing ABI read still
-    // owns its original 450ms deadline; an expired budget never starts a wait.
-    HRESULT WaitUntil(Clock::time_point deadline) {
+    // Pending work defaults to 1ms; an idle caller can request its next useful
+    // deadline. The enclosing ABI read retains its original 450ms budget.
+    HRESULT WaitUntil(Clock::time_point deadline, uint64_t requestedMicros = 1000U) {
         if (!timer_) return E_HANDLE;
+        if (requestedMicros == 0) return E_INVALIDARG;
         const auto now = Clock::now();
         if (deadline <= now) return S_FALSE;
         const auto remaining = std::min(deadline - now,
             std::chrono::duration_cast<Clock::duration>(std::chrono::milliseconds(450)));
         if (remaining <= Clock::duration::zero()) return S_FALSE;
         const int64_t nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count();
-        const int64_t interval = std::min<int64_t>(nanoseconds, 1000000);
+        const int64_t interval = MediaPollIntervalNanoseconds(nanoseconds, requestedMicros);
         LARGE_INTEGER due{};
         due.QuadPart = -std::max<int64_t>(1, interval / 100); // relative 100ns units
         if (!SetWaitableTimerEx(timer_, &due, 0, nullptr, nullptr, nullptr, 0)) return LastFailure();

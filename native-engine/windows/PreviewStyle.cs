@@ -194,23 +194,55 @@ namespace Knot.NativePreview
 
     internal sealed class MonitorIllustration : Control
     {
-        internal float LayoutScale = 1;
-        internal MonitorIllustration() { DoubleBuffered = true; AccessibleRole = AccessibleRole.Graphic; AccessibleName = "Windows PC 화면 공유"; }
+        internal MonitorIllustration()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            AccessibleRole = AccessibleRole.Graphic; AccessibleName = "Windows PC 화면 공유";
+            TabStop = false;
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            float s = LayoutScale * e.Graphics.DpiX / 96;
-            int width = Math.Min((int)(118 * s), Width - (int)(8 * s)), height = Math.Min((int)(72 * s), Height - (int)(18 * s));
-            Rectangle screen = new Rectangle((Width - width) / 2, (int)(4 * s), width, height);
-            using (GraphicsPath path = PreviewStyle.Rounded(screen, (int)(7 * s)))
-            using (Brush fill = new SolidBrush(PreviewStyle.AccentWash))
-            using (Pen border = new Pen(PreviewStyle.Accent, 2 * s))
-            { e.Graphics.FillPath(fill, path); e.Graphics.DrawPath(border, path); }
-            using (Pen pen = new Pen(PreviewStyle.Accent, 2 * s))
-            { e.Graphics.DrawLine(pen, Width / 2, screen.Bottom, Width / 2, screen.Bottom + 12 * s); e.Graphics.DrawLine(pen, Width / 2 - 18 * s, screen.Bottom + 12 * s, Width / 2 + 18 * s, screen.Bottom + 12 * s); }
-            using (Brush dot = new SolidBrush(PreviewStyle.Accent))
-            { e.Graphics.FillRectangle(dot, screen.Left + 15 * s, screen.Top + 16 * s, 17 * s, 17 * s); e.Graphics.FillRectangle(dot, screen.Left + 36 * s, screen.Top + 16 * s, 17 * s, 17 * s); e.Graphics.FillRectangle(dot, screen.Left + 15 * s, screen.Top + 37 * s, 17 * s, 17 * s); e.Graphics.FillRectangle(dot, screen.Left + 36 * s, screen.Top + 37 * s, 17 * s, 17 * s); }
+            DrawIllustration(e.Graphics);
             base.OnPaint(e);
+        }
+
+        protected override void OnDpiChangedAfterParent(EventArgs e)
+        {
+            base.OnDpiChangedAfterParent(e);
+            Invalidate();
+        }
+
+        // The synthetic fixture paints this same production path into fresh
+        // bitmaps at several DPIs, without creating a host or reading a screen.
+        internal void DrawIllustration(Graphics graphics)
+        {
+            MonitorGeometry geometry;
+            if (!MonitorGeometry.TryFit(ClientSize, out geometry)) return;
+            GraphicsState saved = graphics.Save();
+            try
+            {
+                graphics.PageUnit = GraphicsUnit.Pixel;
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                float stroke = Math.Max(0.75f, 2 * geometry.Unit);
+                using (GraphicsPath path = PreviewStyle.Rounded(Rectangle.Round(geometry.Screen), Math.Max(1, (int)Math.Round(7 * geometry.Unit))))
+                using (Brush fill = new SolidBrush(PreviewStyle.AccentWash))
+                using (Pen border = new Pen(PreviewStyle.Accent, stroke))
+                { graphics.FillPath(fill, path); graphics.DrawPath(border, path); }
+                using (Pen pen = new Pen(PreviewStyle.Accent, stroke))
+                {
+                    graphics.DrawLine(pen, geometry.StemTop, geometry.StemBottom);
+                    graphics.DrawLine(pen, geometry.BaseLeft, geometry.BaseRight);
+                }
+                RectangleF interior = geometry.Screen;
+                interior.Inflate(-stroke, -stroke);
+                graphics.SetClip(interior, CombineMode.Intersect);
+                using (Brush pane = new SolidBrush(PreviewStyle.Accent))
+                    for (int row = 0; row < 2; ++row)
+                        for (int column = 0; column < 2; ++column)
+                            graphics.FillRectangle(pane, geometry.Pane(column, row));
+            }
+            finally { graphics.Restore(saved); }
         }
     }
 }

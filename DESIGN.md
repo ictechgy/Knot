@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-11-01
+- Last refreshed: 2026-11-04
 - Primary product surfaces: native macOS host connection, fullscreen desktop, SFTP file browser, Mac sharing setup, Windows sharing/client role chooser, drag-to-Applications Mac package.
 - Evidence reviewed: conversation requirements; pinned GlimmerEngine source; .omx/plans/deskbridge-v0.1.md; user-approved Concept A (Quiet Sidebar), selected 2026-10-19.
 - Approved visual references: ../design-concepts/previews/a-{desktop,files,setup}-window.png in the local deliverable; immutable copies under .omx/artifacts/visual-ralph/quiet-sidebar. Reproduce native synthetic snapshots with scripts/render_visual_fixture.py. No Local Media UI or existing user settings inspected.
@@ -239,3 +239,11 @@ Windows 설정·QR 창은 DPI에 맞춰 확대되고 현재 작업 영역 안으
 - Disable TCP Nagle aggregation for small input messages and select queued input after pacing. Preserve500/s, consecutive-move coalescing, action barriers, focus recovery and epoch-based revocation.
 - Use one session-owned unnamed high-resolution Windows poll timer with existing read/progress bounds. Do not change global timer resolution, busy-spin or silently choose a software encoder. GPU readback and retained-sample allocation are remaining measured-work candidates, not claimed fixes.
 - Fresh tests must exercise UI/input progress during held media preparation, input freshness across a paced wait, cancellation/order and an actual Windows timer comparison. Add4K60 software-MFT-to-Mac interoperability separately from real hardware throughput. Preserve explicit device, network and signing acceptance limits; do not introduce a performance dashboard or inspect existing user state for benchmark evidence.
+
+## Native.7 Windows illustration and review follow-up
+
+- Keep the approved Quiet Sidebar visual language. Fit the complete monitor, centered four-square Windows mark and stand through one aspect-preserving canvas. Derive every part from actual control bounds; do not apply graphics DPI a second time. Clip the mark inside the monitor and repaint after resize or DPI changes. Tiny bounds may skip decoration.
+- Verify production painting on fresh bitmaps at six control sizes and six DPIs from96 through288. Ordinary, compact and150%/200% short-number idle fixtures must show a centered, contained mark. The complete fixture inventory is25 Windows and25 Mac states. These are synthetic layout/raster checks; actual per-monitor transitions remain a device gate.
+- Use the pacer's next capture deadline for otherwise idle media waits. Keep fast polling for pending readback, encoder output or immediate retry, preserving existing read/progress limits. Simulation of fewer wait requests is not a measured CPU, battery or streaming-latency improvement.
+- A build must reject linked/reparse/shared output destinations before writing packaged assets and retire stale completion records on failure. This protects the owned build-output boundary; it does not claim protection against a concurrent malicious filesystem writer.
+- If an authenticated number consumes its slot but the fresh grant cannot be delivered, end that run and show explicit new-sharing guidance. Never call it a wrong number or silently reuse the consumed slot/grant.

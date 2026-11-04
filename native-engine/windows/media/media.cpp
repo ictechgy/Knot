@@ -110,7 +110,9 @@ extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* opaque, uint8_
                 return session->failure = KN_MEDIA_DEVICE_FAILURE;
             if (FAILED(submitStatus) && submitStatus != MF_E_NOTACCEPTING)
                 return session->failure = KN_MEDIA_DEVICE_FAILURE;
-            if (FAILED(session->pollWait.WaitUntil(deadline)))
+            const uint64_t waitMicros = session->pacer.PollWaitMicros(knot::MonotonicMicros(),
+                session->encoder.CanSubmit(), session->encoder.InFlight());
+            if (FAILED(session->pollWait.WaitUntil(deadline, waitMicros)))
                 return session->failure = KN_MEDIA_DEVICE_FAILURE;
         }
         return KN_MEDIA_TRY_AGAIN;
