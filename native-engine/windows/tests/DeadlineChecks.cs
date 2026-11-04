@@ -18,7 +18,7 @@ namespace Knot.NativePreview
             using (ManualResetEvent queued = new ManualResetEvent(false))
             using (ManualResetEvent invoke = new ManualResetEvent(false))
             {
-                Thread callback = new Thread(delegate { queued.Set(); invoke.WaitOne(); deadline.Expire(); });
+                Thread callback = new Thread(delegate() { queued.Set(); invoke.WaitOne(); deadline.Expire(); });
                 callback.IsBackground = true; callback.Start();
                 try
                 {
@@ -87,7 +87,7 @@ namespace Knot.NativePreview
                 try
                 {
                     Check(entered.WaitOne(4000)); Check(!deadline.TryComplete());
-                    disposer = new Thread(delegate { deadline.Dispose(); disposed.Set(); });
+                    disposer = new Thread(delegate() { deadline.Dispose(); disposed.Set(); });
                     disposer.IsBackground = true; disposer.Start();
                     // Close is deliberately blocked: Dispose must not wait for
                     // arbitrary callback/OS work which already owns expiration.
@@ -109,8 +109,8 @@ namespace Knot.NativePreview
                 using (ManualResetEvent go = new ManualResetEvent(false))
                 using (ConnectionDeadline deadline = new ConnectionDeadline(10, delegate { Interlocked.Increment(ref closes); }, delegate { return 0L; }, 1000, false))
                 {
-                    Thread completion = new Thread(delegate { go.WaitOne(); completed = deadline.TryComplete(); });
-                    Thread expiration = new Thread(delegate { go.WaitOne(); deadline.Expire(); });
+                    Thread completion = new Thread(delegate() { go.WaitOne(); completed = deadline.TryComplete(); });
+                    Thread expiration = new Thread(delegate() { go.WaitOne(); deadline.Expire(); });
                     completion.IsBackground = expiration.IsBackground = true;
                     completion.Start(); expiration.Start(); go.Set();
                     Check(completion.Join(4000)); Check(expiration.Join(4000));
