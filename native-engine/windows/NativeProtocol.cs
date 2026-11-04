@@ -234,15 +234,30 @@ namespace Knot.NativePreview
         internal static ushort U16(byte[] b, int p) { return (ushort)(b[p] * 256 + b[p + 1]); }
         internal static void Put32(byte[] b, int p, uint n) { for (int i = 3; i >= 0; --i) { b[p + i] = (byte)n; n >>= 8; } }
         internal static void Put64(byte[] b, int p, ulong n) { for (int i = 7; i >= 0; --i) { b[p + i] = (byte)n; n >>= 8; } }
+        // Names are unverified UI labels, not arbitrary text input. Prevent
+        // hidden ordering controls and line breaks without limiting scripts.
+        internal static void ValidDisplayName(string name)
+        {
+            if (name == null) throw new ProtocolException("protocol");
+            StrictJson.ValidUnicode(name, false);
+            int size = StrictJson.Utf8.GetByteCount(name);
+            if (size < 1 || size > 64) throw new ProtocolException("protocol");
+            for (int i = 0; i < name.Length; ++i)
+            {
+                UnicodeCategory category = CharUnicodeInfo.GetUnicodeCategory(name, i);
+                if (category == UnicodeCategory.Control || category == UnicodeCategory.Format ||
+                    category == UnicodeCategory.LineSeparator || category == UnicodeCategory.ParagraphSeparator)
+                    throw new ProtocolException("protocol");
+                if (char.IsHighSurrogate(name[i])) ++i; // ValidUnicode already checked the pair.
+            }
+        }
         internal static string HelloName(byte[] payload, out byte[] token)
         {
             Dictionary<string, object> hello = StrictJson.Parse(payload, "v", "token", "name");
             StrictJson.Integer(hello, "v", 1, 1);
             token = DecodeToken(StrictJson.String(hello, "token"));
             string name = StrictJson.String(hello, "name");
-            StrictJson.ValidUnicode(name, true);
-            int size = StrictJson.Utf8.GetByteCount(name);
-            if (size < 1 || size > 64) throw new ProtocolException("protocol");
+            ValidDisplayName(name);
             return name;
         }
         internal static byte[] Error(string code)

@@ -35,10 +35,7 @@ namespace Knot.NativePreview
         }
         internal static void ValidName(string name)
         {
-            if (name == null) throw new ProtocolException("protocol");
-            StrictJson.ValidUnicode(name, true);
-            int count = StrictJson.Utf8.GetByteCount(name);
-            if (count < 1 || count > 64) throw new ProtocolException("protocol");
+            NativeProtocol.ValidDisplayName(name);
         }
         internal static byte[] Identifier(string encoded)
         {

@@ -76,9 +76,13 @@ namespace Knot.NativePreview
                             for (int column = 0; column < 2; ++column)
                             {
                                 RectangleF pane = geometry.Pane(column, row);
-                                int x = (int)Math.Floor(pane.Left + pane.Width / 2), y = (int)Math.Floor(pane.Top + pane.Height / 2);
+                                // GDI+ samples around integer pixel centers.
+                                // The nearest center stays inside a two-pixel
+                                // pane; flooring can land on its antialiased edge.
+                                int x = (int)Math.Round(pane.Left + pane.Width / 2), y = (int)Math.Round(pane.Top + pane.Height / 2);
                                 if (bitmap.GetPixel(x, y).ToArgb() != PreviewStyle.Accent.ToArgb())
-                                    throw new InvalidOperationException("A centered Windows pane did not paint.");
+                                    throw new InvalidOperationException("A centered Windows pane did not paint: " +
+                                        size.Width + "x" + size.Height + " dpi=" + dpi + " pane=" + column + "," + row + ".");
                             }
                         BitmapData data = bitmap.LockBits(new Rectangle(Point.Empty, bitmap.Size), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
                         byte[] pixels;

@@ -51,6 +51,7 @@ struct NativeVisualFixture {
             ("fullscreen-controls", "streaming", 1920, 1080, false),
             ("fullscreen-4k", "streaming", 3840, 2160, false),
             ("fullscreen-4k-controls", "streaming", 3840, 2160, false),
+            ("fullscreen-text-rejected", "streaming", 1920, 1080, false),
             ("nearby", "nearby", 1200, 760, false),
             ("number", "number", 1200, 760, false),
             ("number-working", "number-working", 1200, 760, false),
@@ -65,6 +66,9 @@ struct NativeVisualFixture {
             let revealed = name.hasSuffix("controls")
             if name.contains("4k") { model.videoSize = CGSize(width: 3840, height: 2160) }
             model.showFullscreenControls = revealed
+            if name == "fullscreen-text-rejected" {
+                guard !model.sendCommittedText(String(repeating: "a", count: 513)), model.inputRecovery else { throw FixtureError.phase }
+            }
             // Allocate the real inert presenter below new synthetic pixels. No
             // channel, capture, real input event or shown window is involved.
             let simulated = AnyView(NativeDesktop(model: model).overlay {

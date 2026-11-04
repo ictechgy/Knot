@@ -64,6 +64,7 @@ enum NativeCopy {
         "The peer or host approval timed out. Create a new invitation.": "Windows의 응답이나 승인을 기다리는 시간이 지났어요. 새 연결 코드를 만들어 주세요.",
         "The first decoded image did not arrive. Create a new invitation.": "첫 화면이 도착하지 않았어요. Windows에서 새 연결 코드를 만들어 다시 시도해 주세요.",
         "Input paused after queue saturation. Click the desktop to resume.": "입력이 밀려 일시 중지했어요. 화면을 클릭하면 다시 시작해요.",
+        "Text was too long or contained unsupported characters. Click the desktop and enter smaller parts.": "긴 글이나 지원하지 않는 문자는 전달하지 못했어요. 화면을 클릭한 뒤 글을 나누어 입력해주세요.",
         "Input paused. Click the desktop to resume.": "입력이 일시 중지됐어요. 화면을 클릭하면 다시 시작해요.",
         "Input transport stopped. Create a new invitation to reconnect.": "입력 연결이 중단됐어요. 새 연결 코드로 다시 연결해 주세요.",
         "Disconnected. Reconnect with a fresh invitation.": "연결을 종료했어요. 다시 연결하려면 Windows에서 새 코드를 만들어 주세요."

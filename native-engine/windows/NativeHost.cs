@@ -300,7 +300,7 @@ namespace Knot.NativePreview
                 Invitation claimInvitation = ClaimInvitation;
                 if (claimInvitation == null) throw new ProtocolException("auth");
                 int milliseconds = Math.Max(1, Math.Min(10000, claimInvitation.RemainingMilliseconds));
-                using (Timer budget = new Timer(delegate { try { accepted.Close(); } catch { } }, null, milliseconds, Timeout.Infinite))
+                using (ConnectionDeadline budget = new ConnectionDeadline(milliseconds, accepted.Close))
                 {
                     tls.ReadTimeout = 10000; tls.WriteTimeout = 10000;
                     tls.AuthenticateAsServer(certificate.Certificate, false, SslProtocols.Tls12, false);
@@ -313,6 +313,7 @@ namespace Knot.NativePreview
                         {
                             if (isStopped || enrollmentMode && (!object.ReferenceEquals(claimInvitation, enrollmentInvitation) ||
                                 name != enrollmentName || !observedRemote.Equals(enrollmentPeer))) throw new ProtocolException("auth");
+                            if (!budget.TryComplete()) throw new ProtocolException("timeout");
                             claimInvitation.Claim(candidate);
                         }
                     }

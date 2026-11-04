@@ -209,6 +209,21 @@ final class SessionModel: ObservableObject {
             return false
         }
     }
+    @discardableResult func sendCommittedText(_ text: String) -> Bool {
+        // Empty AppKit commits are a no-op, including while input is paused.
+        guard !text.isEmpty else { return true }
+        guard phase == .streaming, !inputRecovery else { return false }
+        let packet: Packet
+        do { packet = try Input.text(text) }
+        catch {
+            // Reject the whole commit rather than silently dropping or splitting
+            // it. Revoke queued/held input until an explicit desktop click.
+            releaseInput()
+            status = "Text was too long or contained unsupported characters. Click the desktop and enter smaller parts."
+            return false
+        }
+        return send(packet)
+    }
     func releaseInput() {
         guard active else { return }
         inputEpoch &+= 1

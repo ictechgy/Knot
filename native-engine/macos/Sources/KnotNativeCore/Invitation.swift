@@ -42,7 +42,13 @@ public struct Invitation: Sendable, Equatable {
         return bytes[0] == 10 || (bytes[0] == 172 && (16...31).contains(bytes[1])) || (bytes[0] == 192 && bytes[1] == 168) || (bytes[0] == 100 && (64...127).contains(bytes[1]))
     }
     public static func validViewerLabel(_ name: String) -> Bool {
-        (1...64).contains(name.utf8.count) && !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+        guard (1...64).contains(name.utf8.count) else { return false }
+        return name.unicodeScalars.allSatisfy {
+            switch $0.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: return false
+            default: return true
+            }
+        }
     }
     public func hello(name: String = "Mac viewer") throws -> Packet {
         guard Self.validViewerLabel(name) else { throw NativeFailure.malformed }

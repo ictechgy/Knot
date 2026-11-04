@@ -84,7 +84,7 @@ namespace Knot.NativePreview
                         accepted.NoDelay = true; accepted.ReceiveTimeout = budget; accepted.SendTimeout = budget;
                         accepted.ReceiveBufferSize = 8192; accepted.SendBufferSize = 8192;
                         stream = accepted.GetStream();
-                        using (Timer deadline = new Timer(delegate { try { accepted.Close(); } catch { } }, null, budget, Timeout.Infinite))
+                        using (ConnectionDeadline deadline = new ConnectionDeadline(budget, accepted.Close))
                         {
                             if (!NativeProtocol.Equal(EnrollmentProtocol.ReadExact(stream, 8), EnrollmentProtocol.Preamble)) throw new ProtocolException("protocol");
                             Packet hello = EnrollmentProtocol.Read(stream, 1);
@@ -114,6 +114,7 @@ namespace Knot.NativePreview
                                 byte[] sealedOffer = crypto.Seal(4, offerPlain);
                                 if (IsStopped) throw new ProtocolException("closed");
                                 writeOffer(stream, sealedOffer);
+                                if (!deadline.TryComplete()) throw new ProtocolException("expired");
                                 grantSent = true;
                             }
                         }

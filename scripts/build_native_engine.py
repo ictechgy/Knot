@@ -305,7 +305,7 @@ class Builder:
                     row.get("width") != width or row.get("height") != height):
                 raise ValueError("UI fixture image bytes differ from the renderer report")
         required = ({"mac-" + name + ".png" for name in
-                     ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark"]}
+                     ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
                      ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",

@@ -328,7 +328,7 @@ class NativeRebuildTests(unittest.TestCase):
         builder = native.Builder("macos", self.output)
         report_path.parent.mkdir()
         report["images"] = []
-        for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark"]:
+        for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
             report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,

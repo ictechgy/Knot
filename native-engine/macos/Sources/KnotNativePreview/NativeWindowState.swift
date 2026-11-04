@@ -12,27 +12,47 @@ final class NativeWindowNotifications: @unchecked Sendable {
 @MainActor
 final class NativeWindowState: ObservableObject {
     @Published private(set) var isFullscreen = false
-    var onClose: (@MainActor @Sendable () -> Void)?
+    private var onClose: (@MainActor @Sendable () -> Void)?
     private weak var window: NSWindow?
     private var notifications: NativeWindowNotifications?
+    func bindSession(_ model: SessionModel, enrollment: EnrollmentModel) {
+        onClose = { [weak model, weak enrollment] in
+            model?.disconnect()
+            enrollment?.cancel()
+        }
+    }
     func attach(_ next: NSWindow?) {
+        // The probe can temporarily lose its window during SwiftUI/fullscreen
+        // transitions. Keep observing the owner until its actual willClose.
+        guard let next else { return }
         guard window !== next else { return }
         notifications = nil; window = next
-        isFullscreen = next?.styleMask.contains(.fullScreen) == true
-        guard let next else { return }
+        isFullscreen = next.styleMask.contains(.fullScreen)
         notifications = NativeWindowNotifications([
             NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification, NSWindow.willCloseNotification
         ].map { name in
             NotificationCenter.default.addObserver(forName: name, object: next, queue: .main) { [weak self, weak next] _ in
                 MainActor.assumeIsolated {
-                    guard let self, self.window === next else { return }
-                    if name == NSWindow.willCloseNotification { self.onClose?() }
-                    self.isFullscreen = next?.styleMask.contains(.fullScreen) == true
+                    guard let self, let next, self.window === next else { return }
+                    if name == NSWindow.willCloseNotification {
+                        let revoke = self.onClose
+                        self.onClose = nil
+                        revoke?() // Revokes TLS and queued input before close returns.
+                        self.notifications = nil; self.window = nil; self.isFullscreen = false
+                    } else {
+                        self.isFullscreen = name == NSWindow.didEnterFullScreenNotification
+                    }
                 }
             }
         })
     }
     func toggleFullscreen() { window?.toggleFullScreen(nil) }
+    func canToggleFullscreenControls(for model: SessionModel) -> Bool { isFullscreen && model.active }
+    func toggleFullscreenControls(for model: SessionModel) {
+        guard canToggleFullscreenControls(for: model) else { return }
+        model.releaseInput()
+        model.showFullscreenControls.toggle()
+    }
 }
 
 struct NativeWindowProbe: NSViewRepresentable {

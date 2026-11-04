@@ -14,7 +14,7 @@ struct PreviewWindow: View {
     // Only the separately compiled synthetic renderer supplies these values.
     var simulatedDesktop: AnyView? = nil
     var simulatedFullscreen: Bool? = nil
-    @StateObject private var windowState = NativeWindowState()
+    @StateObject private var windowState: NativeWindowState
     @StateObject private var enrollment: EnrollmentModel
     @State private var secret = ""
     @State private var showingHelp = false
@@ -23,8 +23,9 @@ struct PreviewWindow: View {
     @State private var showingManualAddress = false
     @State private var activeTarget: NativeTarget?
 
-    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false) {
+    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil) {
         self.model = model
+        _windowState = StateObject(wrappedValue: windowState ?? NativeWindowState())
         _enrollment = StateObject(wrappedValue: enrollment ?? EnrollmentModel())
         _showingManualAddress = State(initialValue: initialManualAddress)
         self.simulatedDesktop = simulatedDesktop
@@ -67,8 +68,8 @@ struct PreviewWindow: View {
             .onChange(of: windowState.isFullscreen) { _, _ in
                 model.showFullscreenControls = false; model.releaseInput()
             }
-            .onAppear { windowState.onClose = { [weak enrollmentModel = enrollment] in enrollmentModel?.cancel() } }
-            .onDisappear { enrollment.cancel(); secret = ""; windowState.onClose = nil }
+            .onAppear { windowState.bindSession(model, enrollment: enrollment) }
+            .onDisappear { enrollment.cancel(); secret = "" }
             .onChange(of: model.active) { _, active in
                 enrollment.cancel()
                 if !active { activeTarget = nil }
@@ -303,9 +304,13 @@ struct PreviewWindow: View {
                 Button("다른 코드 입력") { model.invitation = nil }
                 Spacer()
                 Button {
+                    guard Invitation.validViewerLabel(model.viewerLabel) else {
+                        model.status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."
+                        showingOptions = true
+                        return
+                    }
                     enrollment.cancel(); secret = ""
-                    if Invitation.validViewerLabel(model.viewerLabel) { activeTarget = target }
-                    else { showingOptions = true }
+                    activeTarget = target
                     model.connect()
                 } label: { Label("이 PC에 연결", systemImage: "arrow.right").padding(.horizontal, 8).padding(.vertical, 3) }
                     .buttonStyle(.borderedProminent).controlSize(.large)
@@ -373,8 +378,9 @@ struct PreviewWindow: View {
                 }
                 .overlay(alignment: .bottom) {
                     if model.phase == .streaming, model.inputRecovery {
-                        Label("입력이 일시 중지됐어요 · 화면을 클릭하면 다시 시작해요", systemImage: "cursorarrow.click")
-                            .font(.system(size: 13)).padding(.horizontal, 16).padding(.vertical, 12)
+                        Label(NativeCopy.status(model.status), systemImage: "cursorarrow.click")
+                            .font(.system(size: 13)).multilineTextAlignment(.center)
+                            .frame(maxWidth: 620).padding(.horizontal, 16).padding(.vertical, 12)
                             .nativePanel().padding(18).allowsHitTesting(false)
                     }
                 }
@@ -392,7 +398,7 @@ struct PreviewWindow: View {
                             .nativePanel().padding(.horizontal, 16).padding(.top, 12)
                     }
                     Button {
-                        model.releaseInput(); model.showFullscreenControls.toggle()
+                        windowState.toggleFullscreenControls(for: model)
                     } label: {
                         Label(model.showFullscreenControls ? "연결 제어 접기" : "연결 제어", systemImage: "slider.horizontal.3")
                             .font(.system(size: 12, weight: .medium)).padding(.horizontal, 14).padding(.vertical, 7)

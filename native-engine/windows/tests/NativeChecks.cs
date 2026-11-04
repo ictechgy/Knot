@@ -34,7 +34,8 @@ namespace Knot.NativePreview
             {
                 if (args.Length == 2 && args[0] == "--export-certificate") certificateExportPath = args[1];
                 else if (args.Length != 0) throw new ArgumentException("Unsupported synthetic check arguments.");
-                ProtocolChecks(); stage = "invitation"; InvitationChecks(); stage = "input"; InputChecks();
+                stage = "connection-deadline"; DeadlineChecks();
+                stage = "protocol"; ProtocolChecks(); stage = "invitation"; InvitationChecks(); stage = "input"; InputChecks();
                 stage = "media-quality-bounds"; MediaQualityChecks();
                 stage = "host-policy"; HostPolicyChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();

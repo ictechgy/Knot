@@ -159,6 +159,7 @@ namespace Knot.NativePreview
         }
         private static void EnrollmentWireChecks()
         {
+            DisplayNameWireChecks();
             byte[] id = new byte[16], nonce = new byte[16]; nonce[0] = 7;
             byte[] query = EnrollmentProtocol.DiscoveryQuery(nonce); Check(query.Length == 24);
             Check(NativeProtocol.Equal(EnrollmentProtocol.DiscoveryNonce(query), nonce));
@@ -184,6 +185,49 @@ namespace Knot.NativePreview
             using (MemoryStream memory = new MemoryStream(new byte[] { 1, 0, 0, 16, 1 })) Reject(delegate { EnrollmentProtocol.Read(memory, 1); });
             using (MemoryStream memory = new MemoryStream(new byte[] { 3, 0, 0, 0, 48 })) Reject(delegate { EnrollmentProtocol.Read(memory, 1); });
             Reject(delegate { EnrollmentProtocol.Offer(id, id, "knot-native:v1:synthetic", 30001); });
+        }
+        private static void DisplayNameWireChecks()
+        {
+            // Pure policy/parser fixtures: no discovery, enrollment or TLS
+            // connection is made and no network-fixture counter is incremented.
+            byte[] slot = new byte[16], nonce = new byte[16], expectedToken = new byte[32];
+            string helloPrefix = "{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(expectedToken)) + ",\"name\":";
+            string[] valid = { "A", "My Mac", "개발 Mac", "مرحبا", "שלום", "e\u0301", "\U0001F600", "A\U0001F600Z",
+                new string('a', 64), new string('한', 21) + "a", new string('a', 60) + "\U0001F600" };
+            foreach (string name in valid)
+            {
+                NativeProtocol.ValidDisplayName(name); EnrollmentProtocol.ValidName(name);
+                byte[] token;
+                Check(NativeProtocol.HelloName(Bytes(helloPrefix + StrictJson.Quote(name) + "}"), out token) == name &&
+                    NativeProtocol.Equal(token, expectedToken));
+                Check(EnrollmentProtocol.ConfirmName(Confirm(slot, name), slot) == name);
+                byte[] reply = EnrollmentProtocol.DiscoveryReply(nonce, slot, name, 48632);
+                Check(StrictJson.String(StrictJson.Parse(reply, "v", "nonce", "slot", "name", "port"), "name") == name);
+            }
+            string[] invalid = { "", "bad\nname", "bad\tname", "bad\0name", "bad\u0085name", "bad\u2028name", "bad\u2029name",
+                "bad\u202Ename", "bad\u2066name", "bad\u200Dname", "bad\U000E0001name",
+                new string('a', 65), new string('한', 22), new string('a', 61) + "\U0001F600" };
+            foreach (string name in invalid)
+            {
+                Reject(delegate { NativeProtocol.ValidDisplayName(name); });
+                Reject(delegate { EnrollmentProtocol.ValidName(name); });
+                byte[] token;
+                Reject(delegate { NativeProtocol.HelloName(Bytes(helloPrefix + StrictJson.Quote(name) + "}"), out token); });
+                Reject(delegate { EnrollmentProtocol.ConfirmName(Confirm(slot, name), slot); });
+                Reject(delegate { EnrollmentProtocol.DiscoveryReply(nonce, slot, name, 48632); });
+            }
+            foreach (string invalidUnicode in new string[] { null, "\uD800", "\uDC00", "\uD800x", "\uDC00\uD800" })
+            {
+                Reject(delegate { NativeProtocol.ValidDisplayName(invalidUnicode); });
+                Reject(delegate { EnrollmentProtocol.ValidName(invalidUnicode); });
+            }
+            foreach (string escapedName in new string[] { "\"\\ud800\"", "\"\\udc00\"", "\"\\ud800x\"", "\"\\udc00\\ud800\"" })
+            {
+                byte[] token;
+                Reject(delegate { NativeProtocol.HelloName(Bytes(helloPrefix + escapedName + "}"), out token); });
+                Reject(delegate { EnrollmentProtocol.ConfirmName(Bytes("{\"v\":2,\"slot\":" + StrictJson.Quote(NativeProtocol.Base64Url(slot)) +
+                    ",\"name\":" + escapedName + ",\"permissions\":\"screen,input\"}"), slot); });
+            }
         }
         private static byte[] Confirm(byte[] slot, string name)
         { return Bytes("{\"v\":2,\"slot\":" + StrictJson.Quote(NativeProtocol.Base64Url(slot)) + ",\"name\":" + StrictJson.Quote(name) + ",\"permissions\":\"screen,input\"}"); }

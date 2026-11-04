@@ -215,8 +215,8 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
               streaming: model.phase == .streaming, recovery: model.inputRecovery) else { return }
         let text = (string as? NSAttributedString)?.string ?? (string as? String ?? "")
         marked = NSAttributedString(string: "")
-        if let packet = try? Input.text(text) { model.send(packet) }
-        textAuthorization.committed()
+        if model.sendCommittedText(text) { textAuthorization.committed() }
+        else { cancelComposition() }
     }
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         guard let model, !discardingComposition,
