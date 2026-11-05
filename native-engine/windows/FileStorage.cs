@@ -224,20 +224,28 @@ namespace Knot.NativePreview
             FileProtocol.ValidName(name);
             if (IntPtr.Size != 8) throw new FileTransferException("denied");
             byte[] text = Encoding.Unicode.GetBytes(name);
-            IntPtr memory = Marshal.AllocHGlobal(22 + text.Length);
+            int bufferSize = RenameBufferSize(text.Length);
+            IntPtr memory = Marshal.AllocHGlobal(bufferSize);
             bool directoryReference = false;
             try
             {
                 directory.DangerousAddRef(ref directoryReference);
-                for (int i = 0; i < 22 + text.Length; ++i) Marshal.WriteByte(memory, i, 0);
+                for (int i = 0; i < bufferSize; ++i) Marshal.WriteByte(memory, i, 0);
                 Marshal.WriteIntPtr(memory, 8, directory.DangerousGetHandle());
                 Marshal.WriteInt32(memory, 16, text.Length); Marshal.Copy(text, 0, IntPtr.Add(memory, 20), text.Length);
-                if (SetFileInformationByHandle(source, 3, memory, (uint)(22 + text.Length))) return true;
+                if (SetFileInformationByHandle(source, 3, memory, (uint)bufferSize)) return true;
                 int error = Marshal.GetLastWin32Error();
                 if (error == 80 || error == 183) return false;
                 throw new FileTransferException(error == 5 ? "denied" : "io", "file-rename", error);
             }
             finally { if (directoryReference) directory.DangerousRelease(); Marshal.FreeHGlobal(memory); }
+        }
+        internal static int RenameBufferSize(int nameBytes)
+        {
+            if (nameBytes < 2 || nameBytes > 510 || nameBytes % 2 != 0) throw new FileTransferException("protocol");
+            // On x64 FileName starts at20 but sizeof(FILE_RENAME_INFO) is24.
+            // Keep the whole structure plus filename bytes and its terminator.
+            return 24 + nameBytes + 2;
         }
         internal static void DeleteOwned(SafeFileHandle file)
         {
