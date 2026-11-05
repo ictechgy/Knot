@@ -99,7 +99,9 @@ actor NativeFileClient: NativeFileWorking {
                 let result = try await packet(channel)
                 guard result.kind == .complete else { throw NativeFileError.protocolViolation }
                 let completion = try FileWire.completion(result.payload)
-                guard completion.name == target.name, completion.size == offset, completion.hash == hex else { throw NativeFileError.changed }
+                // Windows resolves a collision at exclusive publication, after Accepted.
+                // completion() already validates the actual destination basename.
+                guard completion.size == offset, completion.hash == hex else { throw NativeFileError.changed }
                 try gate.check(operation)
                 return NativeFileReceipt(name: completion.name, size: offset, hash: hex)
             } catch {

@@ -8,6 +8,8 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Authentication;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -60,6 +62,16 @@ namespace Knot.NativePreview
             FileReject(delegate { FileProtocol.Object(Bytes("{\"name\":\"a\",\"size\":0,\"path\":\"x\"}"), "name", "size"); });
             FileReject(delegate { FileProtocol.Size(FileProtocol.Object(Bytes("{\"name\":\"a\",\"size\":8589934593}"), "name", "size"), "size"); });
             Check(FileProtocol.Size(FileProtocol.Object(FileProtocol.Metadata("a", FileProtocol.MaximumSize), "name", "size"), "size") == FileProtocol.MaximumSize);
+            foreach (ulong value in new ulong[] { 0, 1, 0x0102030405060708UL, ulong.MaxValue })
+            {
+                byte[] encoded = new byte[10]; NativeProtocol.Put64(encoded, 1, value); Check(FileProtocol.U64(encoded, 1) == value);
+            }
+            Check(FileProtocol.U64(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, 0) == 0x0102030405060708UL);
+            FileReject(delegate { FileProtocol.U64(null, 0); });
+            FileReject(delegate { FileProtocol.U64(new byte[7], 0); });
+            FileReject(delegate { FileProtocol.U64(new byte[8], -1); });
+            FileReject(delegate { FileProtocol.U64(new byte[8], 1); });
+            FileReject(delegate { FileProtocol.U64(new byte[8], int.MaxValue); });
             byte[] token = new byte[32]; bool requested;
             byte[] decoded; NativeProtocol.HelloName(Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + ",\"name\":\"viewer\",\"filesVersion\":1}"), out decoded, out requested); Check(requested);
             Reject(delegate { NativeProtocol.HelloName(Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + ",\"name\":\"viewer\",\"filesVersion\":2}"), out decoded, out requested); });
@@ -73,18 +85,63 @@ namespace Knot.NativePreview
             internal OwnedFileDirectory() { Directory.CreateDirectory(PathValue); }
             public void Dispose() { if (Directory.Exists(PathValue)) Directory.Delete(PathValue, true); }
         }
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint GetSecurityInfo(SafeFileHandle handle, int kind, uint requested,
+            out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+        private static void CheckEarliestPrivateHandle(SafeFileHandle handle)
+        {
+            IntPtr owner, group, dacl, sacl, descriptor;
+            Check(GetSecurityInfo(handle, 1, 5, out owner, out group, out dacl, out sacl, out descriptor) == 0);
+            try
+            {
+                Check(descriptor != IntPtr.Zero);
+                uint size = GetSecurityDescriptorLength(descriptor); Check(size > 0 && size <= 65536);
+                byte[] bytes = new byte[(int)size]; Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+                RawSecurityDescriptor security = new RawSecurityDescriptor(bytes, 0);
+                SecurityIdentifier user;
+                using (WindowsIdentity identity = WindowsIdentity.GetCurrent()) user = identity.User;
+                Check(user != null && security.Owner != null && security.Owner.Equals(user));
+                Check((security.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0);
+                Check(security.DiscretionaryAcl != null && security.DiscretionaryAcl.Count == 1);
+                CommonAce ace = security.DiscretionaryAcl[0] as CommonAce;
+                Check(ace != null && ace.AceQualifier == AceQualifier.AccessAllowed && ace.SecurityIdentifier.Equals(user));
+                Check((ace.AceFlags & AceFlags.Inherited) == 0 &&
+                    (ace.AccessMask & (int)FileSystemRights.FullControl) == (int)FileSystemRights.FullControl);
+            }
+            finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+        }
         private static void FileStorageChecks()
         {
             ++fileFixtures;
             using (OwnedFileDirectory temp = new OwnedFileDirectory())
-            using (FileSharedRoot root = new FileSharedRoot(new FileSharingOptions(temp.PathValue)))
             {
-                byte[] bytes = Bytes("fresh synthetic bytes");
-                string name;
-                using (FilePartial partial = root.CreatePartial(bytes.Length))
+                // The test's fresh shared root intentionally grants inherited
+                // write access to Everyone; no existing account or folder changes.
+                DirectorySecurity shared = Directory.GetAccessControl(temp.PathValue);
+                SecurityIdentifier everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+                shared.AddAccessRule(new FileSystemAccessRule(everyone, FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                Directory.SetAccessControl(temp.PathValue, shared);
+                bool inheritedWrite = false;
+                foreach (FileSystemAccessRule rule in Directory.GetAccessControl(temp.PathValue).GetAccessRules(true, true, typeof(SecurityIdentifier)))
+                    if (rule.IdentityReference.Equals(everyone) && rule.AccessControlType == AccessControlType.Allow &&
+                        (rule.InheritanceFlags & InheritanceFlags.ObjectInherit) != 0 && (rule.FileSystemRights & FileSystemRights.WriteData) != 0) inheritedWrite = true;
+                Check(inheritedWrite);
+                byte[] parentSecurity = Directory.GetAccessControl(temp.PathValue).GetSecurityDescriptorBinaryForm();
+                using (FileSharedRoot root = new FileSharedRoot(new FileSharingOptions(temp.PathValue)))
                 {
+                byte[] bytes = Bytes("fresh synthetic bytes");
+                string name; bool earliestChecked = false;
+                using (FilePartial partial = root.CreatePartial(bytes.Length, delegate(SafeFileHandle handle) { CheckEarliestPrivateHandle(handle); earliestChecked = true; }))
+                {
+                    Check(earliestChecked);
                     partial.Stream.Write(bytes, 0, bytes.Length); partial.PreparePublication(); name = partial.Publish("a");
                 }
+                Check(NativeProtocol.Equal(parentSecurity, Directory.GetAccessControl(temp.PathValue).GetSecurityDescriptorBinaryForm()));
                 Check(name == "a" && NativeProtocol.Equal(File.ReadAllBytes(Path.Combine(temp.PathValue, name)), bytes));
                 Check((File.GetAttributes(Path.Combine(temp.PathValue, name)) & (FileAttributes.Hidden | FileAttributes.Temporary)) == 0);
                 Check(File.ReadAllText(Path.Combine(temp.PathValue, name) + ":Zone.Identifier").Contains("ZoneId=3"));
@@ -99,6 +156,7 @@ namespace Knot.NativePreview
                 using (FileStream source = root.OpenRead(first.Name, out actual)) Check(!first.Info.Same(actual));
                 for (int i = 0; i < 260; ++i) File.WriteAllBytes(Path.Combine(temp.PathValue, "entry-" + i + ".bin"), new byte[0]);
                 Check(root.List(out truncated).Count == FileProtocol.EntryLimit && truncated);
+                }
             }
         }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -217,10 +275,10 @@ namespace Knot.NativePreview
                     if (packet.Kind == 0x49)
                     {
                         byte[] bytes = received.ToArray(), hash = FileHash(bytes), offered = new byte[32]; Buffer.BlockCopy(packet.Payload, 8, offered, 0, 32);
-                        Check(NativeProtocol.U64(packet.Payload, 0) == (ulong)bytes.Length && NativeProtocol.Equal(hash, offered));
+                        Check(FileProtocol.U64(packet.Payload, 0) == (ulong)bytes.Length && NativeProtocol.Equal(hash, offered));
                         client.Send(0x4a, FileProtocol.Complete(FileProtocol.Text(entry, "name"), bytes.Length, hash)); return bytes;
                     }
-                    Check(packet.Kind == 0x48 && NativeProtocol.U64(packet.Payload, 0) == (ulong)received.Length);
+                    Check(packet.Kind == 0x48 && FileProtocol.U64(packet.Payload, 0) == (ulong)received.Length);
                     received.Write(packet.Payload, 8, packet.Payload.Length - 8);
                 }
             }

@@ -194,7 +194,7 @@ namespace Knot.NativePreview
                     FilePacket packet = Read(tls, client);
                     if (packet.Kind == 0x49)
                     {
-                        if (offset != size || NativeProtocol.U64(packet.Payload, 0) != (ulong)size) throw new FileTransferException("protocol");
+                        if (offset != size || FileProtocol.U64(packet.Payload, 0) != (ulong)size) throw new FileTransferException("protocol");
                         sha.TransformFinalBlock(new byte[0], 0, 0); byte[] digest = sha.Hash;
                         byte[] offered = new byte[32]; Buffer.BlockCopy(packet.Payload, 8, offered, 0, 32);
                         if (!NativeProtocol.Equal(digest, offered)) throw new FileTransferException("changed");
@@ -206,7 +206,7 @@ namespace Knot.NativePreview
                         lock (gate) { EnsureActive(); actual = partial.Publish(name); }
                         Write(tls, client, 0x4a, FileProtocol.Complete(actual, size, digest)); return;
                     }
-                    if (packet.Kind != 0x48 || NativeProtocol.U64(packet.Payload, 0) != (ulong)offset) throw new FileTransferException("protocol");
+                    if (packet.Kind != 0x48 || FileProtocol.U64(packet.Payload, 0) != (ulong)offset) throw new FileTransferException("protocol");
                     int count = packet.Payload.Length - 8;
                     if (offset > size - count) throw new FileTransferException("protocol");
                     pacer.Account(count); partial.Stream.Write(packet.Payload, 8, count);

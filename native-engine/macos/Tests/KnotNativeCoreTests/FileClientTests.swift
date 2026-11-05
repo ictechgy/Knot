@@ -128,7 +128,7 @@ private func fileDownloadPackets(_ entry: NativeFileEntry, bytes: Data, badOffse
     let bytes = Data("fresh synthetic 한글 bytes".utf8), source = root.appendingPathComponent("source.txt")
     try bytes.write(to: source)
     let target = "source (2).txt", digest = NativeFileClient.hex(Data(SHA256.hash(data: bytes)))
-    let channel = ScriptedFileChannel([try authorizedFilePacket(), try FilePacket(kind: .accepted, payload: FileWire.json(["name": target, "size": bytes.count])),
+    let channel = ScriptedFileChannel([try authorizedFilePacket(), try FilePacket(kind: .accepted, payload: FileWire.json(["name": source.lastPathComponent, "size": bytes.count])),
         try FilePacket(kind: .complete, payload: FileWire.json(["name": target, "size": bytes.count, "sha256": digest]))])
     let gate = FileRunGate(), id = try gate.begin(), client = NativeFileClient(endpoint: try fileEndpoint(), gate: gate, makeChannel: { _ in channel })
     defer { gate.end(id) }

@@ -56,6 +56,13 @@ namespace Knot.NativePreview
                 stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) &&
                 (stem[3] >= '0' && stem[3] <= '9' || stem[3] == '\u00b9' || stem[3] == '\u00b2' || stem[3] == '\u00b3')) throw new FileTransferException("protocol");
         }
+        internal static ulong U64(byte[] bytes, int offset)
+        {
+            if (bytes == null || offset < 0 || offset > bytes.Length - 8) throw new FileTransferException("protocol");
+            ulong result = 0;
+            for (int index = 0; index < 8; ++index) result = (result << 8) | bytes[offset + index];
+            return result;
+        }
         internal static long Size(Dictionary<string, object> obj, string key)
         {
             object value;

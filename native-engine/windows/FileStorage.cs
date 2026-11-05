@@ -65,6 +65,48 @@ namespace Knot.NativePreview
         }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern SafeFileHandle CreateFile(string name, uint access, FileShare share, IntPtr security, uint disposition, uint flags, IntPtr template);
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SecurityAttributes
+        {
+            internal int Length;
+            internal IntPtr SecurityDescriptor;
+            [MarshalAs(UnmanagedType.Bool)] internal bool InheritHandle;
+        }
+        // Supply a protected receiver-only DACL to CREATE_NEW itself. Tightening
+        // an inherited DACL after creation cannot revoke an already opened handle.
+        internal static SafeFileHandle CreatePrivate(string name, uint access, FileShare share, uint flags)
+        {
+            SecurityIdentifier user;
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent()) user = identity.User;
+            if (user == null) throw new FileTransferException("denied");
+            FileSecurity security = new FileSecurity(); security.SetOwner(user);
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
+            byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+            GCHandle pinned = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+            IntPtr attributes = IntPtr.Zero;
+            try
+            {
+                SecurityAttributes value = new SecurityAttributes {
+                    Length = Marshal.SizeOf(typeof(SecurityAttributes)),
+                    SecurityDescriptor = pinned.AddrOfPinnedObject(), InheritHandle = false
+                };
+                attributes = Marshal.AllocHGlobal(value.Length);
+                Marshal.StructureToPtr(value, attributes, false);
+                SafeFileHandle result = CreateFile(name, access, share, attributes, 1, flags, IntPtr.Zero);
+                if (result.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error(); result.Dispose();
+                    throw new FileTransferException("denied", "file-open", error);
+                }
+                return result;
+            }
+            finally
+            {
+                if (attributes != IntPtr.Zero) Marshal.FreeHGlobal(attributes);
+                pinned.Free(); Array.Clear(descriptor, 0, descriptor.Length);
+            }
+        }
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information info);
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -201,7 +243,7 @@ namespace Knot.NativePreview
             string expected = FileNative.FinalPath(directory) + "\\" + name;
             if (!string.Equals(FileNative.FinalPath(file), expected, StringComparison.OrdinalIgnoreCase)) throw new FileTransferException("denied");
         }
-        internal FilePartial CreatePartial(long size)
+        internal FilePartial CreatePartial(long size, Action<SafeFileHandle> firstHandle = null)
         {
             if (size < 0 || size > FileProtocol.MaximumSize) throw new FileTransferException("quota");
             try
@@ -210,7 +252,7 @@ namespace Knot.NativePreview
                 if (drive.AvailableFreeSpace < size + 67108864L) throw new FileTransferException("quota");
             }
             catch (ArgumentException) { throw new FileTransferException("denied"); }
-            return new FilePartial(this, options.RootPath, size);
+            return new FilePartial(this, options.RootPath, size, firstHandle);
         }
         internal bool Rename(SafeFileHandle source, string name) { FileNative.Info(directory, true); return FileNative.Rename(source, directory, name); }
         public void Dispose() { directory.Dispose(); }
@@ -223,21 +265,19 @@ namespace Knot.NativePreview
         private readonly long size;
         private bool published, prepared;
         internal readonly FileStream Stream;
-        internal FilePartial(FileSharedRoot root, string path, long size)
+        internal FilePartial(FileSharedRoot root, string path, long size, Action<SafeFileHandle> firstHandle)
         {
             this.root = root; this.size = size; temporaryName = ".knot-" + Guid.NewGuid().ToString("N") + ".part";
             string temporary = Path.Combine(path, temporaryName);
-            SafeFileHandle handle = FileNative.CreateFile(temporary, FileNative.Read | FileNative.Write | FileNative.Delete | 0x00040000,
-                FileShare.ReadWrite, IntPtr.Zero, 1, FileNative.OpenReparse | (uint)FileAttributes.Hidden | (uint)FileAttributes.Temporary, IntPtr.Zero);
+            SafeFileHandle handle = FileNative.CreatePrivate(temporary, FileNative.Read | FileNative.Write | FileNative.Delete,
+                FileShare.ReadWrite, FileNative.OpenReparse | (uint)FileAttributes.Hidden | (uint)FileAttributes.Temporary);
             try
             {
+                // Inert regression fixtures may inspect the earliest native handle
+                // before any stream, marker or later filesystem action exists.
+                if (firstHandle != null) firstHandle(handle);
                 FileNative.Info(handle, false); root.Contained(handle, temporaryName);
                 Stream = new FileStream(handle, FileAccess.ReadWrite, FileProtocol.ChunkSize, false);
-                SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
-                if (user == null) throw new FileTransferException("denied");
-                FileSecurity security = new FileSecurity(); security.SetAccessRuleProtection(true, false);
-                security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
-                Stream.SetAccessControl(security);
                 // ADS belongs to our fresh exclusive partial, not a peer-supplied path.
                 using (FileStream marker = new FileStream(temporary + ":Zone.Identifier", FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite))
                 {
