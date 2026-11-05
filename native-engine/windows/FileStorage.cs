@@ -138,7 +138,10 @@ namespace Knot.NativePreview
                 basis.DangerousAddRef(ref retained);
                 Information original = Info(basis, false);
                 string path = FinalPath(basis) + ":Zone.Identifier";
-                SafeFileHandle stream = CreateFile(path, access | 0x80u, FileShare.ReadWrite, IntPtr.Zero,
+                // This new handle must share the DELETE access already held by
+                // our base handle. The base itself still omits delete sharing,
+                // so the ADS handle does not admit another delete/rename opener.
+                SafeFileHandle stream = CreateFile(path, access | 0x80u, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero,
                     create ? 1u : 3u, OpenReparse, IntPtr.Zero);
                 try
                 {

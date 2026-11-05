@@ -174,6 +174,14 @@ namespace Knot.NativePreview
                     stage = "file-storage-stream-and-motw";
                 }))
                 {
+                    stage = "file-storage-ads-share-compatibility";
+                    using (SafeFileHandle markerHandle = FileNative.ZoneStream(partial.Stream.SafeFileHandle, FileNative.Read, false))
+                    using (SafeFileHandle deletion = FileNative.CreateFile(FileNative.FinalPath(partial.Stream.SafeFileHandle), FileNative.Delete,
+                        FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, 3, FileNative.OpenReparse, IntPtr.Zero))
+                    {
+                        int deletionError = Marshal.GetLastWin32Error();
+                        Check(!markerHandle.IsInvalid && deletion.IsInvalid && deletionError == 32);
+                    }
                     stage = "file-storage-write-publish";
                     Check(earliestChecked);
                     partial.Stream.Write(bytes, 0, bytes.Length); partial.PreparePublication(); name = partial.Publish("a");
