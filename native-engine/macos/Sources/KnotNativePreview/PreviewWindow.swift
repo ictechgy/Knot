@@ -20,14 +20,15 @@ struct PreviewWindow: View {
     @State private var showingHelp = false
     @State private var showingOptions = false
     @State private var showingLegacy = false
-    @State private var showingManualAddress = false
+    @State private var showingAlternatives = false
+    @FocusState private var codeFocused: Bool
     @State private var activeTarget: NativeTarget?
 
     init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil) {
         self.model = model
         _windowState = StateObject(wrappedValue: windowState ?? NativeWindowState())
         _enrollment = StateObject(wrappedValue: enrollment ?? EnrollmentModel())
-        _showingManualAddress = State(initialValue: initialManualAddress)
+        _showingAlternatives = State(initialValue: initialManualAddress)
         self.simulatedDesktop = simulatedDesktop
         self.simulatedFullscreen = simulatedFullscreen
         _showingHelp = State(initialValue: initialHelp)
@@ -70,6 +71,9 @@ struct PreviewWindow: View {
             }
             .onAppear { windowState.bindSession(model, enrollment: enrollment) }
             .onDisappear { enrollment.cancel(); secret = "" }
+            .onChange(of: enrollment.selectedID) { _, selected in
+                codeFocused = selected != nil
+            }
             .onChange(of: model.active) { _, active in
                 enrollment.cancel()
                 if !active { activeTarget = nil }
@@ -117,7 +121,7 @@ struct PreviewWindow: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 9) {
                     Text("Windows에 연결").font(.system(size: 28, weight: .bold))
-                    Text("다른 컴퓨터의 작업을 이 Mac에서 이어가세요.")
+                    Text("이 Mac에서 Windows의 화면과 키보드를 사용해요.")
                         .font(.system(size: 14)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 16)
@@ -128,22 +132,12 @@ struct PreviewWindow: View {
             if model.phase == .failed || model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters." { failurePanel }
             if let target = reviewedTarget { targetCard(target) }
             else {
-                enrollmentCard
-                DisclosureGroup(isExpanded: $showingManualAddress) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("LAN 검색은 같은 네트워크에서 동작해요. 주소로 찾을 때는 Windows 공유 화면에서 선택한 LAN/Tailscale IPv4 주소를 입력하세요.")
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
-                        HStack {
-                            TextField("192.168.x.x 또는 100.x.x.x", text: $enrollment.manualAddress)
-                                .textFieldStyle(.roundedBorder).onSubmit { findPC(manual: true) }
-                            Button("주소로 찾기") { findPC(manual: true) }.disabled(enrollment.busy)
-                        }
-                    }.padding(.top, 12)
-                } label: { Label("PC가 보이지 않나요? · LAN/Tailscale 주소", systemImage: "network").font(.system(size: 13)) }
-                    .disabled(enrollment.busy).padding(16).nativePanel()
-                DisclosureGroup(isExpanded: $showingLegacy) { invitationCard.padding(.top, 12) }
-                    label: { Label("긴 연결 코드로 연결 · 호환 모드", systemImage: "link").font(.system(size: 13)) }
-                    .disabled(enrollment.busy).padding(16).nativePanel()
+                connectionProgress
+                if let candidate = enrollment.selected { numberCard(candidate) }
+                else {
+                    discoveryCard
+                    alternateMethods
+                }
             }
             DisclosureGroup(isExpanded: $showingOptions) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -152,32 +146,54 @@ struct PreviewWindow: View {
                     Text("이 이름은 연결 요청의 참고 정보예요. 확인된 기기 신원을 뜻하지 않아요.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }.padding(.top, 12)
-            } label: { Label("내 Mac 이름", systemImage: "laptopcomputer").font(.system(size: 13)) }
+            } label: { Label("연결 설정 · 내 Mac 이름", systemImage: "laptopcomputer").font(.system(size: 13)) }
                 .disabled(enrollment.busy).padding(16).nativePanel()
-            HStack(alignment: .top, spacing: 18) {
-                NativeStep(number: 1, title: "공유 시작", detail: "Windows에서 8자리 번호 표시")
-                NativeStep(number: 2, title: "PC 선택", detail: "같은 Wi-Fi에서 찾거나 주소 입력")
-                NativeStep(number: 3, title: "번호로 연결", detail: "Mac에서 8자리 번호 입력")
-            }.padding(.top, 2)
             Text("미리보기 · Windows 11 SDR 기본 화면 → Apple Silicon Mac")
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
     }
 
-    private var enrollmentCard: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(alignment: .top, spacing: 15) {
+    private var connectionStep: Int {
+        enrollment.selected != nil ? 3 : enrollment.candidates.isEmpty ? 1 : 2
+    }
+    private var connectionProgress: some View {
+        HStack(spacing: 12) {
+            progressStep(1, "주변 PC 찾기")
+            Image(systemName: "chevron.right").font(.system(size: 10)).foregroundStyle(.tertiary).accessibilityHidden(true)
+            progressStep(2, "PC 선택")
+            Image(systemName: "chevron.right").font(.system(size: 10)).foregroundStyle(.tertiary).accessibilityHidden(true)
+            progressStep(3, "번호 입력")
+        }.accessibilityElement(children: .contain).accessibilityLabel("연결 순서 · 현재 \(connectionStep)단계")
+    }
+    private func progressStep(_ number: Int, _ title: String) -> some View {
+        let current = number == connectionStep
+        let complete = number < connectionStep
+        return HStack(spacing: 7) {
+            Image(systemName: complete ? "checkmark.circle.fill" : "\(number).circle\(current ? ".fill" : "")")
+                .font(.system(size: 16)).accessibilityHidden(true)
+            Text(title).font(.system(size: 12, weight: current ? .semibold : .regular))
+        }.foregroundStyle(current || complete ? Color.blue : Color.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(number)단계 \(title) · \(complete ? "완료" : current ? "현재 단계" : "다음 단계")")
+    }
+
+    private var discoveryTitle: String {
+        if enrollment.phase == .discovering { return "주변 Windows PC를 찾고 있어요" }
+        if !enrollment.candidates.isEmpty { return "연결할 Windows PC를 선택하세요" }
+        if enrollment.phase == .failed { return "연결 준비를 확인해주세요" }
+        return enrollment.hasSearched ? "공유 중인 PC가 보이지 않아요" : "먼저 Windows에서 공유를 시작하세요"
+    }
+    private var discoveryCard: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .top, spacing: 14) {
                 Image(systemName: "desktopcomputer").font(.system(size: 28, weight: .light))
-                    .foregroundStyle(.blue).frame(width: 54, height: 54)
-                    .background(.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                    .foregroundStyle(.blue).frame(width: 50, height: 50)
+                    .background(.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Windows를 바로 연결하세요").font(.system(size: 19, weight: .semibold))
-                    Text("PC를 찾고 Windows에 표시된 8자리 번호만 입력하세요.")
+                    Text(discoveryTitle).font(.system(size: 19, weight: .semibold))
+                    Text(enrollment.candidates.isEmpty ? "Windows PC와 이 Mac에 Knot Native Preview가 필요해요." : "Windows에 표시된 PC 이름·주소와 비교하고 선택해주세요.")
                         .font(.system(size: 13)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if !enrollment.busy {
-                    Button("주변 PC 찾기") { findPC() }.buttonStyle(.bordered)
                 }
             }
             if !enrollment.candidates.isEmpty {
@@ -188,51 +204,121 @@ struct PreviewWindow: View {
                             enrollment.select(candidate.id)
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: enrollment.selectedID == candidate.id ? "largecircle.fill.circle" : "circle")
-                                    .foregroundStyle(enrollment.selectedID == candidate.id ? Color.blue : Color.secondary)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(verbatim: candidate.name).font(.system(size: 14, weight: .semibold))
-                                    Text(verbatim: candidate.address + " · 인증 전 PC 정보")
-                                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                                Image(systemName: "desktopcomputer").font(.system(size: 20)).foregroundStyle(.blue).frame(width: 30)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(verbatim: candidate.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                                    Text(verbatim: candidate.address).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                                 }
-                                Spacer()
-                            }.padding(12).contentShape(Rectangle())
+                                Spacer(minLength: 8)
+                                Label("선택", systemImage: "chevron.right").font(.system(size: 12, weight: .medium)).foregroundStyle(.blue)
+                            }.padding(14).contentShape(Rectangle())
                         }.buttonStyle(.plain).disabled(enrollment.busy)
-                            .background(enrollment.selectedID == candidate.id ? Color.blue.opacity(0.06) : NativeStyle.canvas,
-                                        in: RoundedRectangle(cornerRadius: 8))
-                            .accessibilityValue(enrollment.selectedID == candidate.id ? "선택됨 · 기기 이름은 인증되지 않음" : "기기 이름은 인증되지 않음")
+                            .background(NativeStyle.canvas, in: RoundedRectangle(cornerRadius: 8))
+                            .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(NativeStyle.border, lineWidth: 1) }
+                            .accessibilityLabel("\(candidate.name), \(candidate.address), 이 PC 선택")
+                            .accessibilityHint("인증 전 PC 정보예요. 선택 후 Windows의 8자리 번호를 입력해요.")
                     }
                 }
+                Text("PC 이름과 주소는 아직 인증되지 않은 정보예요. 다음 단계에서 해당 Windows의 번호로 연결을 확인해요.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if enrollment.phase != .discovering {
+                VStack(alignment: .leading, spacing: 18) {
+                    NativeStep(number: 1, title: "Windows에서 Knot 열기", detail: "‘화면 공유 시작’을 누르세요. Windows에 8자리 번호가 나타나요.")
+                    NativeStep(number: 2, title: "이 Mac에서 PC 찾고 선택하기", detail: "아래 버튼으로 같은 Wi-Fi의 PC를 찾으세요. 번호는 PC를 고른 다음 입력해요.")
+                }
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Windows의 8자리 번호").font(.system(size: 12, weight: .medium))
+            if enrollment.phase == .failed || enrollment.hasSearched || enrollment.busy {
+                HStack(alignment: .top, spacing: 10) {
+                    if enrollment.busy { ProgressView().controlSize(.small) }
+                    else if enrollment.phase == .failed { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
+                    Text(enrollment.status).font(.system(size: 12))
+                        .foregroundStyle(enrollment.phase == .failed ? Color.orange : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }.accessibilityElement(children: .combine)
+            }
+            HStack(spacing: 12) {
+                if enrollment.busy {
+                    Button("찾기 취소") { enrollment.cancel() }.buttonStyle(.bordered)
+                } else {
+                    Button { findPC() } label: {
+                        Label(enrollment.hasSearched || enrollment.phase == .failed ? "다시 찾기" : "주변 PC 찾기", systemImage: "magnifyingglass")
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                    }.buttonStyle(.borderedProminent).controlSize(.large)
+                }
+                Spacer()
+                Button("처음 연결하는 방법") { showingHelp = true }.buttonStyle(.link)
+            }
+        }.padding(26).nativePanel()
+    }
+
+    private func numberCard(_ candidate: EnrollmentCandidate) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("선택한 Windows PC", systemImage: "desktopcomputer").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                    Text(verbatim: candidate.name).font(.system(size: 19, weight: .semibold)).lineLimit(1)
+                    Text(verbatim: candidate.address).font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
+                }
+                Spacer(minLength: 12)
+                Button("다른 PC 선택") { codeFocused = false; enrollment.changePC() }.buttonStyle(.bordered)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 9) {
+                Text("이 Windows에 표시된 8자리 번호").font(.system(size: 17, weight: .semibold))
+                Text("선택한 PC의 Knot 공유 화면을 보세요. 번호를 입력하면 화면 연결을 확인해요.")
+                    .font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 SecureField("숫자 8자리", text: $enrollment.code)
-                    .font(.system(size: 20, design: .monospaced)).textFieldStyle(.plain)
-                    .padding(12).background(NativeStyle.canvas, in: RoundedRectangle(cornerRadius: 7))
-                    .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(NativeStyle.border, lineWidth: 1) }
-                    .accessibilityLabel("Windows에 표시된 8자리 연결 번호")
-                    .disabled(enrollment.selected == nil || enrollment.busy).onSubmit { connectNumber() }
+                    .font(.system(size: 24, design: .monospaced)).textFieldStyle(.plain)
+                    .padding(14).background(NativeStyle.canvas, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(codeFocused ? Color.blue : NativeStyle.border, lineWidth: 1) }
+                    .accessibilityLabel("선택한 Windows에 표시된 8자리 연결 번호")
+                    .focused($codeFocused).disabled(enrollment.busy).onSubmit { connectNumber() }
             }
             HStack(alignment: .center, spacing: 12) {
                 if enrollment.busy { ProgressView().controlSize(.small) }
-                Text(enrollment.status).font(.system(size: 12))
-                    .foregroundStyle(enrollment.phase == .failed ? Color.orange : Color.secondary)
+                Text(enrollment.phase == .failed || enrollment.busy ? enrollment.status : "번호는 2분 동안 한 번만 사용할 수 있어요.")
+                    .font(.system(size: 12)).foregroundStyle(enrollment.phase == .failed ? Color.orange : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 12)
-                if enrollment.busy { Button("취소") { enrollment.cancel() }.buttonStyle(.bordered) }
-                else {
-                    Button { connectNumber() } label: { Label("연결", systemImage: "arrow.right").padding(.horizontal, 8).padding(.vertical, 3) }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(enrollment.selected == nil || (try? EnrollmentWire.password(enrollment.code)) == nil)
+                if enrollment.busy {
+                    Button("취소") { codeFocused = false; enrollment.changePC() }.buttonStyle(.bordered)
+                } else {
+                    Button { connectNumber() } label: {
+                        Label("이 PC에 연결", systemImage: "arrow.right").padding(.horizontal, 6).padding(.vertical, 3)
+                    }.buttonStyle(.borderedProminent).controlSize(.large)
+                        .disabled((try? EnrollmentWire.password(enrollment.code)) == nil)
                 }
             }
-            Text("번호는 2분·1회용이에요. Windows에서 공유를 시작하면 번호를 아는 Mac 한 대에 이번 화면·입력 연결을 허용해요.")
+            Text("이름·주소는 인증 전 정보예요. 번호를 아는 Mac 한 대에 이번 화면·입력 연결만 허용돼요. 번호가 만료됐다면 Windows에서 공유를 다시 시작하세요.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.padding(26).nativePanel()
+    }
+
+    private var alternateMethods: some View {
+        DisclosureGroup(isExpanded: $showingAlternatives) {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("LAN / Tailscale 주소로 PC 찾기", systemImage: "network").font(.system(size: 13, weight: .medium))
+                    Text("주변 검색은 같은 네트워크에서 동작해요. Windows 공유 화면의 LAN/Tailscale IPv4 주소로도 찾을 수 있어요. 찾은 PC를 선택한 뒤 번호를 입력하세요.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    HStack {
+                        TextField("192.168.x.x 또는 100.x.x.x", text: $enrollment.manualAddress)
+                            .textFieldStyle(.roundedBorder).accessibilityLabel("Windows의 LAN 또는 Tailscale IPv4 주소")
+                            .onSubmit { findPC(manual: true) }
+                        Button("주소로 찾기") { findPC(manual: true) }.disabled(enrollment.busy)
+                    }
+                }
+                Divider()
+                DisclosureGroup(isExpanded: $showingLegacy) { invitationCard.padding(.top, 12) }
+                    label: { Label("긴 연결 코드 · 호환 모드", systemImage: "link").font(.system(size: 13)) }
+            }.padding(.top, 14)
+        } label: { Label("다른 연결 방법", systemImage: "ellipsis.circle").font(.system(size: 13)) }
+            .disabled(enrollment.busy).padding(16).nativePanel()
     }
     private func findPC(manual: Bool = false) {
         guard !model.active else { return }
         secret = ""; model.invitation = nil; activeTarget = nil
+        codeFocused = false
         enrollment.find(manual: manual)
     }
     private func connectNumber() {
@@ -240,6 +326,7 @@ struct PreviewWindow: View {
         guard Invitation.validViewerLabel(model.viewerLabel) else {
             enrollment.code = ""; model.status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; showingOptions = true; return
         }
+        codeFocused = false
         secret = ""; model.invitation = nil
         enrollment.connect(name: model.viewerLabel) { result in
             guard !model.active else { return }
@@ -332,7 +419,7 @@ struct PreviewWindow: View {
     private var helpPage: some View {
         Group {
             VStack(alignment: .leading, spacing: 9) {
-                Text("연결은, 이렇게.").font(.system(size: 28, weight: .bold))
+                Text("처음 연결하기").font(.system(size: 28, weight: .bold))
                 Text("계정이나 웹 PIN 없이 두 컴퓨터를 연결해요.").font(.system(size: 14)).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 26) {
@@ -348,6 +435,7 @@ struct PreviewWindow: View {
                 Text("기본 Mac 입력기로 한글·영문을 입력해요. 한/영 전환은 Caps Lock 등 이 Mac에 설정된 키를 그대로 사용하세요. 일반적인 Windows 복사·붙여넣기는 Control+C/V를 사용해요. 물리 키 입력에서 Command는 Windows 키에 해당해요.")
             }.font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(22).nativePanel()
+            Button("연결 화면으로 돌아가기") { showingHelp = false }.buttonStyle(.borderedProminent).controlSize(.large)
             Label("실기기 품질과 정식 서명은 추가 검증이 필요한 실험판이에요.", systemImage: "flask")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
         }

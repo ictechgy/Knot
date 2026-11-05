@@ -9,6 +9,7 @@ final class EnrollmentModel: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var candidates: [EnrollmentCandidate] = []
     @Published private(set) var selectedID: String?
+    @Published private(set) var hasSearched = false
     @Published var code = ""
     @Published var manualAddress = ""
     @Published private(set) var status = "Windows에서 화면 공유를 시작한 뒤 주변 PC를 찾아주세요."
@@ -24,10 +25,14 @@ final class EnrollmentModel: ObservableObject {
     init(makeDiscovery: @escaping @Sendable () -> any EnrollmentDiscovering = { DiscoveryClient() },
          makeClient: @escaping @Sendable (EnrollmentCandidate, Data) throws -> any EnrollmentAuthenticating = {
              try EnrollmentClient(candidate: $0, password: $1)
-         }, initialCandidates: [EnrollmentCandidate] = [], initialPhase: Phase = .idle, initialStatus: String? = nil) {
+         }, initialCandidates: [EnrollmentCandidate] = [], initialPhase: Phase = .idle, initialStatus: String? = nil,
+         initialSelection: String? = nil, initialSearchCompleted: Bool = false) {
         self.makeDiscovery = makeDiscovery; self.makeClient = makeClient
         candidates = Array(initialCandidates.prefix(EnrollmentWire.candidateLimit))
-        selectedID = candidates.count == 1 ? candidates.first?.id : nil
+        // Discovery metadata never makes the user's device choice for them.
+        // Explicit initial presentation values are used only by inert fixtures.
+        selectedID = candidates.first { $0.id == initialSelection }?.id
+        hasSearched = initialSearchCompleted || !candidates.isEmpty
         phase = initialPhase
         if let initialStatus { status = initialStatus }
     }
@@ -47,10 +52,10 @@ final class EnrollmentModel: ObservableObject {
                 guard let self, self.generation == id, !Task.isCancelled else { return }
                 self.discovery = nil; self.task = nil
                 self.candidates = Array(values.prefix(EnrollmentWire.candidateLimit))
-                self.selectedID = values.count == 1 ? values.first?.id : nil
+                self.selectedID = nil; self.hasSearched = true
                 self.phase = .idle
                 self.status = values.isEmpty ? "공유 중인 PC를 찾지 못했어요. Windows에서 공유를 시작했는지 확인하거나 주소로 찾아주세요." :
-                    "연결할 PC를 선택하고 Windows에 표시된 8자리 번호를 입력하세요."
+                    "목록에서 연결할 Windows PC를 선택해주세요. 다음 화면에서 8자리 번호를 입력해요."
             } catch {
                 guard let self, self.generation == id, !Task.isCancelled else { return }
                 self.fail(Self.failure(error))
@@ -61,8 +66,7 @@ final class EnrollmentModel: ObservableObject {
     func select(_ id: String) {
         guard candidates.contains(where: { $0.id == id }) else { return }
         if selectedID != id || busy {
-            generation = UUID(); task?.cancel(); discovery?.close(); client?.close()
-            task = nil; discovery = nil; client = nil; code = ""
+            invalidateOperation()
         }
         selectedID = id; phase = .idle
         status = "Windows에 표시된 8자리 번호를 입력하세요. 번호를 아는 Mac 한 대에 이번 연결만 허용돼요."
@@ -106,15 +110,26 @@ final class EnrollmentModel: ObservableObject {
         if error is CancellationError { return .cancelled }
         return .transport
     }
-    func cancel() {
+    private func invalidateOperation() {
         generation = UUID(); task?.cancel(); task = nil
         discovery?.close(); discovery = nil; client?.close(); client = nil
-        code = ""; candidates = []; selectedID = nil
+        code = ""
+    }
+    /// Back navigation revokes the attempt and its secret, not the search result.
+    func changePC() {
+        invalidateOperation(); selectedID = nil
+        phase = .idle
+        status = candidates.isEmpty ? "Windows에서 공유를 시작한 뒤 PC를 찾아주세요." :
+            "목록에서 연결할 Windows PC를 선택해주세요. 다음 화면에서 8자리 번호를 입력해요."
+    }
+    func cancel() {
+        invalidateOperation(); candidates = []; selectedID = nil; hasSearched = false
         phase = .idle; status = "Windows에서 공유를 시작한 뒤 PC를 찾아주세요."
     }
     private func fail(_ error: EnrollmentFailure, keepCandidates: Bool = false) {
         let saved = keepCandidates ? candidates : [], selected = keepCandidates ? selectedID : nil
-        cancel(); candidates = saved; selectedID = selected; phase = .failed
+        let searched = hasSearched
+        cancel(); candidates = saved; selectedID = selected; hasSearched = searched; phase = .failed
         switch error {
         case .invalidCode, .authentication:
             status = Self.authenticationGuidance

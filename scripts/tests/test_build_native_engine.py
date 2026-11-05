@@ -136,6 +136,7 @@ class NativeRebuildTests(unittest.TestCase):
                 data = self.inert_visual_png()
                 rows = []
                 for state in ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
+                              "short-idle", "short-code", "short-code-compact", "short-help-compact",
                               "short-idle-scale150", "short-idle-scale200"]:
                     image = visual_output / ("windows-" + state + ".png")
                     image.write_bytes(data)
@@ -215,7 +216,7 @@ class NativeRebuildTests(unittest.TestCase):
         visual = json.loads((self.output / "native-ui-visual-checks.json").read_text())
         self.assertEqual(visual["visualAcceptance"], "manual-review-required")
         self.assertIn("INERT", visual["rendererReport"]["renderMethod"])
-        self.assertEqual(len(visual["rendererReport"]["images"]), 9)
+        self.assertEqual(len(visual["rendererReport"]["images"]), 13)
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
@@ -328,7 +329,9 @@ class NativeRebuildTests(unittest.TestCase):
         builder = native.Builder("macos", self.output)
         report_path.parent.mkdir()
         report["images"] = []
-        for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected"]:
+        for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected",
+                      "searching", "empty", "nearby", "number", "number-working", "number-error",
+                      "nearby-compact", "number-compact", "number-dark", "help-compact"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
             report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,

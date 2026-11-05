@@ -56,7 +56,13 @@ struct NativeVisualFixture {
             ("number", "number", 1200, 760, false),
             ("number-working", "number-working", 1200, 760, false),
             ("number-error", "number-error", 1200, 760, false),
-            ("manual-address", "manual-address", 1200, 760, false)
+            ("manual-address", "manual-address", 1200, 760, false),
+            ("searching", "searching", 1200, 760, false),
+            ("empty", "empty", 1200, 760, false),
+            ("nearby-compact", "nearby", 880, 620, false),
+            ("number-compact", "number", 880, 620, false),
+            ("number-dark", "number", 1200, 760, true),
+            ("help-compact", "help", 880, 620, false)
         ]
         var images: [[String: Any]] = []
         for (name, state, width, height, dark) in cases {
@@ -107,6 +113,10 @@ struct NativeVisualFixture {
             }
 
             try requireInert(model: model, state: state, effects: effects)
+            let numberFields = secureFieldCount(view)
+            let codeStage = !model.active && model.invitation == nil && enrollment.selected != nil && state != "help"
+            guard numberFields == (codeStage ? 1 : 0) else { throw FixtureError.numberStage }
+            guard enrollment.selected == nil || state.hasPrefix("number") else { throw FixtureError.numberStage }
             guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { throw FixtureError.bitmap }
@@ -119,6 +129,10 @@ struct NativeVisualFixture {
                 "immersiveFullscreen": immersive, "controlsRevealed": revealed,
                 "expectedPhase": String(describing: expectedPhase(state)), "observedPhase": String(describing: model.phase),
                 "desktopFrame": frameDictionary(model: model, root: view),
+                "connectionStep": enrollment.selected != nil ? 3 : enrollment.candidates.isEmpty ? 1 : 2,
+                "candidateCount": enrollment.candidates.count, "explicitSelection": enrollment.selected != nil,
+                "codeStageVisible": codeStage, "renderedNumberFields": numberFields,
+                "searchCompleted": enrollment.hasSearched,
                 "presenterTransitionChecks": name == "streaming" ? 3 : 0,
                 "stablePresenterAcrossFullscreen": stablePresenter.map { $0 as Any } ?? NSNull()])
             window.close()
@@ -148,6 +162,12 @@ struct NativeVisualFixture {
             .frame(width: CGFloat(width), height: CGFloat(height))
     }
 
+    /// Inspect only the fresh offscreen view hierarchy; never another app/window.
+    @MainActor private static func secureFieldCount(_ root: NSView) -> Int {
+        let own = root is NSSecureTextField ? 1 : 0
+        return own + root.subviews.reduce(0) { $0 + secureFieldCount($1) }
+    }
+
     @MainActor private static func desktopFrame(model: SessionModel, root: NSView) -> CGRect {
         guard let desktop = model.surface as? DesktopView else { return .zero }
         return desktop.convert(desktop.bounds, to: root)
@@ -168,13 +188,17 @@ struct NativeVisualFixture {
         let first = try EnrollmentCandidate(address: "192.168.50.24", port: 48632, slot: Data(repeating: 1, count: 16), name: "작업용 Windows")
         let second = try EnrollmentCandidate(address: "192.168.50.25", port: 48632, slot: Data(repeating: 2, count: 16), name: "개발용 PC")
         let values = state == "nearby" ? [first, second] : ["number", "number-working", "number-error"].contains(state) ? [first] : []
-        let phase: EnrollmentModel.Phase = state == "number-working" ? .authenticating : state == "number-error" ? .failed : .idle
+        let phase: EnrollmentModel.Phase = state == "number-working" ? .authenticating : state == "number-error" ? .failed : state == "searching" ? .discovering : .idle
         let status = state == "number-working" ? "8자리 번호를 확인하고 연결 정보를 안전하게 받고 있어요…" :
             state == "number-error" ? EnrollmentModel.authenticationGuidance :
-            values.isEmpty ? nil : "Windows에 표시된 8자리 번호를 입력하세요. 기기 이름과 주소는 아직 인증되지 않았어요."
+            state == "searching" ? "공유 중인 PC를 찾고 있어요…" :
+            state == "empty" ? "공유 중인 PC를 찾지 못했어요. Windows에서 공유를 시작했는지 확인하거나 주소로 찾아주세요." :
+            values.isEmpty ? nil : state == "nearby" ? "목록에서 연결할 Windows PC를 선택해주세요. 다음 화면에서 8자리 번호를 입력해요." :
+                "Windows에 표시된 8자리 번호를 입력하세요. 기기 이름과 주소는 아직 인증되지 않았어요."
         let model = EnrollmentModel(makeDiscovery: { effects.mark(); return FixtureEmptyDiscovery() },
             makeClient: { _, _ in effects.mark(); throw EnrollmentFailure.cancelled },
-            initialCandidates: values, initialPhase: phase, initialStatus: status)
+            initialCandidates: values, initialPhase: phase, initialStatus: status,
+            initialSelection: state.hasPrefix("number") ? first.id : nil, initialSearchCompleted: state == "empty")
         if state == "number" { model.code = "12345678" }
         if state == "manual-address" { model.manualAddress = "100.100.10.12" }
         return model
@@ -232,7 +256,9 @@ struct NativeVisualFixture {
     }
 }
 
-enum FixtureError: Error { case arguments, bitmap, presenter, effects, phase, geometry(CGRect, CGSize) }
+enum FixtureError: Error {
+    case arguments, bitmap, presenter, effects, phase, numberStage, geometry(CGRect, CGSize)
+}
 
 private final class FixtureEnrollmentEffects: @unchecked Sendable {
     private let lock = NSLock()

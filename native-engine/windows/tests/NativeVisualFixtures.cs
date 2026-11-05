@@ -180,6 +180,17 @@ namespace Knot.NativePreview
                 // Configure before creating any control or native window handle.
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                 Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+                // The very value shown to identify this PC is passed to the
+                // host's discovery server. Validate without starting a host or
+                // reading the real computer name in the synthetic entrypoint.
+                foreach (string invalidName in new string[] { null, "", "spoof\nname", "hidden\u202ename", new string('W', 65) })
+                    if (PreviewCopy.DiscoveryName(invalidName) != "Windows PC")
+                        throw new InvalidOperationException("Unsupported discovery names must use the bounded shared fallback.");
+                if (PreviewCopy.DiscoveryName("작업용 Windows") != "작업용 Windows")
+                    throw new InvalidOperationException("The advertised device name must match the displayed name.");
+                string boundaryName = new string('W', 64);
+                if (PreviewCopy.DiscoveryName(boundaryName) != boundaryName)
+                    throw new InvalidOperationException("The maximum admitted device name must remain unchanged.");
                 string illustrationChecks = IllustrationChecks();
                 List<Frame> frames = new List<Frame>();
                 frames.Add(new Frame("windows-idle.png", HostViewPhase.Idle, false, 1040, 740, 1));
@@ -200,13 +211,17 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-request-long-name-scale200.png", HostViewPhase.Request, false, 1040, 740, 2f) { ViewerLabelOverride = new string('W', 64) });
                 frames.Add(new Frame("windows-ended-error-scale200.png", HostViewPhase.Stopped, false, 1040, 740, 2f) { StatusOverride = PreviewCopy.Status(HostServer.Guidance("encoder")) });
                 frames.Add(new Frame("windows-short-idle.png", HostViewPhase.Idle, false, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-idle-compact.png", HostViewPhase.Idle, false, 800, 620, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-idle-scale150.png", HostViewPhase.Idle, false, 1040, 740, 1.5f) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-idle-scale200.png", HostViewPhase.Idle, false, 1040, 740, 2f) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-code.png", HostViewPhase.Invitation, false, 1040, 740, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-code-compact.png", HostViewPhase.Invitation, false, 800, 620, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-code-scale150.png", HostViewPhase.Invitation, false, 1040, 740, 1.5f) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-code-scale200.png", HostViewPhase.Invitation, false, 1040, 740, 2f) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-preparing.png", HostViewPhase.Preparing, false, 1040, 740, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-sharing.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-help.png", HostViewPhase.Idle, true, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-short-help-compact.png", HostViewPhase.Idle, true, 800, 620, 1) { EnrollmentMode = true });
                 List<string> records = new List<string>();
                 using (Icon icon = new Icon(iconPath, 256, 256))
                 {
@@ -280,6 +295,16 @@ namespace Knot.NativePreview
                             if (form.DisplayedEnrollmentCode != expectedCode) throw new InvalidOperationException("Only the current short-code invitation is displayed.");
                             if (frame.EnrollmentMode && frame.Phase == HostViewPhase.Invitation && form.DisplayedStatus != EnrollmentGuidance.Ready)
                                 throw new InvalidOperationException("The short-code footer must use production enrollment guidance.");
+                            bool expectedNumberGuidance = !frame.Help && frame.EnrollmentMode && frame.Phase == HostViewPhase.Invitation;
+                            if (form.FixtureNumberGuidanceVisible != expectedNumberGuidance)
+                                throw new InvalidOperationException("PC selection and number instructions must appear only for a live short-number invitation.");
+                            if (expectedNumberGuidance && form.DisplayedHostIdentity != "작업용 Windows\r\n192.168.50.12")
+                                throw new InvalidOperationException("The number must identify the selected Windows name and actual sharing address.");
+                            bool expectedOnboarding = !frame.Help && frame.EnrollmentMode && frame.Phase == HostViewPhase.Idle;
+                            if (form.FixtureOnboardingVisible != expectedOnboarding)
+                                throw new InvalidOperationException("Initial sharing must explain the ordered Windows-start/Mac-select/Mac-number flow.");
+                            if (expectedOnboarding && !form.FixtureOnboardingActionFits)
+                                throw new InvalidOperationException("The initial sharing action must be visible without scrolling past onboarding.");
                             if (form.FixtureQualityEditable == state.RunPresent)
                                 throw new InvalidOperationException("Quality is selectable only before the sharing run.");
                             AssertFontsUsable(form);
@@ -310,6 +335,10 @@ namespace Knot.NativePreview
                                     ",\"layoutFontScale\":" + frame.Scale.ToString(CultureInfo.InvariantCulture) +
                                     ",\"actualDrawingDpi\":" + actualDpi.ToString(CultureInfo.InvariantCulture) +
                                     ",\"state\":" + Q(frame.Phase.ToString()) + ",\"enrollmentMode\":" + (frame.EnrollmentMode ? "true" : "false") + ",\"shortCodeFits\":true,\"controlCount\":" + CountControls(form) +
+                                    ",\"onboardingVisible\":" + (expectedOnboarding ? "true" : "false") +
+                                    ",\"numberGuidanceVisible\":" + (expectedNumberGuidance ? "true" : "false") +
+                                    ",\"hostIdentityExact\":" + (expectedNumberGuidance ? "true" : "null") +
+                                    ",\"onboardingActionFits\":" + (expectedOnboarding ? "true" : "null") +
                                     ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"brandPainted\":true,\"fontsUsable\":true,\"effectsBound\":false}");
                             }
                             Progress(frame, "before-close"); form.Close(); Progress(frame, "after-close"); Pump(); Progress(frame, "after-close-pump");

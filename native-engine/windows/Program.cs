@@ -23,6 +23,7 @@ namespace Knot.NativePreview
     {
         private readonly float scale;
         private readonly bool fixtureMode;
+        private readonly string advertisedName;
         private readonly Action<string> fixtureTrace;
         private readonly ComboBox addresses = new ComboBox();
         private readonly ComboBox qualityProfiles = new ComboBox();
@@ -30,7 +31,7 @@ namespace Knot.NativePreview
         private readonly Label enrollmentCode = new Label();
         private readonly PreviewButton share, copy, stop, approve, decline, desktopNavigation, helpNavigation, networkDisclosure, compactDesktopNavigation, compactHelpNavigation;
         private readonly TextBox status = new TextBox(), pin = new TextBox();
-        private readonly Label headerTitle, headerSubtitle, badge, stateStep, stateTitle, stateDescription, requestName, requestAddress, requestWarning, networkValue, privacy, trustTitle;
+        private readonly Label headerTitle, headerSubtitle, badge, stateStep, stateTitle, stateDescription, hostIdentity, numberLifetime, requestName, requestAddress, requestWarning, networkValue, privacy, trustTitle;
         private readonly Panel scroll = new Panel();
         private readonly TableLayoutPanel body, helpBody, networkSettings, shell, header;
         private readonly FlowLayoutPanel actions, compactNavigation;
@@ -63,6 +64,7 @@ namespace Knot.NativePreview
         {
             if (layoutScale < 1 || layoutScale > 2) throw new ArgumentException("Invalid fixture layout scale.");
             fixtureMode = visualFixture; scale = visualFixture ? layoutScale : 1f; fixtureTrace = visualFixture ? trace : null;
+            advertisedName = PreviewCopy.DiscoveryName(visualFixture ? "작업용 Windows" : Environment.MachineName);
             Text = "Knot Native Preview"; ClientSize = new Size(P(1040), P(740));
             MinimumSize = new Size(P(500), P(360)); StartPosition = FormStartPosition.CenterScreen;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = visualFixture ? AutoScaleMode.None : AutoScaleMode.Dpi;
@@ -103,9 +105,9 @@ namespace Knot.NativePreview
             shell.Controls.Add(main, 1, 0);
             header = Column(); header.Dock = DockStyle.Top; header.Padding = new Padding(P(32), P(28), P(32), P(20));
             compactNavigation = BuildCompactNavigation(); SetViewVisible(compactNavigation, false); header.Controls.Add(compactNavigation);
-            headerTitle = MakeLabel("이 PC를 Mac에서 열기", 24, FontStyle.Bold); headerTitle.Margin = new Padding(0, 0, 0, P(8));
+            headerTitle = MakeLabel("Windows 화면 공유", 24, FontStyle.Bold); headerTitle.Margin = new Padding(0, 0, 0, P(8));
             header.Controls.Add(headerTitle);
-            headerSubtitle = MakeLabel("원하는 순간에만 화면과 입력을 공유하세요.", 10.5f, FontStyle.Regular); header.Controls.Add(headerSubtitle);
+            headerSubtitle = MakeLabel("이 PC를 Mac에서 사용하기 · 계정 없이 3단계로 연결", 10.5f, FontStyle.Regular); header.Controls.Add(headerSubtitle);
             badge = MakeLabel("공유 전", 9, FontStyle.Bold); badge.ForeColor = PreviewStyle.Muted;
             badge.Margin = new Padding(0, P(12), 0, 0); header.Controls.Add(badge);
             main.Controls.Add(header);
@@ -126,12 +128,19 @@ namespace Knot.NativePreview
             stateDescription = MakeLabel("", 10.5f, FontStyle.Regular);
             stateDescription.Margin = new Padding(0, 0, 0, P(20)); taskCard.Content.Controls.Add(stateDescription);
 
+            hostIdentity = MakeLabel("", 10.5f, FontStyle.Bold);
+            hostIdentity.Margin = new Padding(0, 0, 0, P(12));
+            hostIdentity.AccessibleName = "Mac에서 선택할 이 Windows의 이름과 주소";
+            taskCard.Content.Controls.Add(hostIdentity);
+
             enrollmentCode.Dock = DockStyle.Top; enrollmentCode.AutoSize = false; enrollmentCode.Height = P(60);
             enrollmentCode.TextAlign = ContentAlignment.MiddleCenter; enrollmentCode.BackColor = PreviewStyle.Surface;
             enrollmentCode.ForeColor = PreviewStyle.Ink; enrollmentCode.Margin = new Padding(0, 0, 0, P(20));
             SetOwnedFont(enrollmentCode, new Font("Consolas", 30 * scale, FontStyle.Bold));
             enrollmentCode.AccessibleName = "8자리 일회용 연결번호";
             taskCard.Content.Controls.Add(enrollmentCode);
+            numberLifetime = MakeLabel(PreviewCopy.NumberLifetime, 9, FontStyle.Regular);
+            numberLifetime.Margin = new Padding(0, 0, 0, P(12)); taskCard.Content.Controls.Add(numberLifetime);
 
             requestPanel = Column(); requestPanel.Dock = DockStyle.Top;
             requestName = MakeLabel("", 13, FontStyle.Bold); requestName.Margin = new Padding(0, 0, 0, P(4));
@@ -236,7 +245,7 @@ namespace Knot.NativePreview
                 if (ownedIcon != null) { ownedIcon.Dispose(); ownedIcon = null; }
             };
             phase = addresses.Items.Count > 0 ? HostViewPhase.Idle : HostViewPhase.Failed;
-            rawStatus = addresses.Items.Count > 0 ? "공유를 시작하면 Mac에 보낼 연결 코드가 만들어져요." : "사용할 수 있는 사설 네트워크가 없어요. Wi-Fi나 Tailscale 연결을 확인해주세요.";
+            rawStatus = addresses.Items.Count > 0 ? "먼저 이 Windows에서 공유를 시작한 뒤, Mac에서 이 PC를 찾아 선택하세요." : "사용할 수 있는 사설 네트워크가 없어요. Wi-Fi나 Tailscale 연결을 확인해주세요.";
             UpdateNetwork(); ShowHelp(false); ApplyCurrentPresentation();
         }
 
@@ -307,11 +316,14 @@ namespace Knot.NativePreview
             TableLayoutPanel help = Column(); help.Padding = new Padding(P(32), 0, P(32), P(20));
             PreviewCard steps = new PreviewCard(scale); steps.Dock = DockStyle.Top;
             Label title = MakeLabel("8자리 번호로 연결하기", 17, FontStyle.Bold); title.Margin = new Padding(0, 0, 0, P(20)); steps.Content.Controls.Add(title);
-            AddHelpStep(steps.Content, "01  이 PC에서 공유 시작", "‘화면 공유 시작’을 누르면 8자리 연결번호가 표시돼요. 이 번호를 아는 Mac 한 대에 이번 화면·입력 연결을 허용해요.");
-            AddHelpStep(steps.Content, "02  Mac에서 이 PC 선택", "같은 Wi-Fi·LAN에서는 Mac의 ‘주변 PC 찾기’로 선택하세요. Tailscale이나 수동 연결은 이 Windows의 ‘이 PC 공유’ → ‘연결 네트워크’ 주소로 찾으세요. 주소가 안 보이면 창을 넓혀주세요. PC를 선택한 뒤 8자리 번호를 입력하세요.");
-            AddHelpStep(steps.Content, "03  번호 확인 후 연결", "8자리 번호 방식은 확인이 끝나면 바로 화면을 준비해요. Windows에서 추가로 승인할 필요가 없으며 ‘공유 중지’로 이번 권한을 끝낼 수 있어요.");
+            AddHelpStep(steps.Content, "01  Windows에서 공유 시작", "이 Windows와 Mac에서 Knot Native Preview를 여세요. 이 PC의 ‘화면 공유 시작’을 누르면 8자리 번호가 표시돼요. 같은 Wi-Fi나 Tailscale에 연결되어 있어야 해요.");
+            AddHelpStep(steps.Content, "02  Mac에서 PC 찾기 → 이 PC 선택", "Mac의 ‘주변 PC 찾기’를 누르고 Windows 공유 화면의 이름·주소와 비교해 이 PC를 선택하세요. PC를 선택해야 다음 번호 입력 화면이 나와요. Tailscale이나 검색이 안 되는 환경에서는 Mac의 ‘다른 연결 방법’에서 이 Windows의 연결 네트워크 주소로 찾으세요.");
+            AddHelpStep(steps.Content, "03  Mac에서 8자리 번호 입력", "선택한 이 PC의 Knot 화면에 표시된 번호를 Mac에 입력하고 ‘이 PC에 연결’을 누르세요. 번호를 아는 Mac 한 대에 이번 화면·입력을 허용하며 Windows에서 추가 승인은 없어요. 번호는 공유 시작 후 2분·1회용이에요. 만료됐다면 이 PC에서 다시 공유해주세요.");
             Label legacyHelp = MakeLabel("고급의 긴 연결코드 방식을 선택했다면 Mac에 코드를 붙여 넣은 뒤, Windows에서 연결 요청을 허용해주세요.", 9, FontStyle.Regular);
             legacyHelp.ForeColor = PreviewStyle.Muted; legacyHelp.Margin = Padding.Empty; steps.Content.Controls.Add(legacyHelp);
+            PreviewButton returnToSharing = ActionButton("이 PC 공유로 돌아가기", PreviewButtonKind.Secondary);
+            returnToSharing.Margin = new Padding(0, P(16), 0, 0);
+            returnToSharing.Click += delegate { ShowHelp(false); }; steps.Content.Controls.Add(returnToSharing);
             help.Controls.Add(steps);
             PreviewCard scope = new PreviewCard(scale); scope.Dock = DockStyle.Top;
             Label scopeTitle = MakeLabel("이번 미리보기에서 알아둘 점", 12, FontStyle.Bold); scopeTitle.Margin = new Padding(0, 0, 0, P(10)); scope.Content.Controls.Add(scopeTitle);
@@ -326,8 +338,8 @@ namespace Knot.NativePreview
         private void ShowHelp(bool show)
         {
             helpVisible = show; SetViewVisible(body, !show); SetViewVisible(helpBody, show);
-            headerTitle.Text = show ? "Mac 연결 안내" : "이 PC를 Mac에서 열기";
-            headerSubtitle.Text = show ? "처음 연결부터, 공유를 마칠 때까지." : "원하는 순간에만 화면과 입력을 공유하세요.";
+            headerTitle.Text = show ? "처음 연결하기" : "Windows 화면 공유";
+            headerSubtitle.Text = show ? "Windows에서 시작하고, Mac에서 선택한 뒤 번호를 입력해요." : "이 PC를 Mac에서 사용하기 · 계정 없이 3단계로 연결";
             desktopNavigation.Selected = !show; helpNavigation.Selected = show; desktopNavigation.Invalidate(); helpNavigation.Invalidate();
             compactDesktopNavigation.Selected = !show; compactHelpNavigation.Selected = show; compactDesktopNavigation.Invalidate(); compactHelpNavigation.Invalidate();
             desktopNavigation.AccessibleDescription = show ? "이 PC 공유 화면으로 이동" : "현재 선택한 화면";
@@ -411,6 +423,8 @@ namespace Knot.NativePreview
                 SetViewVisible(stateDescription, !compact || idle || view.Phase == HostViewPhase.Invitation);
                 stateTitle.Margin = new Padding(0, 0, 0, R(compact ? 8 : 10));
                 stateDescription.Margin = new Padding(0, 0, 0, R(compact ? 12 : 20));
+                hostIdentity.Margin = new Padding(0, 0, 0, R(compact ? 8 : 12));
+                numberLifetime.Margin = new Padding(0, 0, 0, R(compact ? 8 : 12));
                 requestName.Margin = new Padding(0, 0, 0, R(4)); requestAddress.Margin = new Padding(0, 0, 0, R(6));
                 SetViewVisible(requestWarning, view.Phase == HostViewPhase.Request && !compact);
                 trustPanel.Margin = new Padding(0, 0, 0, R(compact ? 8 : 18));
@@ -478,6 +492,7 @@ namespace Knot.NativePreview
         private void ApplyPresentation(HostViewSnapshot view)
         {
             bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
+            privacy.Text = view.EnrollmentMode ? "공유를 시작하면 번호를 아는 Mac 한 대에 이번 화면·입력을 허용해요. 연결이 끝나면 권한도 끝나요." : "허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.";
             badge.Text = "●  " + PreviewCopy.Phase(view.Phase);
             badge.ForeColor = view.Phase == HostViewPhase.Failed ? PreviewStyle.Warning : PreviewStyle.Muted;
             stateStep.Text = view.Phase == HostViewPhase.Failed ? "공유 준비 확인" : idle ? "01  화면 공유" : view.Phase == HostViewPhase.Invitation ? "02  Mac에 코드 보내기" : "03  연결 확인";
@@ -487,13 +502,15 @@ namespace Knot.NativePreview
             {
                 if (idle)
                 {
-                    stateTitle.Text = view.Phase == HostViewPhase.Failed ? "공유 준비를 확인해주세요" : view.Phase == HostViewPhase.Stopped ? "새 번호로 다시 연결하세요" : "Mac에서 이 화면을 사용하세요";
-                    if (view.Phase != HostViewPhase.Failed) stateDescription.Text = "공유를 시작하면 8자리 번호가 만들어져요.\r\n번호를 아는 Mac 한 대에 이번 화면·입력 연결을 허용해요.";
+                    stateStep.Text = "1 / 3  Windows에서 공유 시작";
+                    stateTitle.Text = view.Phase == HostViewPhase.Failed ? "공유 준비를 확인해주세요" : view.Phase == HostViewPhase.Stopped ? "새 번호로 다시 연결하세요" : PreviewCopy.ShareTitle;
+                    if (view.Phase != HostViewPhase.Failed) stateDescription.Text = PreviewCopy.Onboarding;
                 }
                 else if (view.Phase == HostViewPhase.Invitation)
                 {
-                    stateStep.Text = "02  Mac에서 번호 입력"; stateTitle.Text = "Mac에서 8자리 번호를 입력하세요";
-                    stateDescription.Text = "‘근처 PC’에서 이 PC를 선택하세요.\r\n번호는 2분 동안 한 번만 사용할 수 있어요.";
+                    stateStep.Text = "2 → 3 / 3  Mac에서 PC 선택 → 번호 입력";
+                    stateTitle.Text = PreviewCopy.NumberTitle;
+                    stateDescription.Text = PreviewCopy.NumberInstruction;
                 }
             }
             SetViewVisible(requestPanel, view.ViewerLabel.Length > 0 && (view.Phase == HostViewPhase.Request || view.Phase == HostViewPhase.Preparing || view.Phase == HostViewPhase.Sharing));
@@ -505,6 +522,10 @@ namespace Knot.NativePreview
             enrollmentCode.Text = code.Length == 8 ? code.Substring(0, 4) + " " + code.Substring(4) : "";
             enrollmentCode.AccessibleName = code.Length == 8 ? "연결번호 " + string.Join(" ", Array.ConvertAll<char, string>(code.ToCharArray(), delegate(char c) { return c.ToString(); })) : "8자리 일회용 연결번호";
             SetViewVisible(enrollmentCode, view.EnrollmentMode && view.Phase == HostViewPhase.Invitation);
+            bool numberReady = view.EnrollmentMode && view.Phase == HostViewPhase.Invitation;
+            AdapterChoice selected = addresses.SelectedItem as AdapterChoice;
+            hostIdentity.Text = advertisedName + "\r\n" + (selected == null ? "연결 주소 없음" : selected.Address.ToString());
+            SetViewVisible(hostIdentity, numberReady); SetViewVisible(numberLifetime, numberReady);
             SetViewVisible(share, idle); share.Enabled = idle && view.HasAddress && !view.RunPresent;
             SetViewVisible(copy, !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation); copy.Enabled = !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
             SetViewVisible(approve, !view.EnrollmentMode && view.Phase == HostViewPhase.Request); SetViewVisible(decline, !view.EnrollmentMode && view.Phase == HostViewPhase.Request);
@@ -529,6 +550,10 @@ namespace Knot.NativePreview
             fixtureCode = code;
         }
         internal string DisplayedEnrollmentCode { get { return enrollmentCode.Text; } }
+        internal string DisplayedHostIdentity { get { return hostIdentity.Text; } }
+        internal bool FixtureNumberGuidanceVisible { get { return hostIdentity.Visible && numberLifetime.Visible && stateDescription.Text == PreviewCopy.NumberInstruction; } }
+        internal bool FixtureOnboardingVisible { get { return stateDescription.Visible && stateDescription.Text == PreviewCopy.Onboarding; } }
+        internal bool FixtureOnboardingActionFits { get { return !share.Visible || scroll.ClientRectangle.Contains(BoundsWithin(share, scroll)); } }
         internal string DisplayedStatus { get { return status.Text; } }
         internal bool HelpVisible { get { return helpVisible; } }
         internal string DisplayedPin { get { return pin.Text; } }
@@ -570,7 +595,7 @@ namespace Knot.NativePreview
         }
         internal bool FixtureEnrollmentCodeFits
         {
-            get { return !enrollmentCode.Visible || scroll.ClientRectangle.Contains(BoundsWithin(enrollmentCode, scroll)) && enrollmentCode.ClientSize.Height >= enrollmentCode.Font.GetHeight(96f); }
+            get { return !enrollmentCode.Visible || scroll.ClientRectangle.Contains(BoundsWithin(enrollmentCode, scroll)) && enrollmentCode.ClientSize.Height >= enrollmentCode.Font.GetHeight(96f) && scroll.ClientRectangle.Contains(BoundsWithin(hostIdentity, scroll)) && scroll.ClientRectangle.Contains(BoundsWithin(numberLifetime, scroll)); }
         }
         internal void PrepareFixtureLayout()
         {
@@ -628,7 +653,7 @@ namespace Knot.NativePreview
             try
             {
                 HostServer run = new HostServer(selected.Address, 48631, new WindowsMediaFactory(SelectedQuality), new WindowsInputSink(), false, null,
-                    !legacyMode.Checked, System.Diagnostics.Stopwatch.GetTimestamp, null);
+                    !legacyMode.Checked, System.Diagnostics.Stopwatch.GetTimestamp, advertisedName);
                 server = run; presentation.Bind(run.Identity); phase = HostViewPhase.Invitation; invitationAvailable = true;
                 run.StatusChanged = delegate(string text)
                 {

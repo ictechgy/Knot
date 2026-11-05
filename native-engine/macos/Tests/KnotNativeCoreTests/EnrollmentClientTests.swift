@@ -211,6 +211,7 @@ private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecke
         let rejected = NativeFailureEnrollment(failure)
         let model = EnrollmentModel(makeClient: { _, _ in rejected }, initialCandidates: [candidate])
         var authorized = 0
+        model.select(candidate.id)
         model.code = "00001234"
         let operation = try #require(model.connect(name: "Fixture Mac") { _ in authorized += 1 })
         await operation.value
@@ -225,6 +226,7 @@ private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecke
     for failure in [NativeFailure.malformed, .unsupported, .transport] {
         let model = EnrollmentModel(makeClient: { _, _ in throw failure }, initialCandidates: [candidate])
         var authorized = 0
+        model.select(candidate.id)
         model.code = "00001234"
         let operation = model.connect(name: "Fixture Mac") { _ in authorized += 1 }
         #expect(operation == nil && authorized == 0 && model.phase == .failed && model.code.isEmpty)
@@ -245,6 +247,7 @@ private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecke
         makeSocket: { _ in socket }, makeCrypto: { _, _ in crypto })
     let model = EnrollmentModel(makeClient: { _, _ in client }, initialCandidates: [candidate])
     var authorized = 0
+    model.select(candidate.id)
     model.code = "00001234"
     let operation = try #require(model.connect(name: "Fixture Mac") { _ in authorized += 1 })
     await operation.value
@@ -284,6 +287,7 @@ private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecke
     let model = EnrollmentModel(makeDiscovery: { DelayedDiscovery() },
         makeClient: { _, _ in RejectedEnrollment() }, initialCandidates: [candidate])
     var completed = 0
+    model.select(candidate.id)
     for _ in 0..<2 {
         model.code = "00001234"
         let operation = try #require(model.connect(name: "Fixture Mac") { _ in completed += 1 })
@@ -293,4 +297,74 @@ private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecke
     }
     model.cancel()
     #expect(model.candidates.isEmpty && model.selected == nil)
+}
+
+@Test @MainActor func aSoleDiscoveredPCStillRequiresAnExplicitChoiceBeforeConnecting() async throws {
+    let candidate = try testCandidate()
+    let delayed = DelayedDiscovery()
+    let model = EnrollmentModel(makeDiscovery: { delayed }, makeClient: { _, _ in
+        Issue.record("Authentication must not start before an explicit PC choice")
+        throw EnrollmentFailure.cancelled
+    })
+    defer { delayed.finish([]) }
+    let operation = try #require(model.find())
+    let deadline = ContinuousClock.now + .seconds(1)
+    while !delayed.started, ContinuousClock.now < deadline { await Task.yield() }
+    try #require(delayed.started)
+    delayed.finish([candidate]); await operation.value
+    #expect(model.hasSearched && model.candidates == [candidate] && model.selected == nil)
+    model.code = "00001234"
+    #expect(model.connect(name: "Fixture Mac") { _ in Issue.record("No grant expected") } == nil)
+    #expect(model.phase == .idle && model.selected == nil)
+    model.select(candidate.id)
+    #expect(model.selected == candidate && model.code.isEmpty)
+}
+
+@Test @MainActor func returningToPCSelectionClearsTheSecretAndRejectsALateGrant() async throws {
+    let first = try testCandidate(), second = try testCandidate("13")
+    let delayed = DelayedEnrollment()
+    let result = AuthenticatedEnrollment(offer: try EnrollmentOffer(testOffer(first), candidate: first),
+        viewerName: "Fixture Mac", expiresAt: .now + .seconds(30))
+    let model = EnrollmentModel(makeClient: { _, _ in delayed }, initialCandidates: [first, second])
+    defer { delayed.finish(result) }
+    var completed = 0
+    model.select(first.id); model.code = "00001234"
+    let operation = try #require(model.connect(name: "Fixture Mac") { _ in completed += 1 })
+    let deadline = ContinuousClock.now + .seconds(1)
+    while !delayed.started, ContinuousClock.now < deadline { await Task.yield() }
+    try #require(delayed.started)
+    // Even a late continuation ignoring cancellation cannot authorize this PC.
+    model.code = "87654321"; model.changePC()
+    delayed.finish(result); await operation.value
+    #expect(model.hasSearched && model.candidates == [first, second])
+    #expect(model.selected == nil && model.code.isEmpty && model.phase == .idle && completed == 0)
+    model.select(second.id)
+    #expect(model.selected == second && model.code.isEmpty)
+}
+
+@Test @MainActor func emptySearchAndFreshSearchHaveDistinctGuidanceWithoutSelectingAPC() async throws {
+    let delayed = DelayedDiscovery()
+    let model = EnrollmentModel(makeDiscovery: { delayed })
+    #expect(!model.hasSearched && model.selected == nil)
+    let operation = try #require(model.find())
+    defer { delayed.finish([]) }
+    let deadline = ContinuousClock.now + .seconds(1)
+    while !delayed.started, ContinuousClock.now < deadline { await Task.yield() }
+    try #require(delayed.started)
+    delayed.finish([]); await operation.value
+    #expect(model.hasSearched && model.candidates.isEmpty && model.selected == nil)
+    #expect(model.status.contains("찾지 못했어요"))
+    model.cancel()
+    #expect(!model.hasSearched && model.candidates.isEmpty && model.code.isEmpty)
+}
+
+@Test @MainActor func changingPCBeforeSubmittingDiscardsDraftAndRetainsTheList() throws {
+    let candidate = try testCandidate()
+    let model = EnrollmentModel(initialCandidates: [candidate])
+    #expect(model.selected == nil)
+    model.select(candidate.id); model.code = "00001234"
+    model.changePC()
+    #expect(model.hasSearched && model.candidates == [candidate] && model.selected == nil && model.code.isEmpty)
+    model.select(candidate.id)
+    #expect(model.selected == candidate && model.code.isEmpty)
 }

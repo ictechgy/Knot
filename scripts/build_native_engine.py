@@ -20,7 +20,7 @@ sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.7"
+VERSION = "0.1.0-native.8"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -305,10 +305,13 @@ class Builder:
                     row.get("width") != width or row.get("height") != height):
                 raise ValueError("UI fixture image bytes differ from the renderer report")
         required = ({"mac-" + name + ".png" for name in
-                     ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected"]}
+                     ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected",
+                      "searching", "empty", "nearby", "number", "number-working", "number-error",
+                      "nearby-compact", "number-compact", "number-dark", "help-compact"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
                      ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
+                      "short-idle", "short-code", "short-code-compact", "short-help-compact",
                       "short-idle-scale150", "short-idle-scale200"]})
         if not required.issubset(names):
             raise ValueError("UI fixture omitted a required task state")

@@ -1,5 +1,13 @@
 # Native preview changes
 
+## 0.1.0-native.8
+
+- Guide Mac connections through discovery, explicit PC selection and then eight-digit number entry. Never auto-select a sole result or show the number form before selection. Returning to PC selection clears the secret and invalidates pending enrollment work while keeping the list.
+- Add contextual first-connection onboarding, visible progress and focused search/empty/number/retry states. Keep manual address discovery and long legacy invitations in secondary connection methods; guidance remains available without storing onboarding preferences or starting network activity on appearance.
+- Align Windows sharing instructions with the Mac flow, identifying which PC to select and where to enter the number. Keep one primary start action and reachable stop/status controls, and distinguish the short-number path from legacy approval.
+- Preserve the existing PAKE/TLS trust boundaries, one-use deadlines, input revocation and fullscreen desktop lifecycle. New UI fixtures and enrollment regressions use fresh synthetic data; real-device usability remains a separate check.
+- Advance installers to `0.1.0-native.8`, numeric PE version `0.1.0.8` and Mac bundle revision `8`.
+
 ## 0.1.0-native.7
 
 - Fit Windows monitor decoration through one shared canvas, preserving its proportions and centering the four square panes inside the screen. Clip decoration and repaint after resize/DPI changes. Add36 production-paint bitmap checks and150%/200% short-number idle scenes; physical per-monitor transitions remain untested.
