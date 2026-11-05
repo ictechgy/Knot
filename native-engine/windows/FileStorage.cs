@@ -99,7 +99,14 @@ namespace Knot.NativePreview
                     int error = Marshal.GetLastWin32Error(); result.Dispose();
                     throw new FileTransferException("denied", "file-open", error);
                 }
-                return result;
+                try
+                {
+                    // Filesystems must enforce the descriptor, not merely accept
+                    // its pointer. No observer, stream, marker or bytes exist yet.
+                    if (!IsReceiverPrivate(ReadSecurityDescriptor(result), user)) throw new FileTransferException("denied");
+                    return result;
+                }
+                catch { DeleteOwned(result); result.Dispose(); throw; }
             }
             finally
             {
@@ -109,6 +116,77 @@ namespace Knot.NativePreview
         }
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern bool GetFileInformationByHandle(SafeFileHandle handle, out Information info);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        private static extern bool GetVolumeInformationByHandleW(SafeFileHandle handle, StringBuilder volumeName, uint volumeNameLength,
+            out uint serial, out uint maximumComponentLength, out uint flags, StringBuilder filesystemName, uint filesystemNameLength);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint GetSecurityInfo(SafeFileHandle handle, int kind, uint requested,
+            out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+        internal static bool HasPersistentAcls(uint flags) { return (flags & 0x00000008u) != 0; }
+        // Only this app-owned stream is addressable. Resolve the already owned
+        // base handle, then prove the native ADS handle is the same file before
+        // writing anything; never feed an ADS path through BCL path parsing.
+        internal static SafeFileHandle ZoneStream(SafeFileHandle basis, uint access, bool create)
+        {
+            bool retained = false;
+            try
+            {
+                basis.DangerousAddRef(ref retained);
+                Information original = Info(basis, false);
+                string path = FinalPath(basis) + ":Zone.Identifier";
+                SafeFileHandle stream = CreateFile(path, access | 0x80u, FileShare.ReadWrite, IntPtr.Zero,
+                    create ? 1u : 3u, OpenReparse, IntPtr.Zero);
+                try
+                {
+                    Information actual = Info(stream, false);
+                    if (actual.VolumeSerialNumber != original.VolumeSerialNumber || actual.FileIndexHigh != original.FileIndexHigh ||
+                        actual.FileIndexLow != original.FileIndexLow) throw new FileTransferException("denied", "file-info", 0);
+                    return stream;
+                }
+                catch { stream.Dispose(); throw; }
+            }
+            finally { if (retained) basis.DangerousRelease(); }
+        }
+        internal static uint VolumeFlags(SafeFileHandle directory)
+        {
+            uint serial, component, flags;
+            if (!GetVolumeInformationByHandleW(directory, null, 0, out serial, out component, out flags, null, 0))
+                throw new FileTransferException("denied", "file-info", Marshal.GetLastWin32Error());
+            return flags;
+        }
+        internal static byte[] ReadSecurityDescriptor(SafeFileHandle handle)
+        {
+            IntPtr owner, group, dacl, sacl, descriptor;
+            uint error = GetSecurityInfo(handle, 1, 5, out owner, out group, out dacl, out sacl, out descriptor);
+            try
+            {
+                if (error != 0 || descriptor == IntPtr.Zero) throw new FileTransferException("denied");
+                uint size = GetSecurityDescriptorLength(descriptor);
+                if (size == 0 || size > 65536) throw new FileTransferException("denied");
+                byte[] result = new byte[(int)size]; Marshal.Copy(descriptor, result, 0, result.Length); return result;
+            }
+            finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+        }
+        internal static bool IsReceiverPrivate(byte[] descriptor, SecurityIdentifier receiver)
+        {
+            if (descriptor == null || descriptor.Length == 0 || descriptor.Length > 65536 || receiver == null) return false;
+            try
+            {
+                RawSecurityDescriptor security = new RawSecurityDescriptor(descriptor, 0);
+                if (security.Owner == null || !security.Owner.Equals(receiver) ||
+                    (security.ControlFlags & (ControlFlags.DiscretionaryAclPresent | ControlFlags.DiscretionaryAclProtected)) !=
+                        (ControlFlags.DiscretionaryAclPresent | ControlFlags.DiscretionaryAclProtected) ||
+                    security.DiscretionaryAcl == null || security.DiscretionaryAcl.Count != 1) return false;
+                CommonAce ace = security.DiscretionaryAcl[0] as CommonAce;
+                return ace != null && ace.AceQualifier == AceQualifier.AccessAllowed && ace.SecurityIdentifier.Equals(receiver) &&
+                    ace.AceFlags == AceFlags.None && ace.AccessMask == (int)FileSystemRights.FullControl;
+            }
+            catch (ArgumentException) { return false; }
+        }
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern uint GetFileType(SafeFileHandle handle);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -184,6 +262,7 @@ namespace Knot.NativePreview
     {
         private readonly FileSharingOptions options;
         private readonly SafeFileHandle directory;
+        internal readonly uint VolumeFlags;
         internal FileSharedRoot(FileSharingOptions options)
         {
             if (options == null) throw new ArgumentNullException("options");
@@ -199,7 +278,12 @@ namespace Knot.NativePreview
                 Directory.CreateDirectory(options.RootPath, acl);
             }
             directory = FileNative.CreateFile(options.RootPath, 0x100083, FileShare.ReadWrite, IntPtr.Zero, 3, FileNative.Backup | FileNative.OpenReparse, IntPtr.Zero);
-            try { FileNative.Info(directory, true); FileNative.FinalPath(directory); }
+            try
+            {
+                FileNative.Info(directory, true); FileNative.FinalPath(directory);
+                VolumeFlags = FileNative.VolumeFlags(directory);
+                if (!FileNative.HasPersistentAcls(VolumeFlags)) throw new FileTransferException("denied");
+            }
             catch { directory.Dispose(); throw; }
         }
         internal FileStream OpenRead(string name, out FileHandleInfo info)
@@ -278,8 +362,10 @@ namespace Knot.NativePreview
                 if (firstHandle != null) firstHandle(handle);
                 FileNative.Info(handle, false); root.Contained(handle, temporaryName);
                 Stream = new FileStream(handle, FileAccess.ReadWrite, FileProtocol.ChunkSize, false);
-                // ADS belongs to our fresh exclusive partial, not a peer-supplied path.
-                using (FileStream marker = new FileStream(temporary + ":Zone.Identifier", FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite))
+                // The stream suffix is owned by the app, its base file identity
+                // is checked before writing, and it is durable before acceptance.
+                using (SafeFileHandle markerHandle = FileNative.ZoneStream(handle, FileNative.Write, true))
+                using (FileStream marker = new FileStream(markerHandle, FileAccess.Write, 1024, false))
                 {
                     byte[] bytes = Encoding.ASCII.GetBytes("[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=knot-native://transfer\r\n");
                     marker.Write(bytes, 0, bytes.Length); marker.Flush(true);

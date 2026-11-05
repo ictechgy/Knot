@@ -39,7 +39,7 @@ Normal Windows execution needs no elevation. OS private-network/application-cont
 
 ## Files while connected
 
-Windows shows the shared folder before sharing; the default is `Downloads/Knot Files`. Start sharing authorizes the displayed screen/input and enabled file-folder scope. You can choose another folder or disable files before starting. Only regular files directly inside this folder are listed; put Windows files there, or select their containing folder before sharing.
+Windows shows the shared folder before sharing; the default is `Downloads/Knot Files`. Start sharing authorizes the displayed screen/input and enabled file-folder scope. You can choose another folder or disable files before starting. The folder must support persistent Windows file permissions and Mark of the Web; failed security checks make files unavailable while screen sharing remains active. Only regular files directly inside this folder are listed; put Windows files there, or select their containing folder before sharing.
 
 On Mac, open **파일** in the connected controls. Send using the file picker, or drop Finder files onto the remote viewer/file panel: the destination is the displayed Windows shared folder, regardless of the Explorer folder under the pointer. Receive with the destination picker, or drag a file row from this panel into Finder. These are file copies; sources are never removed. Dragging arbitrary Windows Explorer items directly out of the video is not an implemented OS drag bridge.
 

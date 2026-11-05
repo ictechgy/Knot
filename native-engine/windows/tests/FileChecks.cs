@@ -117,6 +117,37 @@ namespace Knot.NativePreview
         private static void FileStorageChecks()
         {
             ++fileFixtures;
+            Check(!FileNative.HasPersistentAcls(0) && !FileNative.HasPersistentAcls(0x00040007));
+            Check(FileNative.HasPersistentAcls(8) && FileNative.HasPersistentAcls(0xffffffff));
+            SecurityIdentifier receiver;
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent()) receiver = identity.User;
+            Check(receiver != null);
+            FileSecurity privateAcl = new FileSecurity(); privateAcl.SetOwner(receiver); privateAcl.SetAccessRuleProtection(true, false);
+            privateAcl.AddAccessRule(new FileSystemAccessRule(receiver, FileSystemRights.FullControl, AccessControlType.Allow));
+            byte[] validAcl = privateAcl.GetSecurityDescriptorBinaryForm(); Check(FileNative.IsReceiverPrivate(validAcl, receiver));
+            Check(!FileNative.IsReceiverPrivate(null, receiver) && !FileNative.IsReceiverPrivate(new byte[1], receiver));
+            Check(!FileNative.IsReceiverPrivate(validAcl, null));
+            RawSecurityDescriptor changed = new RawSecurityDescriptor(validAcl, 0);
+            changed.SetFlags(changed.ControlFlags & ~ControlFlags.DiscretionaryAclProtected);
+            Check(!FileNative.IsReceiverPrivate(FileDescriptorBytes(changed), receiver));
+            changed = new RawSecurityDescriptor(validAcl, 0); changed.Owner = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            Check(!FileNative.IsReceiverPrivate(FileDescriptorBytes(changed), receiver));
+            changed = new RawSecurityDescriptor(validAcl, 0);
+            changed.DiscretionaryAcl.InsertAce(1, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, (int)FileSystemRights.FullControl,
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null), false, null));
+            Check(!FileNative.IsReceiverPrivate(FileDescriptorBytes(changed), receiver));
+            changed = new RawSecurityDescriptor(validAcl, 0);
+            changed.DiscretionaryAcl[0] = new CommonAce(AceFlags.Inherited, AceQualifier.AccessAllowed, (int)FileSystemRights.FullControl, receiver, false, null);
+            Check(!FileNative.IsReceiverPrivate(FileDescriptorBytes(changed), receiver));
+            changed = new RawSecurityDescriptor(validAcl, 0);
+            changed.DiscretionaryAcl[0] = new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, (int)FileSystemRights.FullControl,
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null), false, null);
+            Check(!FileNative.IsReceiverPrivate(FileDescriptorBytes(changed), receiver));
+            changed = new RawSecurityDescriptor(validAcl, 0);
+            changed.DiscretionaryAcl[0] = new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, (int)FileSystemRights.ReadData, receiver, false, null);
+            Check(!FileNative.IsReceiverPrivate(FileDescriptorBytes(changed), receiver));
+            changed = new RawSecurityDescriptor(validAcl, 0); changed.DiscretionaryAcl = null;
+            Check(!FileNative.IsReceiverPrivate(FileDescriptorBytes(changed), receiver));
             using (OwnedFileDirectory temp = new OwnedFileDirectory())
             {
                 // The test's fresh shared root intentionally grants inherited
@@ -134,17 +165,30 @@ namespace Knot.NativePreview
                 byte[] parentSecurity = Directory.GetAccessControl(temp.PathValue).GetSecurityDescriptorBinaryForm();
                 using (FileSharedRoot root = new FileSharedRoot(new FileSharingOptions(temp.PathValue)))
                 {
+                Check(FileNative.HasPersistentAcls(root.VolumeFlags));
                 byte[] bytes = Bytes("fresh synthetic bytes");
                 string name; bool earliestChecked = false;
-                using (FilePartial partial = root.CreatePartial(bytes.Length, delegate(SafeFileHandle handle) { CheckEarliestPrivateHandle(handle); earliestChecked = true; }))
+                stage = "file-storage-create-private";
+                using (FilePartial partial = root.CreatePartial(bytes.Length, delegate(SafeFileHandle handle) {
+                    stage = "file-storage-earliest-handle"; CheckEarliestPrivateHandle(handle); earliestChecked = true;
+                    stage = "file-storage-stream-and-motw";
+                }))
                 {
+                    stage = "file-storage-write-publish";
                     Check(earliestChecked);
                     partial.Stream.Write(bytes, 0, bytes.Length); partial.PreparePublication(); name = partial.Publish("a");
                 }
                 Check(NativeProtocol.Equal(parentSecurity, Directory.GetAccessControl(temp.PathValue).GetSecurityDescriptorBinaryForm()));
                 Check(name == "a" && NativeProtocol.Equal(File.ReadAllBytes(Path.Combine(temp.PathValue, name)), bytes));
                 Check((File.GetAttributes(Path.Combine(temp.PathValue, name)) & (FileAttributes.Hidden | FileAttributes.Temporary)) == 0);
-                Check(File.ReadAllText(Path.Combine(temp.PathValue, name) + ":Zone.Identifier").Contains("ZoneId=3"));
+                stage = "file-storage-read-native-motw";
+                using (SafeFileHandle basis = FileNative.CreateFile(Path.Combine(temp.PathValue, name), FileNative.Read,
+                    FileShare.ReadWrite, IntPtr.Zero, 3, FileNative.OpenReparse, IntPtr.Zero))
+                using (SafeFileHandle markerHandle = FileNative.ZoneStream(basis, FileNative.Read, false))
+                using (FileStream marker = new FileStream(markerHandle, FileAccess.Read, 1024, false))
+                using (StreamReader reader = new StreamReader(marker, Encoding.ASCII))
+                { Check(marker.Length > 0 && marker.Length <= 4096); Check(reader.ReadToEnd().Contains("ZoneId=3")); }
+                stage = "file-storage-collision-cleanup";
                 using (FilePartial partial = root.CreatePartial(0)) { partial.PreparePublication(); name = partial.Publish("a"); }
                 Check(name == "a (1)" && File.ReadAllBytes(Path.Combine(temp.PathValue, "a")).Length == bytes.Length);
                 using (FilePartial partial = root.CreatePartial(3)) partial.Stream.WriteByte(1);
@@ -159,6 +203,8 @@ namespace Knot.NativePreview
                 }
             }
         }
+        private static byte[] FileDescriptorBytes(RawSecurityDescriptor descriptor)
+        { byte[] bytes = new byte[descriptor.BinaryLength]; descriptor.GetBinaryForm(bytes, 0); return bytes; }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool CreateHardLink(string target, string source, IntPtr reserved);
         [DllImport("kernel32.dll", SetLastError = true)]

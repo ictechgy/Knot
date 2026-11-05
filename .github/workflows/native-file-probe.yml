@@ -1,0 +1,59 @@
+name: Probe native file protocol and filesystem
+on:
+  push:
+    branches: ['knot-native-engine-*']
+    paths:
+      - 'native-engine/windows/**'
+      - '.github/workflows/native-file-probe.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-file-probe-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  managed-file-probe:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Compile and run only owned synthetic managed file fixtures
+        shell: pwsh
+        run: |
+          @'
+          import hashlib, json, os, subprocess
+          from datetime import datetime, timezone
+          from pathlib import Path
+          root = Path.cwd()
+          output = root / 'build/native-file-probe'
+          output.mkdir(parents=True, exist_ok=False)
+          compiler = Path(os.environ['SystemRoot']) / 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          references = Path(os.environ['ProgramFiles(x86)']) / 'Reference Assemblies/Microsoft/Framework/.NETFramework/v4.8'
+          sources = sorted((root / 'native-engine/windows').glob('*.cs')) + sorted((root / 'native-engine/windows/tests').glob('*.cs'))
+          executable = output / 'KnotNativeFileProbe.exe'
+          args = [str(compiler), '/nologo', '/noconfig', '/nostdlib+', '/langversion:5', '/platform:x64', '/optimize+', '/target:exe', '/main:Knot.NativePreview.NativeFileProbe', '/out:' + str(executable)]
+          args += ['/reference:' + str(references / (name + '.dll')) for name in ['mscorlib', 'System', 'System.Core', 'System.Security', 'System.Drawing', 'System.Windows.Forms']]
+          args += list(map(str, sources))
+          records = []
+          for label, argv in [('compile', args), ('probe', [str(executable), '--output', str(output / 'results')])]:
+              started = datetime.now(timezone.utc).isoformat()
+              result = subprocess.run(argv, cwd=root, capture_output=True, timeout=360)
+              (output / (label + '.stdout')).write_bytes(result.stdout)
+              (output / (label + '.stderr')).write_bytes(result.stderr)
+              records.append(dict(label=label, argv=argv, exitCode=result.returncode, startedUTC=started, endedUTC=datetime.now(timezone.utc).isoformat(), stdoutSHA256=hashlib.sha256(result.stdout).hexdigest(), stderrSHA256=hashlib.sha256(result.stderr).hexdigest()))
+              (output / 'invocations.json').write_text(json.dumps(dict(schema=1, head=os.environ['GITHUB_SHA'], scope='Partial managed file diagnostic only; no native pairing library, codec or complete-build acceptance', sourceManifest={p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}, commands=records), indent=2) + '\n')
+              print(label, result.returncode, flush=True)
+              print(result.stdout.decode('utf-8-sig', errors='replace'), flush=True)
+              print(result.stderr.decode('utf-8-sig', errors='replace'), flush=True)
+              if result.returncode:
+                  raise SystemExit(result.returncode)
+          '@ | python -
+      - name: Preserve this fresh probe's evidence only
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: native-managed-file-probe
+          path: build/native-file-probe/
+          if-no-files-found: error
