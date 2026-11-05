@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace Knot.NativePreview
@@ -196,6 +197,14 @@ namespace Knot.NativePreview
         private static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder path, uint length, uint flags);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, IntPtr data, uint length);
+        [DllImport("ntdll.dll", ExactSpelling = true)]
+        private static extern int NtSetInformationFile(SafeFileHandle handle, IntPtr ioStatus, IntPtr information, uint length, int kind);
+        [DllImport("ntdll.dll", ExactSpelling = true)]
+        private static extern uint RtlNtStatusToDosError(int status);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(SafeFileHandle handle, uint milliseconds);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CancelIoEx(SafeFileHandle handle, IntPtr overlapped);
         internal static string FinalPath(SafeFileHandle handle)
         {
             StringBuilder result = new StringBuilder(1024);
@@ -226,20 +235,57 @@ namespace Knot.NativePreview
             byte[] text = Encoding.Unicode.GetBytes(name);
             int bufferSize = RenameBufferSize(text.Length);
             IntPtr memory = Marshal.AllocHGlobal(bufferSize);
-            bool directoryReference = false;
+            IntPtr ioStatus = IntPtr.Zero;
+            bool directoryReference = false, sourceReference = false;
             try
             {
                 directory.DangerousAddRef(ref directoryReference);
+                source.DangerousAddRef(ref sourceReference);
                 for (int i = 0; i < bufferSize; ++i) Marshal.WriteByte(memory, i, 0);
                 Marshal.WriteIntPtr(memory, 8, directory.DangerousGetHandle());
                 Marshal.WriteInt32(memory, 16, text.Length); Marshal.Copy(text, 0, IntPtr.Add(memory, 20), text.Length);
-                if (SetFileInformationByHandle(source, 3, memory, (uint)bufferSize)) return true;
-                int error = Marshal.GetLastWin32Error();
+                // IO_STATUS_BLOCK is a pointer-sized union plus ULONG_PTR:16B
+                // on this x64-only path. Keep both native buffers and handles
+                // alive until a pending operation's actual completion status.
+                ioStatus = Marshal.AllocHGlobal(16);
+                for (int i = 0; i < 16; ++i) Marshal.WriteByte(ioStatus, i, 0);
+                Marshal.WriteInt32(ioStatus, 0, 0x103);
+                int status = NtSetInformationFile(source, ioStatus, memory, (uint)bufferSize, 10);
+                int completion = Marshal.ReadInt32(ioStatus, 0);
+                if (status == 0x103)
+                {
+                    // CREATE_NEW did not request OVERLAPPED, so the source is
+                    // synchronous. Still never free an IOSB or name buffer if a
+                    // driver reports STATUS_PENDING rather than final status.
+                    for (;;)
+                    {
+                        uint waited = WaitForSingleObject(source, 1000);
+                        Thread.MemoryBarrier(); completion = Marshal.ReadInt32(ioStatus, 0);
+                        if (waited == 0 && completion != 0x103) break;
+                        if (waited == 0xffffffff) CancelIoEx(source, IntPtr.Zero);
+                        // Require both the completion signal and final IOSB,
+                        // including when IOSB changed before the first wait.
+                        // Neither observation alone releases native storage.
+                        if (waited != 0x102) Thread.Sleep(1);
+                    }
+                }
+                if (RenameSucceeded(status, completion)) return true;
+                // A non-pending return is authoritative; IOSB status is used
+                // only after the STATUS_PENDING path has actually completed.
+                int failedStatus = status == 0x103 ? completion : status;
+                int error = unchecked((int)RtlNtStatusToDosError(failedStatus));
                 if (error == 80 || error == 183) return false;
-                throw new FileTransferException(error == 5 ? "denied" : "io", "file-rename", error);
+                throw new FileTransferException(error == 5 ? "denied" : "io", "file-rename", error, status, completion);
             }
-            finally { if (directoryReference) directory.DangerousRelease(); Marshal.FreeHGlobal(memory); }
+            finally
+            {
+                if (ioStatus != IntPtr.Zero) Marshal.FreeHGlobal(ioStatus);
+                if (sourceReference) source.DangerousRelease();
+                if (directoryReference) directory.DangerousRelease(); Marshal.FreeHGlobal(memory);
+            }
         }
+        internal static bool RenameSucceeded(int status, int completion)
+        { return (status == 0x103 ? completion : status) == 0; }
         internal static int RenameBufferSize(int nameBytes)
         {
             if (nameBytes < 2 || nameBytes > 510 || nameBytes % 2 != 0) throw new FileTransferException("protocol");

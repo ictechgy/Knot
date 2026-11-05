@@ -44,6 +44,8 @@ namespace Knot.NativePreview
             {
                 FileTransferException file = failure as FileTransferException;
                 string diagnostic = file == null ? "" : ",\"fileApiCategory\":" + StrictJson.Quote(file.Operation) + ",\"fileNativeError\":" + file.NativeError;
+                if (file != null && file.NativeNtStatus.HasValue && file.NativeIoStatus.HasValue)
+                    diagnostic += ",\"fileNtStatus\":" + file.NativeNtStatus.Value + ",\"fileIoStatus\":" + file.NativeIoStatus.Value;
                 Console.WriteLine("{\"status\":\"failed\",\"probeOnly\":true,\"freshSyntheticOnly\":true," +
                     "\"actualCapture\":false,\"actualSendInput\":false,\"stage\":" + StrictJson.Quote(stage) +
                     ",\"exceptionType\":" + StrictJson.Quote(failure.GetType().FullName) +

@@ -12,6 +12,8 @@ The file listener binds the selected Windows address on48634 and reuses the curr
 
 The capability exists only for the active media session; each explicit file operation can establish a new pinned TLS connection. At most one file connection/operation is admitted, with a bounded10second TLS/auth budget and30second absolute per-packet/progress budget. Reject other peers before expensive work. Stop closes listener/current socket and revokes the token. A file-only cancel/error closes that file connection, cleans its owned partial and leaves media running. No persistent file trust or automatic replay.
 
+These network budgets do not preempt a wedged OS disk call. Synchronous publication and any native pending completion retain their handles/buffers and the publication gate until the OS reports completion; this in-process slice does not guarantee bounded stop latency in that condition. Stronger hard isolation is outside this preview's acceptance scope.
+
 ## File envelope and exact schemas
 
 Every file packet is `u8 kind + u32BE payloadLength + payload`. These types and limits are independent of the media packet enum and4096-byte media send limit. Metadata JSON is strict UTF-8, scalar values, exact keys; sizes are signed64-bit integers bounded0..8,589,934,592. Controls1..4096bytes except the empty ListRequest; Error1..128. Reject invalid lengths before allocation.

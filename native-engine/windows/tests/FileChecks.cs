@@ -49,6 +49,10 @@ namespace Knot.NativePreview
             foreach (string invalid in new string[] { "", ".", "..", "../x", "a/b", "a\\b", "a:b", "file.", "file ", "CON", "nul.txt", "COM1.log", "Lpt².txt", ".knot-owned.part", "bad\0name", "a\nname", "invisible\u200bname", "line\u2028name", "<bad>", "a?b", "a*b", "a|b", "quote\"", new string('a', 256) }) FileReject(delegate { FileProtocol.ValidName(invalid); });
             FileProtocol.ValidName(new string('a', 255)); Check(true);
             Check(FileNative.RenameBufferSize(2) == 28 && FileNative.RenameBufferSize(510) == 536);
+            Check(FileNative.RenameSucceeded(0, 0) && FileNative.RenameSucceeded(0x103, 0));
+            Check(!FileNative.RenameSucceeded(0x103, 0x103) && FileNative.RenameSucceeded(0, 0x103));
+            Check(FileNative.RenameSucceeded(0, unchecked((int)0xc0000035u)));
+            Check(!FileNative.RenameSucceeded(unchecked((int)0xc0000035u), 0) && !FileNative.RenameSucceeded(1, 0));
             foreach (int invalidSize in new int[] { -1, 0, 1, 511, 512, int.MaxValue }) FileReject(delegate { FileNative.RenameBufferSize(invalidSize); });
             foreach (byte kind in new byte[] { 0x40, 0x41, 0x43, 0x44, 0x45, 0x46, 0x47, 0x4a })
             {

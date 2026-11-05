@@ -13,6 +13,7 @@ namespace Knot.NativePreview
         internal readonly string Code;
         internal readonly string Operation;
         internal readonly int NativeError;
+        internal readonly int? NativeNtStatus, NativeIoStatus;
         internal FileTransferException(string code) : this(code, "", 0) { }
         internal FileTransferException(string code, string operation, int nativeError) : base(code)
         {
@@ -20,6 +21,8 @@ namespace Knot.NativePreview
             Operation = operation == "file-open" || operation == "file-info" || operation == "file-path" || operation == "file-rename" || operation == "file-basic" ? operation : "";
             NativeError = nativeError;
         }
+        internal FileTransferException(string code, string operation, int nativeError, int ntStatus, int ioStatus)
+            : this(code, operation, nativeError) { NativeNtStatus = ntStatus; NativeIoStatus = ioStatus; }
     }
 
     internal sealed class FilePacket
