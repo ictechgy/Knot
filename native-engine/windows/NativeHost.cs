@@ -23,6 +23,10 @@ namespace Knot.NativePreview
         private readonly Func<long> clock;
         private readonly Func<long> inputClock;
         private readonly EnrollmentServer enrollment;
+        private readonly FileSharingOptions fileOptions;
+        private FileServer files;
+        private bool enrollmentAllowsFiles, claimedFiles;
+        private IPAddress claimedPeer;
         private Invitation enrollmentInvitation;
         private int enrollmentGrantsIssued;
         private string enrollmentName;
@@ -44,6 +48,7 @@ namespace Knot.NativePreview
         internal Action<ApprovalMetadata> ApprovalRequested;
         internal Action<ApprovalMetadata> ClaimAccepted;
         internal Action Finished;
+        internal Action<string> FileStatusChanged;
         internal int Port { get { return port; } }
         internal string Pin { get { return Identity.Pin; } }
         internal string OwnedKeyContainerName { get { return certificate.OwnedKeyContainerName; } }
@@ -59,13 +64,15 @@ namespace Knot.NativePreview
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback, Invitation invitation)
             : this(address, port, mediaFactory, inputSink, syntheticLoopback, invitation, false, Stopwatch.GetTimestamp, null) { }
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback,
-                            Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null)
+                            Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null,
+                            FileSharingOptions files = null)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
             this.address = address; this.syntheticLoopback = syntheticLoopback;
             this.enrollmentMode = enrollmentMode; this.clock = clock ?? new Func<long>(Stopwatch.GetTimestamp);
             this.inputClock = inputClock ?? new Func<long>(Stopwatch.GetTimestamp);
+            fileOptions = files;
             this.mediaFactory = mediaFactory; this.inputSink = inputSink;
             this.invitation = invitation ?? new Invitation(this.clock);
             certificate = new RunCertificate();
@@ -80,7 +87,8 @@ namespace Knot.NativePreview
                     string name = deviceName ?? Environment.MachineName;
                     try { EnrollmentProtocol.ValidName(name); } catch (ProtocolException) { name = "Windows PC"; }
                     enrollment = new EnrollmentServer(address, name, syntheticLoopback, this.clock,
-                        IssueEnrollmentGrant, delegate(EnrollmentFailure failure) { Notify(EnrollmentGuidance.For(failure)); Stop(); }, Notify);
+                        IssueEnrollmentGrant, delegate(EnrollmentFailure failure) { Notify(EnrollmentGuidance.For(failure)); Stop(); }, Notify,
+                        issueWithFiles: IssueEnrollmentGrantWithFiles);
                 }
             }
             catch { try { listener.Stop(); } catch { } certificate.Dispose(); throw; }
@@ -97,6 +105,8 @@ namespace Knot.NativePreview
             }
         }
         private EnrollmentGrant IssueEnrollmentGrant(byte[] slot, string name, IPAddress peer)
+        { return IssueEnrollmentGrantWithFiles(slot, name, peer, false); }
+        private EnrollmentGrant IssueEnrollmentGrantWithFiles(byte[] slot, string name, IPAddress peer, bool wantsFiles)
         {
             EnrollmentGrant result;
             lock (gate)
@@ -119,6 +129,7 @@ namespace Knot.NativePreview
                     result = new EnrollmentGrant(slot, grantId, encoded, remaining);
                     // A new capability, never the fallback T1, owns this one pregrant.
                     invitation.Revoke(); enrollmentInvitation = grant; enrollmentName = name; enrollmentPeer = peer;
+                    enrollmentAllowsFiles = wantsFiles && fileOptions != null;
                     ++enrollmentGrantsIssued;
                 }
                 catch { grant.Revoke(); throw; }
@@ -183,13 +194,28 @@ namespace Knot.NativePreview
                     Notify("Approved. Initializing the primary SDR display and hardware encoder.");
                     media = mediaFactory.Open(); // create/read/close all stay on this MTA writer.
                     byte[] ready = media.Info.Ready();
+                    FileServer preparedFiles = null;
+                    if (claimedFiles)
+                    {
+                        try { preparedFiles = new FileServer(address, claimedPeer, certificate.Certificate, fileOptions, gate, delegate { return active && !isStopped; }); }
+                        catch (Exception)
+                        {
+                            Action<string> fileStatus = FileStatusChanged;
+                            if (fileStatus != null) fileStatus("파일 공유 폴더를 준비하지 못했어요. 화면 연결은 계속 사용할 수 있어요.");
+                        }
+                    }
                     lock (gate)
                     {
-                        if (isStopped) return;
+                        if (isStopped) { if (preparedFiles != null) preparedFiles.Dispose(); return; }
                         input = new InputSession(inputSink, media.Info.Rectangle);
+                        files = preparedFiles;
+                        // File authorization cannot race delivery of its offer.
+                        // A failed Ready write reaches Stop and revokes both.
+                        active = true;
                     }
+                    if (preparedFiles != null) { preparedFiles.Start(); ready = FileProtocol.WithOffer(ready, preparedFiles.Token, preparedFiles.RootName); }
                     NativeProtocol.Write(tls, 2, ready);
-                    lock (gate) { if (isStopped) return; active = true; }
+                    lock (gate) { if (isStopped) return; }
                     Notify("Sharing with claimed viewer label (UNVERIFIED): " + peerName + ". Stop revokes this temporary session.");
                     Interlocked.Exchange(ref lastRead, inputClock());
                     watchdog = new Timer(delegate
@@ -248,6 +274,7 @@ namespace Knot.NativePreview
                     try { if (enrollment != null) enrollment.Dispose(); }
                     finally
                     {
+                        if (files != null) files.Dispose();
                         certificate.Dispose();
                         workerDone.Set();
                         Action finished = Finished; if (finished != null) finished();
@@ -312,7 +339,8 @@ namespace Knot.NativePreview
                     tls.AuthenticateAsServer(certificate.Certificate, false, SslProtocols.Tls12, false);
                     Packet hello = NativeProtocol.ReadClient(tls, true);
                     byte[] candidate;
-                    string name = NativeProtocol.HelloName(hello.Payload, out candidate);
+                    bool wantsFiles;
+                    string name = NativeProtocol.HelloName(hello.Payload, out candidate, out wantsFiles);
                     try
                     {
                         lock (gate)
@@ -328,6 +356,8 @@ namespace Knot.NativePreview
                     {
                         if (isStopped) return false;
                         isClaimed = true; peerName = name; claimed = true;
+                        claimedPeer = observedRemote;
+                        claimedFiles = fileOptions != null && wantsFiles && (!enrollmentMode || enrollmentAllowsFiles);
                         approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
                         if (enrollmentMode) { approved = true; approval.Set(); }
                     }
@@ -399,16 +429,18 @@ namespace Knot.NativePreview
         {
             InputSession ownedInput;
             TcpClient ownedClient;
+            FileServer ownedFiles;
             lock (gate)
             {
                 if (isStopped) return;
                 isStopped = true; active = false;
                 invitation.Revoke(); stopped.Set(); approval.Set();
                 if (enrollmentInvitation != null) enrollmentInvitation.Revoke();
-                ownedInput = input; ownedClient = client;
+                ownedInput = input; ownedClient = client; ownedFiles = files;
             }
             try { listener.Stop(); } catch { }
             if (enrollment != null) enrollment.Stop();
+            if (ownedFiles != null) ownedFiles.Stop();
             // Closing the socket interrupts TLS reads/writes and their bounded budgets.
             try { if (ownedClient != null) ownedClient.Close(); } catch { }
             if (ownedInput != null) ownedInput.Close();

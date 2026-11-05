@@ -14,6 +14,7 @@ struct PreviewWindow: View {
     // Only the separately compiled synthetic renderer supplies these values.
     var simulatedDesktop: AnyView? = nil
     var simulatedFullscreen: Bool? = nil
+    var simulatedFiles: FileTransferModel? = nil
     @StateObject private var windowState: NativeWindowState
     @StateObject private var enrollment: EnrollmentModel
     @State private var secret = ""
@@ -21,16 +22,20 @@ struct PreviewWindow: View {
     @State private var showingOptions = false
     @State private var showingLegacy = false
     @State private var showingAlternatives = false
+    @State private var showingFiles = false
+    @StateObject private var filePromises = NativeFilePromiseOwner()
     @FocusState private var codeFocused: Bool
     @State private var activeTarget: NativeTarget?
 
-    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil) {
+    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false) {
         self.model = model
         _windowState = StateObject(wrappedValue: windowState ?? NativeWindowState())
         _enrollment = StateObject(wrappedValue: enrollment ?? EnrollmentModel())
         _showingAlternatives = State(initialValue: initialManualAddress)
         self.simulatedDesktop = simulatedDesktop
         self.simulatedFullscreen = simulatedFullscreen
+        self.simulatedFiles = simulatedFiles
+        _showingFiles = State(initialValue: initialFiles)
         _showingHelp = State(initialValue: initialHelp)
         _showingOptions = State(initialValue: model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters.")
     }
@@ -69,14 +74,14 @@ struct PreviewWindow: View {
             .onChange(of: windowState.isFullscreen) { _, _ in
                 model.showFullscreenControls = false; model.releaseInput()
             }
-            .onAppear { windowState.bindSession(model, enrollment: enrollment) }
+            .onAppear { windowState.bindSession(model, enrollment: enrollment); if showingFiles { model.setFileUIInputSuspended(true) } }
             .onDisappear { enrollment.cancel(); secret = "" }
             .onChange(of: enrollment.selectedID) { _, selected in
                 codeFocused = selected != nil
             }
             .onChange(of: model.active) { _, active in
                 enrollment.cancel()
-                if !active { activeTarget = nil }
+                if !active { activeTarget = nil; setFilesVisible(false) }
             }
     }
 
@@ -289,7 +294,7 @@ struct PreviewWindow: View {
                         .disabled((try? EnrollmentWire.password(enrollment.code)) == nil)
                 }
             }
-            Text("이름·주소는 인증 전 정보예요. 번호를 아는 Mac 한 대에 이번 화면·입력 연결만 허용돼요. 번호가 만료됐다면 Windows에서 공유를 다시 시작하세요.")
+            Text("이름·주소는 인증 전 정보예요. 번호를 아는 Mac 한 대에 Windows에 표시한 공유 범위가 허용돼요. 번호가 만료됐다면 Windows에서 공유를 다시 시작하세요.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.padding(26).nativePanel()
     }
@@ -430,7 +435,8 @@ struct PreviewWindow: View {
             VStack(alignment: .leading, spacing: 14) {
                 Label("이번 미리보기에서", systemImage: "info.circle").font(.system(size: 15, weight: .semibold))
                 Text("로그인된 Windows 11의 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요. Mac은 Apple Silicon · macOS 26 이상을 지원해요.")
-                Text("파일·오디오·무모니터·잠금/UAC 화면·HDR·다중 모니터·자동 재연결/업데이트는 아직 지원하지 않아요.")
+                Text("파일은 연결 중 ‘파일’에서 보내거나 받을 수 있어요. Finder 파일을 원격 화면에 놓으면 Windows 공유 폴더로 복사돼요. 목록의 파일 아이콘을 Finder로 끌거나 ‘받기’로 저장하세요. Windows 파일은 공유 폴더에 넣어주세요. 폴더 전송·덮어쓰기·클립보드 동기화는 지원하지 않아요.")
+                Text("오디오·무모니터·잠금/UAC 화면·HDR·다중 모니터·자동 재연결/업데이트는 아직 지원하지 않아요.")
                 Text("8자리 번호는 2분·1회용이며 실패 횟수가 제한돼요. 종료 후에는 Windows에서 공유를 다시 시작해주세요. 번호와 페어링은 저장하지 않아요. 긴 연결 코드는 호환 모드로 남아 있고, 그 경로는 지문 확인과 Windows의 별도 승인이 필요해요.")
                 Text("기본 Mac 입력기로 한글·영문을 입력해요. 한/영 전환은 Caps Lock 등 이 Mac에 설정된 키를 그대로 사용하세요. 일반적인 Windows 복사·붙여넣기는 Control+C/V를 사용해요. 물리 키 입력에서 Command는 Windows 키에 해당해요.")
             }.font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -452,7 +458,7 @@ struct PreviewWindow: View {
             // phases and fullscreen changes. Chrome overlays never reparent it.
             Group {
                 if let simulatedDesktop { simulatedDesktop }
-                else { NativeDesktop(model: model) }
+                else { NativeDesktop(model: model, onFilesDropped: { setFilesVisible(true) }, inputSuspended: showingFiles) }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay {
                     if model.phase != .streaming {
@@ -495,6 +501,24 @@ struct PreviewWindow: View {
                 }
             }
         }
+        .overlay {
+            if showingFiles {
+                ZStack {
+                    Color.black.opacity(0.18).onTapGesture { setFilesVisible(false) }
+                    if let files = simulatedFiles ?? model.files {
+                        NativeFilePanel(files: files, owner: filePromises, beforeAction: { model.releaseInput() }, close: { setFilesVisible(false) })
+                            .frame(maxWidth: 520, maxHeight: 540).padding(24)
+                    } else {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Label("파일 공유를 사용할 수 없어요", systemImage: "folder.badge.questionmark").font(.headline)
+                            Text("Windows에서 파일 송수신과 공유 폴더를 확인한 뒤 다시 공유해주세요. 폴더를 준비하지 못했거나 파일 공유가 꺼져 있을 수 있어요. 두 앱 모두 native.9 이상이 필요해요.")
+                                .font(.system(size: 13)).foregroundStyle(.secondary)
+                            Button("닫기") { setFilesVisible(false) }
+                        }.padding(24).frame(maxWidth: 440).nativePanel().padding(24)
+                    }
+                }
+            }
+        }
     }
     private var sessionToolbar: some View {
         HStack(spacing: 12) {
@@ -509,6 +533,10 @@ struct PreviewWindow: View {
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
             }
             NativeStatusChip(title: phaseTitle, symbol: model.phase == .streaming ? "display" : "clock", tint: model.phase == .streaming ? .blue : .secondary)
+            Button {
+                setFilesVisible(true)
+                if let files = model.files, !files.isBusy { files.refresh() }
+            } label: { Label("파일", systemImage: "folder") }.disabled(model.phase != .streaming)
             Button { model.releaseInput(); windowState.toggleFullscreen() } label: {
                 Label(immersive ? "전체 화면 나가기" : "전체 화면", systemImage: "arrow.up.left.and.arrow.down.right")
             }.disabled(!immersive && model.phase != .streaming)
@@ -535,6 +563,10 @@ struct PreviewWindow: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }.font(.system(size: 12)).padding(.horizontal, 20).padding(.vertical, 12).background(NativeStyle.surface)
+    }
+    private func setFilesVisible(_ value: Bool) {
+        model.setFileUIInputSuspended(value)
+        showingFiles = value
     }
     private func review() {
         guard !secret.isEmpty else { return }

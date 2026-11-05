@@ -1,5 +1,13 @@
 # Native preview changes
 
+## 0.1.0-native.9
+
+- Add bidirectional regular-file copying during an authenticated live desktop session, using one explicitly shared Windows folder. Mac supports native send/receive pickers, Finder files dropped onto the viewer/panel, and shared-folder file rows promised to Finder.
+- Separate file TLS, framing, capability, cancellation and buffers from media/input. Bind file access to the active run and observed media peer; disconnect revokes pending work. Keep strict opt-in/permission and complete Ready metadata schemas.
+- Bound listings, upload queues, file/run bytes, chunk memory and transfer rate. Verify incremental SHA-256, source stability and destination quarantine; publish exclusively with collision handling and clean only owned partials. Never delete source files or expose arbitrary remote paths.
+- Provide shared-folder guidance, progress, cancel, errors and keyboard-accessible picker alternatives. Folder/package/link transfer, clipboard sync and arbitrary Explorer-to-Finder OS dragging remain outside this slice.
+- Advance installers to `0.1.0-native.9`, numeric PE version `0.1.0.9` and Mac bundle revision `9`. See `FILES.md` for the wire and filesystem contract; synthetic checks are separate from live OS drag/network acceptance.
+
 ## 0.1.0-native.8
 
 - Guide Mac connections through discovery, explicit PC selection and then eight-digit number entry. Never auto-select a sole result or show the number form before selection. Returning to PC selection clears the secret and invalidates pending enrollment work while keeping the list.

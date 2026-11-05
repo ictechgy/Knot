@@ -26,7 +26,7 @@ namespace Knot.NativePreview
         internal const string Onboarding = "1  이 Windows에서 ‘화면 공유 시작’\r\n2  Mac에서 ‘주변 PC 찾기’ → 이 PC 선택\r\n3  선택한 PC의 8자리 번호를 Mac에 입력";
         internal const string NumberTitle = "Mac에서 이 PC를 먼저 선택하세요";
         internal const string NumberInstruction = "‘주변 PC 찾기’에서 아래 PC를 선택한 다음,\r\n다음 화면에 이 8자리 번호를 입력하세요.";
-        internal const string NumberLifetime = "공유 시작 후 2분 · 1회용. 번호를 아는 Mac 한 대에 화면·입력을 허용해요.";
+        internal const string NumberLifetime = "공유 시작 후 2분 · 1회용. 번호를 아는 Mac 한 대에 이번 공유 권한을 허용해요.";
         internal static string DiscoveryName(string value)
         {
             // Pass this exact validated value to HostServer as well as the UI.

@@ -37,8 +37,16 @@ public enum VideoLimits {
 
 public struct Ready: Sendable, Equatable {
     public let width: Int, height: Int, fps: Int, bitrate: Int
+    public let files: NativeFileOffer?
     public init(_ bytes: Data) throws {
-        let json = try StrictJSON.object(bytes, keys: ["v", "codec", "width", "height", "fps", "bitrate", "hardwareEncoder"], limit: 4096)
+        let base: Set<String> = ["v", "codec", "width", "height", "fps", "bitrate", "hardwareEncoder"]
+        let json: [String: JSONValue]
+        if let old = try? StrictJSON.object(bytes, keys: base, limit: 4096) { json = old; files = nil }
+        else {
+            json = try StrictJSON.object(bytes, keys: base.union(["filesVersion", "filePort", "fileToken", "fileRootName"]), limit: 4096)
+            guard try json.integer("filesVersion") == 1 else { throw NativeFailure.unsupported }
+            files = try NativeFileOffer(port: json.integer("filePort"), token: json.string("fileToken"), rootName: json.string("fileRootName"))
+        }
         let width = try json.integer("width"), height = try json.integer("height")
         let fps = try json.integer("fps"), bitrate = try json.integer("bitrate")
         guard try json.integer("v") == 1, try json.string("codec") == "h264-annexb", try json.boolean("hardwareEncoder"),

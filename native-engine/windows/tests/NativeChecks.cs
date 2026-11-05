@@ -48,7 +48,8 @@ namespace Knot.NativePreview
                 stage = "tls-approved-before-blocking-open-stop-race"; TlsApprovedBeforeBlockingOpen();
                 stage = "tls-release-failure-stop"; TlsReleaseFailureStopsInput();
                 stage = "short-code-enrollment"; EnrollmentChecks();
-                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
+                stage = "native-file-transfer"; FileChecks();
+                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures + ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshFileEnrollmentFixtures\":" + fileEnrollmentFixtures + ",\"actualFreshFileDiscoveryFixtures\":" + fileDiscoveryFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
                 return 0;
             }
             catch (Exception failure)
@@ -57,7 +58,9 @@ namespace Knot.NativePreview
                 // message, stack, token, pin, key, endpoint or operating-system path.
                 string kind = failure.GetType().FullName;
                 if (kind.Length > 128) kind = "Exception";
-                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"exceptionType\":" + StrictJson.Quote(kind) + ",\"exceptionHResult\":" + failure.HResult + ",\"assertions\":" + assertions + "}");
+                FileTransferException file = failure as FileTransferException;
+                string fileDiagnostic = file == null ? "" : ",\"fileApiCategory\":" + StrictJson.Quote(file.Operation) + ",\"fileNativeError\":" + file.NativeError;
+                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"exceptionType\":" + StrictJson.Quote(kind) + ",\"exceptionHResult\":" + failure.HResult + fileDiagnostic + ",\"assertions\":" + assertions + "}");
                 return 1;
             }
         }

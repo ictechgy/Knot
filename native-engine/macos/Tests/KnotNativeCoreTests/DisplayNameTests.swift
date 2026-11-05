@@ -28,7 +28,7 @@ struct DisplayNameTests {
             #expect(Invitation.validViewerLabel(name))
             let hello = try invitation.hello(name: name)
             #expect(hello.kind == .hello)
-            #expect(try StrictJSON.object(hello.payload, keys: ["v", "token", "name"], limit: 4096).string("name") == name)
+            #expect(try StrictJSON.object(hello.payload, keys: ["v", "token", "name", "filesVersion"], limit: 4096).string("name") == name)
             let confirm = try EnrollmentWire.confirm(slot: displayNameSlot, name: name)
             #expect(try StrictJSON.object(confirm, keys: ["v", "slot", "name", "permissions"], limit: 484).string("name") == name)
             let candidate = try EnrollmentWire.discoveryReply(displayNameDiscovery(name), nonce: displayNameNonce, sourceIPv4: "192.168.50.12")

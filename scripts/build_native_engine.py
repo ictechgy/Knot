@@ -3,6 +3,7 @@
 """Build the independent engine and fresh synthetic UI fixtures; never run production GUI/capture."""
 from pathlib import Path
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -20,13 +21,113 @@ sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.8"
+VERSION = "0.1.0-native.9"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def validate_native_file_vectors(path):
+    """Bind Windows-produced wire fixtures to their exact bounded file bytes."""
+    path = Path(path)
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 1024 * 1024:
+        raise ValueError("Native file vectors must be a bounded ordinary fresh artifact")
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if (type(value.get("schema")) is not int or value["schema"] != 1 or value.get("status") != "passed" or
+            value.get("freshSyntheticOnly") is not True or
+            value.get("actualCapture") is not False or value.get("actualInput") is not False):
+        raise ValueError("Native file vectors must identify fresh synthetic-only file checks")
+
+    def binary(text):
+        if not isinstance(text, str):
+            raise ValueError("Native file vector encoding missing")
+        try:
+            result = base64.b64decode(text, validate=True)
+        except (ValueError, TypeError) as error:
+            raise ValueError("Native file vector encoding invalid") from error
+        if base64.b64encode(result).decode("ascii") != text:
+            raise ValueError("Native file vector encoding noncanonical")
+        return result
+
+    def packets(data):
+        result, offset = [], 0
+        while offset < len(data):
+            if len(data) - offset < 5:
+                raise ValueError("Native file vector header truncated")
+            kind, size = data[offset], struct.unpack_from(">I", data, offset + 1)[0]
+            valid = (size == 0 if kind == 0x42 else 9 <= size <= 65544 if kind == 0x48 else
+                     size == 40 if kind == 0x49 else 1 <= size <= 128 if kind == 0x7f else
+                     1 <= size <= 4096 if kind in range(0x40, 0x4b) else False)
+            offset += 5
+            if not valid or size > len(data) - offset:
+                raise ValueError("Native file vector packet bounds invalid")
+            result.append((kind, data[offset:offset + size])); offset += size
+        return result
+
+    vectors = value.get("vectors")
+    if not isinstance(vectors, list) or not 12 <= len(vectors) <= 32:
+        raise ValueError("Native file packet vector coverage missing")
+    kinds, names = set(), set()
+    for row in vectors:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str) or row["name"] in names:
+            raise ValueError("Native file vector name missing or duplicate")
+        names.add(row["name"])
+        payload, encoded = binary(row.get("payloadBase64")), binary(row.get("encodedBase64"))
+        if type(row.get("kind")) is not int or packets(encoded) != [(row["kind"], payload)]:
+            raise ValueError("Native file encoded packet differs from its declaration")
+        kinds.add(row["kind"])
+    if kinds != set(range(0x40, 0x4b)) | {0x7f}:
+        raise ValueError("Native file packet kinds are incomplete")
+
+    files, transfers = value.get("files"), value.get("transfers")
+    if not isinstance(files, list) or len(files) != 3 or not isinstance(transfers, list) or len(transfers) != 3:
+        raise ValueError("Native file transfer boundary fixtures missing")
+    cases = {}
+    for row in files:
+        if not isinstance(row, dict):
+            raise ValueError("Native file fixture is not an object")
+        body = binary(row.get("bytesBase64"))
+        if (not isinstance(row.get("name"), str) or row["name"] in cases or
+                type(row.get("size")) is not int or row["size"] != len(body) or
+                row.get("sha256") != hashlib.sha256(body).hexdigest()):
+            raise ValueError("Native file fixture content/size/hash differs")
+        cases[row["name"]] = body
+    if 0 not in map(len, cases.values()) or 65541 not in map(len, cases.values()):
+        raise ValueError("Native file empty/chunk-boundary coverage missing")
+    seen, seen_cases = set(), set()
+    for row in transfers:
+        if not isinstance(row, dict):
+            raise ValueError("Native file transfer fixture is not an object")
+        name, filename = row.get("name"), row.get("fileName")
+        body = binary(row.get("bytesBase64"))
+        stream = packets(binary(row.get("encodedBase64")))
+        if (name not in {"empty", "unicode", "boundary"} or name in seen_cases or filename not in cases or
+                filename in seen or body != cases[filename] or
+                type(row.get("size")) is not int or row["size"] != len(body) or row.get("sha256") != hashlib.sha256(body).hexdigest() or
+                len(stream) < 2 or stream[0][0] != 0x47 or stream[-1][0] != 0x49):
+            raise ValueError("Native file transfer sequence/content differs")
+        seen.add(filename); seen_cases.add(name)
+        if ((name == "empty" and len(body) != 0) or (name == "boundary" and len(body) != 65541) or
+                (name == "unicode" and (not body or not any(ord(char) > 127 for char in filename)))):
+            raise ValueError("Native file named boundary coverage differs")
+        accepted = json.loads(stream[0][1])
+        if accepted != {"name": row.get("fileName"), "size": len(body)}:
+            raise ValueError("Native file Accepted metadata differs")
+        received = bytearray()
+        for kind, payload in stream[1:-1]:
+            if kind != 0x48 or struct.unpack_from(">Q", payload)[0] != len(received):
+                raise ValueError("Native file Chunk sequence/offset differs")
+            received.extend(payload[8:])
+        finish = stream[-1][1]
+        if (received != body or struct.unpack_from(">Q", finish)[0] != len(body) or
+                finish[8:] != hashlib.sha256(body).digest()):
+            raise ValueError("Native file Finish content/size/hash differs")
+    if seen != set(cases) or seen_cases != {"empty", "unicode", "boundary"}:
+        raise ValueError("Native file transfer cases differ")
+    return value
 
 
 def output_stat(path):
@@ -286,7 +387,9 @@ class Builder:
                     not isinstance(monitor.get("scope"), str) or not monitor["scope"].strip()):
                 raise ValueError("Windows monitor illustration needs fresh measured geometry and DPI raster checks")
         rows = report.get("images")
-        if not isinstance(rows, list) or not 7 <= len(rows) <= 32:
+        if self.platform == "macos" and (type(report.get("fileAdaptersInvoked")) is not int or report["fileAdaptersInvoked"] != 0):
+            raise ValueError("Mac UI checks must measure zero file adapter invocations")
+        if not isinstance(rows, list) or not 7 <= len(rows) <= 40:
             raise ValueError("UI fixture state coverage is missing or excessive")
         names = set()
         for row in rows:
@@ -307,12 +410,13 @@ class Builder:
         required = ({"mac-" + name + ".png" for name in
                      ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected",
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
-                      "nearby-compact", "number-compact", "number-dark", "help-compact"]}
+                      "nearby-compact", "number-compact", "number-dark", "help-compact",
+                      "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
                      ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
                       "short-idle", "short-code", "short-code-compact", "short-help-compact",
-                      "short-idle-scale150", "short-idle-scale200"]})
+                      "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable"]})
         if not required.issubset(names):
             raise ValueError("UI fixture omitted a required task state")
         bound_sources = {self.input(path).relative_to(ROOT).as_posix(): digest(path) for path in source_inputs}
@@ -623,8 +727,10 @@ class Builder:
         # NativeChecks deliberately creates only a new, owned fixture file.
         public_certificate.unlink(missing_ok=True)
         public_pin.unlink(missing_ok=True)
+        file_vectors = self.output / "native-file-vectors.json"
+        file_vectors.unlink(missing_ok=True)
         result = self.run("native-host-checks", [checks, "--export-certificate", public_certificate],
-                          timeout=180).decode("utf-8-sig").strip()
+                          timeout=300).decode("utf-8-sig").strip()
         parsed = json.loads(result)
         if (parsed.get("status") != "passed" or parsed.get("freshSyntheticOnly") is not True or
                 parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False):
@@ -632,6 +738,7 @@ class Builder:
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")
         if public_pin.read_text().strip() != digest(public_certificate):
             raise ValueError("Fresh Windows certificate pin differs from exported public DER")
+        validate_native_file_vectors(file_vectors)
         visuals = self.visual_directory()
         visual_fixture = ROOT / "native-engine/windows/tests/NativeVisualFixtures.cs"
         visual_checks = self.csharp("KnotNativeVisualFixtures", sources + [visual_fixture],
@@ -671,7 +778,7 @@ class Builder:
         installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
         return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record, fixture_4k, fixture_record_4k,
                 fixture_4k60, fixture_record_4k60, wait_record,
-                self.output / "native-host-checks.json", public_certificate, public_pin, cpp_record, installer_metadata,
+                self.output / "native-host-checks.json", public_certificate, public_pin, file_vectors, cpp_record, installer_metadata,
                 visual_record, managed_record, *crypto_products]
 
     def finish(self, files):

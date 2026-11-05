@@ -148,6 +148,56 @@ private final class PortGate: @unchecked Sendable {
     do { try await bad.start(); Issue.record("Mismatched pin established TLS") } catch {}
 }
 
+@Test func freshFileTLSUsesExactPinSeparateChunkBoundAndSynchronousRevocation() async throws {
+    let fixture = try CertificateFixture(), server = try LoopbackHost(identity: fixture.identity)
+    defer { server.stop() }
+    let port = try await server.start(), endpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+    let files = FileTLSChannel(testEndpoint: endpoint, pin: fixture.pin)
+    defer { files.close() }
+    try await files.start()
+    #expect(try await files.readExactly(5, timeout: .seconds(10)) == Data([4, 0, 0, 0, 0]))
+    var chunk = Data(); chunk.appendBE(UInt64(0)); chunk.append(Data(repeating: 0x37, count: FileWire.chunkBytes))
+    try await files.send(FilePacket(kind: .chunk, payload: chunk))
+    let pending = Task { try await files.readExactly(1, timeout: .seconds(30)) }
+    try await Task.sleep(for: .milliseconds(10))
+    let closed = ContinuousClock.now; files.close()
+    if case .success = await pending.result { Issue.record("Revoked file read completed") }
+    #expect(ContinuousClock.now - closed < .milliseconds(500))
+    do { try await files.send(FilePacket(kind: .list)); Issue.record("File close accepted a new operation") } catch {}
+    let media = TLSChannel(endpoint: endpoint, pin: fixture.pin)
+    defer { media.close() }
+    do { try await media.send(Packet(kind: .text, payload: chunk)); Issue.record("File support widened the media packet bound") }
+    catch { #expect(error as? NativeFailure == .oversized) }
+    let mismatch = FileTLSChannel(testEndpoint: endpoint, pin: String(repeating: "0", count: 64))
+    defer { mismatch.close() }
+    do { try await mismatch.start(); Issue.record("Wrong file pin established TLS") } catch {}
+}
+
+@Test @MainActor func mediaReadyOwnsFileLifetimeAndFilePanelSuspendsRemoteInput() async throws {
+    let transport = InertChannel(), presenter = InertPresenter([.presented])
+    let model = beginInert(transport, presenter: presenter)
+    #expect(model.files == nil)
+    for _ in 0..<100 { if model.phase == .approval { break }; try await Task.sleep(for: .milliseconds(5)) }
+    try #require(model.phase == .approval)
+    let ready = try JSONSerialization.data(withJSONObject: ["v": 1, "codec": "h264-annexb", "width": 64,
+        "height": 64, "fps": 30, "bitrate": 1_000_000, "hardwareEncoder": true, "filesVersion": 1,
+        "filePort": 48634, "fileToken": Invitation.encodeBase64URL(Data(repeating: 9, count: 32)), "fileRootName": "Synthetic"])
+    let packet = Packet(kind: .ready, payload: ready); transport.feed(Data(packet.encoded.prefix(5))); transport.feed(ready)
+    for _ in 0..<100 { if model.phase == .decoding { break }; try await Task.sleep(for: .milliseconds(5)) }
+    let fileModel = try #require(model.files); #expect(fileModel.rootName == "Synthetic" && !fileModel.isBusy)
+    model.presentDecodedImage(try syntheticPresentationPixel()); try #require(model.phase == .streaming)
+    model.setFileUIInputSuspended(true); model.recoverInput()
+    #expect(model.inputRecovery && model.fileUIInputSuspended)
+    #expect(!model.send(try Input.key(down: true, scan: 0x1e, extended: false)))
+    #expect(!model.sendCommittedText("blocked"))
+    model.setFileUIInputSuspended(false); #expect(model.inputRecovery)
+    model.recoverInput(); #expect(!model.inputRecovery)
+    model.disconnect(); #expect(model.files == nil && !model.fileUIInputSuspended)
+    let entry = try NativeFileEntry(id: String(repeating: "a", count: 32), name: "safe.txt", size: 0)
+    do { _ = try await fileModel.receive(entry, destination: URL(fileURLWithPath: "/synthetic-never-accessed/file.txt")); Issue.record("Disconnected media retained file authorization") } catch {}
+    #expect(fileModel.status == NativeFileError.closed.message)
+}
+
 private final class InertChannel: NativeChannel, @unchecked Sendable {
     private let lock = NSLock()
     private var writes: [Packet] = []

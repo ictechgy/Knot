@@ -15,6 +15,8 @@ final class SessionModel: ObservableObject {
     @Published var textMode = true
     @Published var showFullscreenControls = false
     @Published private(set) var numberAuthorized = false
+    @Published private(set) var files: FileTransferModel?
+    private(set) var fileUIInputSuspended = false
     // Presentation guidance survives revocation; it is never authorization.
     private(set) var reconnectMethod: ReconnectMethod = .number
     @Published var viewerLabel = "My Mac"
@@ -105,6 +107,9 @@ final class SessionModel: ObservableObject {
                     self.lastIncoming = .now
                     switch incoming {
                     case .ready(let ready):
+                        if let offer = ready.files {
+                            self.files = try FileTransferModel(invitation: invitation, offer: offer)
+                        }
                         self.videoSize = CGSize(width: ready.width, height: ready.height)
                         let decoder = NativeDecoder(width: ready.width, height: ready.height)
                         decoder.onImage = { [weak self] image in
@@ -200,7 +205,7 @@ final class SessionModel: ObservableObject {
         return true
     }
     @discardableResult func send(_ packet: Packet) -> Bool {
-        guard phase == .streaming, !inputRecovery else { return false }
+        guard phase == .streaming, !inputRecovery, !fileUIInputSuspended else { return false }
         do { try input.append(packet); pumpWriter(); return true }
         catch {
             inputEpoch &+= 1
@@ -212,7 +217,7 @@ final class SessionModel: ObservableObject {
     @discardableResult func sendCommittedText(_ text: String) -> Bool {
         // Empty AppKit commits are a no-op, including while input is paused.
         guard !text.isEmpty else { return true }
-        guard phase == .streaming, !inputRecovery else { return false }
+        guard phase == .streaming, !inputRecovery, !fileUIInputSuspended else { return false }
         let packet: Packet
         do { packet = try Input.text(text) }
         catch {
@@ -234,9 +239,14 @@ final class SessionModel: ObservableObject {
         }
     }
     func recoverInput() {
+        guard !fileUIInputSuspended else { return }
         guard phase == .streaming else { return }
         input.recover(); inputRecovery = false
         updateStreamingStatus()
+    }
+    func setFileUIInputSuspended(_ suspended: Bool) {
+        fileUIInputSuspended = suspended
+        if suspended { releaseInput() }
     }
     private func pumpWriter() {
         guard !writerBusy, let channel, [.approval, .decoding, .streaming].contains(phase) else { return }
@@ -273,6 +283,8 @@ final class SessionModel: ObservableObject {
         if let numberConnection { reconnectMethod = numberConnection ? .number : .invitation }
         else if active { reconnectMethod = numberAuthorized ? .number : .invitation }
         identity = UUID(); inputEpoch &+= 1
+        files?.close(); files = nil
+        fileUIInputSuspended = false
         input = InputBuffer()
         ticker?.cancel(); reader?.cancel(); writer?.cancel()
         ticker = nil; reader = nil; writer = nil; writerBusy = false

@@ -10,8 +10,9 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 - AppleSilicon macOS26+ viewer; one peer, one display, one window and bounded H.264/TLS-TCP.
 - Windows Share authorizes one holder of the current short code. Advanced legacy invitation mode retains its separate approval step.
 - Native fullscreen, pointer/keyboard input and committed Mac input-method text. Source aspect ratio is preserved.
+- While the screen session is active, send and receive regular files through one explicitly shared Windows folder, with Finder drop-to-send and file-panel drag-to-Finder. Files use a separate pinned TLS connection, incremental hashes and bounded transfer work; original files are retained.
 
-**Audio, files, saved pairing, automatic reconnect/update, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
+**Audio, clipboard synchronization, recursive folder transfers, saved pairing, automatic reconnect/update, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
 
 ## Connect
 
@@ -19,7 +20,7 @@ Native.6 targets the reported delay between an immediate local Mac pointer and a
 
 Use a private network or an already configured Tailscale connection. The Korean interface follows the Quiet Sidebar design, with advanced settings and help secondary.
 
-Native.8 introduces a guided connection flow. The Mac first explains how to start sharing on Windows, then searches for PCs. **Explicitly choose a result before entering its eight-digit number**, even when only one PC is found. The number screen shows the selected PC and address; **다른 PC 선택** returns to the list and clears the number. Connection guidance is always available in the sidebar, without saving onboarding state or starting discovery automatically. Windows shows the matching steps and identifies the PC to select on Mac.
+Native.9 adds connected file transfer to the guided connection flow. Update **both apps**. The Mac first explains how to start sharing on Windows, then searches for PCs. **Explicitly choose a result before entering its eight-digit number**, even when only one PC is found. The number screen shows the selected PC and address; **다른 PC 선택** returns to the list and clears the number. Connection guidance is always available in the sidebar, without saving onboarding state or starting discovery automatically. Windows shows the matching steps and identifies the PC to select on Mac.
 
 1. Open `Knot Native Preview` on Windows and start sharing. The eight-digit number lasts120seconds and authorizes one matching Mac for screen/input. Quality is frozen for that run: maximum4K/30fps/40Mbps by default, optional maximum4K/60fps/40Mbps or1080p/60fps/20Mbps compatibility mode.
 2. On Mac, find nearby PCs, select the candidate, enter the number and connect. Discovery names/addresses are unverified context. PAKE and directional authenticated encryption transfer the complete secret invitation; the Mac then opens a **new** existing TLS connection with its exact full DER pin and OS certificate checks. The provisioning socket never becomes media.
@@ -35,6 +36,16 @@ A received frame may reach3840×2160 without upscaling a lower-resolution source
 Fullscreen removes reserved toolbar/footer height. Floating controls provide disconnect, native fullscreen exit and actual received dimensions. One desktop/presenter remains mounted; genuine source/viewer ratio differences still letterbox. Ordinary typing uses the Mac input method by default, preserving local Caps Lock language/capitalization behavior. Physical-keyboard fallback is secondary. Focus loss/revocation cancels composition and rejects late commits; physical shortcuts and owned key-ups remain separate from Unicode text.
 
 Normal Windows execution needs no elevation. OS private-network/application-control prompts may apply; the app changes no firewall, forwarding or system-security setting. Media TCP48631, enrollment TCP48632 and discovery UDP48633 remain private-network services. Packages are development previews: Windows unsigned, Mac ad-hoc/unnotarized.
+
+## Files while connected
+
+Windows shows the shared folder before sharing; the default is `Downloads/Knot Files`. Start sharing authorizes the displayed screen/input and enabled file-folder scope. You can choose another folder or disable files before starting. Only regular files directly inside this folder are listed; put Windows files there, or select their containing folder before sharing.
+
+On Mac, open **파일** in the connected controls. Send using the file picker, or drop Finder files onto the remote viewer/file panel: the destination is the displayed Windows shared folder, regardless of the Explorer folder under the pointer. Receive with the destination picker, or drag a file row from this panel into Finder. These are file copies; sources are never removed. Dragging arbitrary Windows Explorer items directly out of the video is not an implemented OS drag bridge.
+
+The panel shows progress, cancel and authored errors. Existing destination files are never overwritten; Windows uploads choose a collision-safe name, while an explicit Mac/Finder destination must be unused. Received files receive platform quarantine/Mark of the Web and are never opened automatically. Folder/package/link transfers are rejected. Limits are256 listed files,32 queued uploads,8GiB per file and per active run,64KiB chunks and2MiB/s pacing. Cancelled attempts still count toward the run's reserved-byte allowance.
+
+File bytes use TCP48634 on a separate same-certificate pinned TLS channel, with a fresh session capability and observed media-source binding. Cancel or a file error leaves the desktop session active; disconnect/stop revokes file access and removes owned partial files. Separate queues and pacing do not guarantee uncongested Wi-Fi. No SSH account, extra server or global clipboard access is required. Exact admission, framing, filesystem and test contracts: [FILES.md](FILES.md).
 
 ## Build
 

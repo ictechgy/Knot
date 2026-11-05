@@ -252,8 +252,16 @@ namespace Knot.NativePreview
             }
         }
         internal static string HelloName(byte[] payload, out byte[] token)
+        { bool files; return HelloName(payload, out token, out files); }
+        internal static string HelloName(byte[] payload, out byte[] token, out bool files)
         {
-            Dictionary<string, object> hello = StrictJson.Parse(payload, "v", "token", "name");
+            Dictionary<string, object> hello;
+            try { hello = StrictJson.Parse(payload, "v", "token", "name"); files = false; }
+            catch (ProtocolException)
+            {
+                hello = StrictJson.Parse(payload, "v", "token", "name", "filesVersion");
+                StrictJson.Integer(hello, "filesVersion", 1, 1); files = true;
+            }
             StrictJson.Integer(hello, "v", 1, 1);
             token = DecodeToken(StrictJson.String(hello, "token"));
             string name = StrictJson.String(hello, "name");

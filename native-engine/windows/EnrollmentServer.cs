@@ -23,6 +23,7 @@ namespace Knot.NativePreview
         private readonly Thread worker;
         private readonly DiscoveryServer discovery;
         private readonly Func<byte[], string, IPAddress, EnrollmentGrant> issue;
+        private readonly Func<byte[], string, IPAddress, bool, EnrollmentGrant> issueWithFiles;
         private readonly Action<EnrollmentFailure> unavailable;
         private readonly Action<string> status;
         private readonly Action<Stream, byte[]> writeOffer;
@@ -36,9 +37,11 @@ namespace Knot.NativePreview
         internal string Code { get { return Slot.DisplayCode; } }
         internal EnrollmentServer(IPAddress address, string name, bool syntheticLoopback, Func<long> clock,
                                   Func<byte[], string, IPAddress, EnrollmentGrant> issue, Action<EnrollmentFailure> unavailable, Action<string> status,
-                                  Func<IDisposable> preflight = null, Action<Stream, byte[]> writeOffer = null)
+                                  Func<IDisposable> preflight = null, Action<Stream, byte[]> writeOffer = null,
+                                  Func<byte[], string, IPAddress, bool, EnrollmentGrant> issueWithFiles = null)
         {
             this.issue = issue; this.unavailable = unavailable; this.status = status; this.syntheticLoopback = syntheticLoopback;
+            this.issueWithFiles = issueWithFiles;
             this.writeOffer = writeOffer ?? delegate(Stream stream, byte[] payload) { EnrollmentProtocol.Write(stream, 4, payload); };
             // Fail before generating a code, charging attempts or opening discovery.
             pairingModule = (preflight ?? new Func<IDisposable>(PairingCryptoSession.Preflight))();
@@ -104,9 +107,10 @@ namespace Knot.NativePreview
                                     if (error.Code == "auth") throw new EnrollmentAttemptException(EnrollmentFailure.Authentication, "auth");
                                     throw;
                                 }
-                                string name = EnrollmentProtocol.ConfirmName(confirmPlain, Slot.Id);
+                                bool files;
+                                string name = EnrollmentProtocol.ConfirmName(confirmPlain, Slot.Id, out files);
                                 if (IsStopped) throw new ProtocolException("closed");
-                                EnrollmentGrant grant = issue(Slot.Id, name, remote);
+                                EnrollmentGrant grant = issueWithFiles == null ? issue(Slot.Id, name, remote) : issueWithFiles(Slot.Id, name, remote, files);
                                 // The consumed slot/grant must never be retried if
                                 // encoding, sealing or delivering this offer fails.
                                 terminalFailure = EnrollmentFailure.Delivery;

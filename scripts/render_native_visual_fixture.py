@@ -106,9 +106,12 @@ def main():
     if rendered.get("freshSyntheticOnly") is not True or any(rendered.get(key) is not False for key in effects):
         raise SystemExit("Visual fixture effect contract failed")
     if (type(rendered.get("mediaAdaptersInvoked")) is not int or rendered["mediaAdaptersInvoked"] != 0 or
+            type(rendered.get("fileAdaptersInvoked")) is not int or rendered["fileAdaptersInvoked"] != 0 or
             type(rendered.get("modelPhaseChecks")) is not int or rendered["modelPhaseChecks"] != len(rendered["images"])):
         raise SystemExit("Visual fixture did not measure adapter attempts and intended model phases")
     for row in rendered["images"]:
+        if type(row.get("fileAdaptersInvoked")) is not int or row["fileAdaptersInvoked"] != 0:
+            raise SystemExit("Visual fixture invoked a file operation while rendering")
         if (not isinstance(row.get("expectedPhase"), str) or not row["expectedPhase"] or
                 row.get("observedPhase") != row["expectedPhase"]):
             raise SystemExit("Visual fixture changed the intended model phase")

@@ -69,10 +69,14 @@ namespace Knot.NativePreview
             stream.Write(header, 0, header.Length); stream.Write(payload, 0, payload.Length); stream.Flush();
         }
         internal static string ConfirmName(byte[] plaintext, byte[] slot)
+        { bool files; return ConfirmName(plaintext, slot, out files); }
+        internal static string ConfirmName(byte[] plaintext, byte[] slot, out bool files)
         {
             if (plaintext == null || plaintext.Length > 484) throw new ProtocolException("protocol");
             Dictionary<string, object> obj = StrictJson.Parse(plaintext, "v", "slot", "name", "permissions");
-            if (StrictJson.Integer(obj, "v", 2, 2) != 2 || StrictJson.String(obj, "permissions") != "screen,input" ||
+            string permissions = StrictJson.String(obj, "permissions");
+            files = permissions == "screen,input,files";
+            if (StrictJson.Integer(obj, "v", 2, 2) != 2 || !(permissions == "screen,input" || files) ||
                 !NativeProtocol.Equal(Identifier(StrictJson.String(obj, "slot")), slot)) throw new ProtocolException("protocol");
             string name = StrictJson.String(obj, "name"); ValidName(name); return name;
         }

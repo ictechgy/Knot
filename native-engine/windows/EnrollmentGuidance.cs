@@ -12,7 +12,7 @@ namespace Knot.NativePreview
     }
     internal static class EnrollmentGuidance
     {
-        internal const string Ready = "Mac: 주변 PC 찾기 → 이 PC 선택 → 8자리 번호 입력. Windows에서 추가 승인은 없어요.";
+        internal const string Ready = "Mac: 주변 PC 찾기 → 이 PC 선택 → 8자리 번호 입력. 표시한 공유 범위가 허용되며 추가 승인은 없어요.";
         internal static EnrollmentFailure Classify(ProtocolException error)
         {
             if (error.Code == "expired") return EnrollmentFailure.Expired;

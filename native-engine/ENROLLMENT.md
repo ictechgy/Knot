@@ -99,7 +99,10 @@ the context. Zeroize owned temporary key buffers when the context is destroyed.
 ClientConfirm strict JSON has exactly `v`, `slot`, `name`, `permissions`:
 v=2; slot is canonical unpadded base64url16 bytes; name uses existing1..64 UTF8
 byte limits and rejects Unicode control/format characters and line/paragraph
-separators; permissions is exactly the string `screen,input`. This name-only
+separators; permissions is exactly `screen,input` or `screen,input,files`.
+Native.9 requests the latter and carries that scope through the issued grant;
+file access also requires the Windows folder's local consent and media Hello
+file opt-in. A screen-only grant cannot mint a file capability. This name-only
 display policy does not restrict ordinary RTL letters or remote text input.
 Only after its tag and semantic fields validate may Windows mint T2.
 

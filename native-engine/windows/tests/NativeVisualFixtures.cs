@@ -27,7 +27,7 @@ namespace Knot.NativePreview
             internal int Width, Height;
             internal float Scale;
             internal bool EnrollmentMode;
-            internal string StatusOverride, ViewerLabelOverride;
+            internal string StatusOverride, ViewerLabelOverride, FileStatusOverride;
             internal Frame(string name, HostViewPhase phase, bool help, int width, int height, float scale)
             { Name = name; Phase = phase; Help = help; Width = width; Height = height; Scale = scale; }
         }
@@ -222,6 +222,9 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-short-sharing.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-help.png", HostViewPhase.Idle, true, 1040, 740, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-short-help-compact.png", HostViewPhase.Idle, true, 800, 620, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-files-sharing.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-files-sharing-compact.png", HostViewPhase.Sharing, false, 800, 620, 1) { EnrollmentMode = true });
+                frames.Add(new Frame("windows-files-unavailable.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true, FileStatusOverride = "파일 공유 폴더를 준비하지 못했어요. 화면 연결은 계속 사용할 수 있어요." });
                 List<string> records = new List<string>();
                 using (Icon icon = new Icon(iconPath, 256, 256))
                 {
@@ -244,6 +247,7 @@ namespace Knot.NativePreview
                             if (frame.StatusOverride != null || frame.ViewerLabelOverride != null)
                                 state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy, state.EnrollmentMode);
                             Progress(frame, "before-presentation"); form.SetFixturePresentation(state, frame.Help); Progress(frame, "after-presentation");
+                            if (frame.FileStatusOverride != null) form.SetFixtureFileStatus(frame.FileStatusOverride);
                             AssertFontsUsable(form); Progress(frame, "fonts-usable-before-show");
                             Progress(frame, "before-show"); form.Show(); Progress(frame, "after-show");
                             form.PerformLayout(); Progress(frame, "after-initial-layout"); Pump(); Progress(frame, "after-initial-pump");
@@ -305,6 +309,11 @@ namespace Knot.NativePreview
                                 throw new InvalidOperationException("Initial sharing must explain the ordered Windows-start/Mac-select/Mac-number flow.");
                             if (expectedOnboarding && !form.FixtureOnboardingActionFits)
                                 throw new InvalidOperationException("The initial sharing action must be visible without scrolling past onboarding.");
+                            bool expectedFiles = !frame.Help && (frame.Phase == HostViewPhase.Idle || frame.Phase == HostViewPhase.Stopped || frame.Phase == HostViewPhase.Failed || frame.Phase == HostViewPhase.Sharing);
+                            if (form.FixtureFileFolderVisible != expectedFiles || (expectedFiles && form.DisplayedFileFolder != @"C:\Synthetic\Knot Files"))
+                                throw new InvalidOperationException("File consent must identify the inert shared folder before sharing and during the live session.");
+                            if (form.FixtureFileServiceUnavailable != (frame.FileStatusOverride != null))
+                                throw new InvalidOperationException("A file-only setup failure must have authored folder guidance without changing screen status.");
                             if (form.FixtureQualityEditable == state.RunPresent)
                                 throw new InvalidOperationException("Quality is selectable only before the sharing run.");
                             AssertFontsUsable(form);
@@ -339,6 +348,8 @@ namespace Knot.NativePreview
                                     ",\"numberGuidanceVisible\":" + (expectedNumberGuidance ? "true" : "false") +
                                     ",\"hostIdentityExact\":" + (expectedNumberGuidance ? "true" : "null") +
                                     ",\"onboardingActionFits\":" + (expectedOnboarding ? "true" : "null") +
+                                    ",\"fileFolderVisible\":" + (expectedFiles ? "true" : "false") + ",\"fileFolderExact\":" + (expectedFiles ? "true" : "null") +
+                                    ",\"fileServiceUnavailable\":" + (form.FixtureFileServiceUnavailable ? "true" : "false") +
                                     ",\"sampleColors\":" + sampleColors.Count + ",\"pinExact\":true,\"brandPainted\":true,\"fontsUsable\":true,\"effectsBound\":false}");
                             }
                             Progress(frame, "before-close"); form.Close(); Progress(frame, "after-close"); Pump(); Progress(frame, "after-close-pump");

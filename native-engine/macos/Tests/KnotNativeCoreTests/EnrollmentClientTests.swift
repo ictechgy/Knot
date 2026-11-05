@@ -76,7 +76,7 @@ private final class ScriptedEnrollmentCrypto: EnrollmentCryptography, @unchecked
     let (sent, socketClosed) = socket.snapshot(), (confirmed, cryptoClosed) = crypto.snapshot()
     #expect(socketClosed && cryptoClosed && sent.count == 3 && sent.first == EnrollmentWire.preamble)
     let body = try StrictJSON.object(#require(confirmed), keys: ["v", "slot", "name", "permissions"], limit: 484)
-    #expect(try body.string("permissions") == "screen,input")
+    #expect(try body.string("permissions") == "screen,input,files")
     #expect(try body.string("name") == result.viewerName)
     await #expect(throws: (any Error).self) { try await client.authenticate(name: "Replay") }
 }

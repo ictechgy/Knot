@@ -233,9 +233,9 @@ namespace Knot.NativePreview
         { return Bytes("{\"v\":2,\"slot\":" + StrictJson.Quote(NativeProtocol.Base64Url(slot)) + ",\"name\":" + StrictJson.Quote(name) + ",\"permissions\":\"screen,input\"}"); }
         private static HostServer EnrollmentHost(FakeMediaFactory media, FakeInput sink, Func<long> clock)
         { return new HostServer(IPAddress.Loopback, 0, media, sink, true, null, true, clock, "Synthetic Windows"); }
-        private static byte[] Discover(HostServer server)
+        private static byte[] Discover(HostServer server, bool fileFixture = false)
         {
-            ++discoveryFixtures;
+            if (fileFixture) ++fileDiscoveryFixtures; else ++discoveryFixtures;
             using (UdpClient udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)))
             {
                 udp.Client.ReceiveTimeout = 3000; byte[] nonce = EnrollmentProtocol.Random(16), request = EnrollmentProtocol.DiscoveryQuery(nonce);
@@ -248,9 +248,9 @@ namespace Knot.NativePreview
                 return EnrollmentProtocol.Identifier(StrictJson.String(reply, "slot"));
             }
         }
-        private static string Enroll(HostServer server, byte[] slot, string code, bool tamper)
+        private static string Enroll(HostServer server, byte[] slot, string code, bool tamper, bool requestFiles = false, bool fileFixture = false)
         {
-            ++enrollmentFixtures;
+            if (fileFixture) ++fileEnrollmentFixtures; else ++enrollmentFixtures;
             using (TcpClient client = new TcpClient())
             using (PairingCryptoSession crypto = PairingCryptoSession.Create(false, Bytes(code), slot))
             {
@@ -261,7 +261,8 @@ namespace Knot.NativePreview
                 Packet response = EnrollmentProtocol.Read(stream, 2);
                 byte[] returnedSlot = new byte[16], message = new byte[32]; Buffer.BlockCopy(response.Payload, 0, returnedSlot, 0, 16); Buffer.BlockCopy(response.Payload, 16, message, 0, 32);
                 Check(NativeProtocol.Equal(returnedSlot, slot)); crypto.Process(message);
-                byte[] sealedConfirm = crypto.Seal(3, Confirm(slot, "Synthetic viewer"));
+                byte[] confirm = requestFiles ? Bytes("{\"v\":2,\"slot\":" + StrictJson.Quote(NativeProtocol.Base64Url(slot)) + ",\"name\":\"Synthetic viewer\",\"permissions\":\"screen,input,files\"}") : Confirm(slot, "Synthetic viewer");
+                byte[] sealedConfirm = crypto.Seal(3, confirm);
                 if (tamper) sealedConfirm[sealedConfirm.Length - 1] ^= 1;
                 EnrollmentProtocol.Write(stream, 3, sealedConfirm);
                 byte[] plain = crypto.Open(4, EnrollmentProtocol.Read(stream, 4).Payload);

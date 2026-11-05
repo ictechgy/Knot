@@ -62,13 +62,21 @@ struct NativeVisualFixture {
             ("nearby-compact", "nearby", 880, 620, false),
             ("number-compact", "number", 880, 620, false),
             ("number-dark", "number", 1200, 760, true),
-            ("help-compact", "help", 880, 620, false)
+            ("help-compact", "help", 880, 620, false),
+            ("files", "files", 1200, 760, false),
+            ("files-compact", "files", 880, 620, false),
+            ("files-fullscreen", "files", 1200, 760, false),
+            ("files-working", "files-working", 1200, 760, false),
+            ("files-error", "files-error", 1200, 760, false),
+            ("files-empty", "files-empty", 1200, 760, false)
         ]
         var images: [[String: Any]] = []
+        var fileAdapterAttempts = 0
         for (name, state, width, height, dark) in cases {
             let model = try makeModel(state, effects: effects)
             let enrollment = try makeEnrollment(state, effects: effects)
-            let immersive = name.hasPrefix("fullscreen")
+            let files = try makeFiles(state)
+            let immersive = name.hasPrefix("fullscreen") || name == "files-fullscreen"
             let revealed = name.hasSuffix("controls")
             if name.contains("4k") { model.videoSize = CGSize(width: 3840, height: 2160) }
             model.showFullscreenControls = revealed
@@ -82,7 +90,7 @@ struct NativeVisualFixture {
                 else { Color(white: 0.045) }
             })
             let content = root(model: model, enrollment: enrollment, simulated: simulated, help: state == "help", manual: state == "manual-address", fullscreen: immersive,
-                width: width, height: height, dark: dark)
+                width: width, height: height, dark: dark, files: files)
             let view = NSHostingView(rootView: content)
             let rect = NSRect(x: 0, y: 0, width: width, height: height)
             let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -113,7 +121,20 @@ struct NativeVisualFixture {
             }
 
             try requireInert(model: model, state: state, effects: effects)
+            if let files {
+                fileAdapterAttempts += files.fixtureOperationAttempts
+                guard files.fixtureOperationAttempts == 0 else { throw FixtureError.effects }
+            }
             let numberFields = secureFieldCount(view)
+            let filePanels = filePanelViews(view)
+            guard filePanels.count == (files == nil ? 0 : 1) else { throw FixtureError.filePanel }
+            var filePanelFrame: [String: Double]?
+            if let panel = filePanels.first {
+                let frame = panel.convert(panel.bounds, to: view)
+                guard view.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame), frame.width >= 360, frame.height >= 360 else { throw FixtureError.filePanel }
+                filePanelFrame = ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height]
+                guard model.fileUIInputSuspended, model.inputRecovery else { throw FixtureError.filePanel }
+            }
             let codeStage = !model.active && model.invitation == nil && enrollment.selected != nil && state != "help"
             guard numberFields == (codeStage ? 1 : 0) else { throw FixtureError.numberStage }
             guard enrollment.selected == nil || state.hasPrefix("number") else { throw FixtureError.numberStage }
@@ -133,6 +154,12 @@ struct NativeVisualFixture {
                 "candidateCount": enrollment.candidates.count, "explicitSelection": enrollment.selected != nil,
                 "codeStageVisible": codeStage, "renderedNumberFields": numberFields,
                 "searchCompleted": enrollment.hasSearched,
+                "filePanelVisible": !filePanels.isEmpty,
+                "renderedFilePanels": filePanels.count,
+                "filePanelFrame": filePanelFrame.map { $0 as Any } ?? NSNull(),
+                "fileInputSuspended": model.fileUIInputSuspended,
+                "fileEntryCount": files?.entries.count ?? 0,
+                "fileAdaptersInvoked": files?.fixtureOperationAttempts ?? 0,
                 "presenterTransitionChecks": name == "streaming" ? 3 : 0,
                 "stablePresenterAcrossFullscreen": stablePresenter.map { $0 as Any } ?? NSNull()])
             window.close()
@@ -147,16 +174,17 @@ struct NativeVisualFixture {
             "clipboardInvoked": false, "certificateCreationInvoked": false,
             "captureInvoked": false, "actualInputInvoked": false, "screenCaptureInvoked": false,
             "freshSyntheticOnly": true, "enrollmentAdaptersInvoked": effects.count,
-            "mediaAdaptersInvoked": effects.mediaCount, "modelPhaseChecks": images.count, "images": images
+            "mediaAdaptersInvoked": effects.mediaCount, "fileAdaptersInvoked": fileAdapterAttempts,
+            "modelPhaseChecks": images.count, "images": images
         ]
         try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
             .write(to: output.appendingPathComponent("render-result.json"), options: .atomic)
     }
 
     @MainActor private static func root(model: SessionModel, enrollment: EnrollmentModel, simulated: AnyView, help: Bool,
-                                        manual: Bool, fullscreen: Bool, width: Int, height: Int, dark: Bool) -> some View {
+                                        manual: Bool, fullscreen: Bool, width: Int, height: Int, dark: Bool, files: FileTransferModel? = nil) -> some View {
         PreviewWindow(model: model, simulatedDesktop: simulated, initialHelp: help, simulatedFullscreen: fullscreen,
-            enrollment: enrollment, initialManualAddress: manual)
+            enrollment: enrollment, initialManualAddress: manual, simulatedFiles: files, initialFiles: files != nil)
             .environment(\.colorScheme, dark ? .dark : .light)
             .environment(\.controlActiveState, .key)
             .frame(width: CGFloat(width), height: CGFloat(height))
@@ -166,6 +194,9 @@ struct NativeVisualFixture {
     @MainActor private static func secureFieldCount(_ root: NSView) -> Int {
         let own = root is NSSecureTextField ? 1 : 0
         return own + root.subviews.reduce(0) { $0 + secureFieldCount($1) }
+    }
+    @MainActor private static func filePanelViews(_ root: NSView) -> [NativeFilePanelHost] {
+        (root as? NativeFilePanelHost).map { [$0] } ?? root.subviews.flatMap { filePanelViews($0) }
     }
 
     @MainActor private static func desktopFrame(model: SessionModel, root: NSView) -> CGRect {
@@ -209,7 +240,8 @@ struct NativeVisualFixture {
         guard model.phase == expectedPhase(state) else { throw FixtureError.phase }
     }
     @MainActor private static func expectedPhase(_ state: String) -> SessionModel.Phase {
-        switch state {
+        if state.hasPrefix("files") { return .streaming }
+        return switch state {
         case "connecting": .connecting
         case "approval": .approval
         case "decoding": .decoding
@@ -218,9 +250,25 @@ struct NativeVisualFixture {
         default: .idle
         }
     }
+    @MainActor private static func makeFiles(_ state: String) throws -> FileTransferModel? {
+        guard state.hasPrefix("files") else { return nil }
+        let entries = state == "files-empty" ? [] : [
+            try NativeFileEntry(id: String(repeating: "1", count: 32), name: "회의 자료.pdf", size: 2_400_000),
+            try NativeFileEntry(id: String(repeating: "2", count: 32), name: "project-source.zip", size: 18_000_000),
+            try NativeFileEntry(id: String(repeating: "3", count: 32), name: "README.md", size: 4096)
+        ]
+        return FileTransferModel(rootName: "Knot Files", entries: entries, isBusy: state == "files-working",
+            status: state == "files-error" ? "같은 이름의 파일이 있어요. 다른 이름이나 저장 위치를 선택해주세요." :
+                state == "files-working" ? "Windows 공유 폴더로 보내는 중이에요. 원본은 유지돼요." :
+                state == "files-empty" ? "공유 폴더가 비어 있어요. Windows 파일을 넣고 새로고침하세요." :
+                "파일을 선택해 받거나 왼쪽 아이콘을 Finder로 끌어주세요.",
+            progress: state == "files-working" ? 0.42 : nil,
+            currentName: state == "files-working" ? "project-source.zip" : nil)
+    }
     @MainActor private static func makeModel(_ state: String, effects: FixtureEnrollmentEffects) throws -> SessionModel {
         let model = SessionModel(makeChannel: { _ in effects.markMedia(); throw NativeFailure.state })
         model.viewerLabel = "나의 Mac"
+        if state.hasPrefix("files") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
         switch state {
         case "reviewed", "invalid-name":
             let body: [String: Any] = ["v": 1, "address": "192.168.50.24", "port": 48631,
@@ -257,7 +305,7 @@ struct NativeVisualFixture {
 }
 
 enum FixtureError: Error {
-    case arguments, bitmap, presenter, effects, phase, numberStage, geometry(CGRect, CGSize)
+    case arguments, bitmap, presenter, effects, phase, numberStage, filePanel, geometry(CGRect, CGSize)
 }
 
 private final class FixtureEnrollmentEffects: @unchecked Sendable {

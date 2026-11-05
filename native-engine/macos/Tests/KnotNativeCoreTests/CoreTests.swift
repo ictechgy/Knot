@@ -13,8 +13,9 @@ private let readyJSON = Data("{\"v\":1,\"codec\":\"h264-annexb\",\"width\":64,\"
     #expect(result.address == "192.168.1.2"); #expect(result.port == 48631)
     let hello = try result.hello()
     #expect(hello.kind == .hello)
-    let json = try StrictJSON.object(hello.payload, keys: ["v", "token", "name"], limit: 4096)
+    let json = try StrictJSON.object(hello.payload, keys: ["v", "token", "name", "filesVersion"], limit: 4096)
     #expect(try json.string("token") == token)
+    #expect(try json.integer("filesVersion") == 1)
 }
 
 @Test(arguments: ["8.8.8.8", "127.0.0.1", "169.254.1.1", "192.168.01.2", "192.168.1.2.", "192.168.1.256", "192.168.1.-1", "172.32.1.1", "100.128.0.1", "10.0.0.1evil", "localhost", "::1", " 10.0.0.1"])

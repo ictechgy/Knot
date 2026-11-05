@@ -60,7 +60,7 @@ public enum EnrollmentWire {
     public static func confirm(slot: Data, name: String) throws -> Data {
         guard slot.count == 16, Invitation.validViewerLabel(name) else { throw EnrollmentFailure.invalidMessage }
         let data = try JSONSerialization.data(withJSONObject: ["v": 2, "slot": Invitation.encodeBase64URL(slot),
-            "name": name, "permissions": "screen,input"], options: [.sortedKeys])
+            "name": name, "permissions": "screen,input,files"], options: [.sortedKeys])
         guard data.count <= 484 else { throw EnrollmentFailure.invalidMessage }
         return data
     }

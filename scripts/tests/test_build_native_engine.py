@@ -1,5 +1,8 @@
 """Fresh, inert rebuild fixtures; no compiler, certificate store, media or input."""
 from pathlib import Path
+import base64
+import copy
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +18,48 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_native_engine as native
+
+
+def inert_file_vectors():
+    """Lifecycle-validator substitute only; never evidence of a C# execution."""
+    def packet(kind, body):
+        return bytes([kind]) + struct.pack(">I", len(body)) + body
+
+    def control(value):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+    def encoded(value):
+        return base64.b64encode(value).decode()
+
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    payloads = {
+        0x40: control(dict(v=1, token=base64.urlsafe_b64encode(bytes(32)).decode().rstrip("="))),
+        0x41: control(dict(v=1)), 0x42: b"",
+        0x43: control(dict(entry="a" * 32, name="fixture.txt", size=0)),
+        0x44: control(dict(count=1, truncated=False)),
+        0x45: control(dict(name="fixture.txt", size=0)),
+        0x46: control(dict(entry="a" * 32)),
+        0x47: control(dict(name="fixture.txt", size=0)),
+        0x48: struct.pack(">Q", 0) + b"X",
+        0x49: struct.pack(">Q", 0) + hashlib.sha256(b"").digest(),
+        0x4a: control(dict(name="fixture.txt", size=0, sha256=empty_hash)),
+        0x7f: control(dict(code="protocol")),
+    }
+    vectors = [dict(name="inert-kind-%02x" % kind, kind=kind, payloadBase64=encoded(body),
+                    encodedBase64=encoded(packet(kind, body))) for kind, body in payloads.items()]
+    files, transfers = [], []
+    for name, filename, body in [("empty", "empty.txt", b""), ("unicode", "한글.txt", "Knot 파일\n".encode()),
+                                 ("boundary", "boundary.bin", bytes(i % 251 for i in range(65541)))]:
+        digest = hashlib.sha256(body).hexdigest()
+        files.append(dict(name=filename, bytesBase64=encoded(body), sha256=digest, size=len(body)))
+        stream = packet(0x47, control(dict(name=filename, size=len(body))))
+        for offset in range(0, len(body), 65536):
+            stream += packet(0x48, struct.pack(">Q", offset) + body[offset:offset + 65536])
+        stream += packet(0x49, struct.pack(">Q", len(body)) + hashlib.sha256(body).digest())
+        transfers.append(dict(name=name, fileName=filename, size=len(body), sha256=digest,
+                              bytesBase64=encoded(body), encodedBase64=encoded(stream)))
+    return dict(schema=1, status="passed", freshSyntheticOnly=True, actualCapture=False, actualInput=False,
+                vectors=vectors, files=files, transfers=transfers)
 
 
 class NativeRebuildTests(unittest.TestCase):
@@ -110,6 +155,8 @@ class NativeRebuildTests(unittest.TestCase):
                 pin = "0" * 64 if corrupt_public_pin else native.digest(Path(argv[2]))
                 with Path(argv[2]).with_suffix(".sha256").open("x") as fixture:
                     fixture.write(pin + "\n")
+                with (self.output / "native-file-vectors.json").open("x") as fixture:
+                    json.dump(inert_file_vectors(), fixture)
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
                                        actualCapture=False, actualSendInput=False)).encode()
             elif label == "native-pairing-managed-checks":
@@ -137,7 +184,7 @@ class NativeRebuildTests(unittest.TestCase):
                 rows = []
                 for state in ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
                               "short-idle", "short-code", "short-code-compact", "short-help-compact",
-                              "short-idle-scale150", "short-idle-scale200"]:
+                              "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable"]:
                     image = visual_output / ("windows-" + state + ".png")
                     image.write_bytes(data)
                     rows.append(dict(name=image.name, sha256=native.digest(image), bytes=len(data), width=640, height=480))
@@ -150,7 +197,7 @@ class NativeRebuildTests(unittest.TestCase):
                         minimumDpi=96, maximumDpi=288, centered=True, paneAspectPreserved=True,
                         panesContained=True, sameBoundsDpiPixelIdentity=True, degenerateBoundsSkipped=True,
                         scope="INERT geometry evidence substitute; no Windows renderer executed"),
-                    renderMethod="INERT lifecycle test substitute; no native UI rendered")
+                    fileAdaptersInvoked=0, renderMethod="INERT lifecycle test substitute; no native UI rendered")
                 if invalid_visual == "effects": report["networkInvoked"] = True
                 elif invalid_visual == "shown-synthetic": report["syntheticWindowsShown"] = True
                 elif invalid_visual == "digest": rows[0]["sha256"] = "0" * 64
@@ -205,6 +252,7 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertIn("native-test-public.cer", record["products"])
         self.assertIn("native-installer-metadata.json", record["products"])
         self.assertIn("native-ui-visual-checks.json", record["products"])
+        self.assertIn("native-file-vectors.json", record["products"])
         self.assertIn("synthetic-4k.h264", record["products"])
         self.assertIn("synthetic-codec-4k.json", record["products"])
         self.assertIn("synthetic-4k60.h264", record["products"])
@@ -216,7 +264,7 @@ class NativeRebuildTests(unittest.TestCase):
         visual = json.loads((self.output / "native-ui-visual-checks.json").read_text())
         self.assertEqual(visual["visualAcceptance"], "manual-review-required")
         self.assertIn("INERT", visual["rendererReport"]["renderMethod"])
-        self.assertEqual(len(visual["rendererReport"]["images"]), 13)
+        self.assertEqual(len(visual["rendererReport"]["images"]), 16)
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
@@ -331,7 +379,8 @@ class NativeRebuildTests(unittest.TestCase):
         report["images"] = []
         for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected",
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
-                      "nearby-compact", "number-compact", "number-dark", "help-compact"]:
+                      "nearby-compact", "number-compact", "number-dark", "help-compact",
+                      "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
             report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,
@@ -555,3 +604,60 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertEqual(list(applications.iterdir()), [])
         self.assertFalse(scratch.exists())
         self.assertFalse(staging.exists())
+
+
+class NativeFileVectorTests(unittest.TestCase):
+    def check_vectors(self, value, error=None):
+        with tempfile.TemporaryDirectory(prefix="knot-inert-file-vectors-") as directory:
+            path = Path(directory) / "native-file-vectors.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            if error:
+                with self.assertRaisesRegex(ValueError, error):
+                    native.validate_native_file_vectors(path)
+            else:
+                self.assertEqual(native.validate_native_file_vectors(path), value)
+
+    def test_accepts_empty_unicode_and_chunk_boundary_sequences(self):
+        self.check_vectors(inert_file_vectors())
+
+    def test_rejects_live_effects_and_boolean_schema_or_size(self):
+        original = inert_file_vectors()
+        for field in ["actualCapture", "actualInput", "schema", "size"]:
+            value = copy.deepcopy(original)
+            if field == "size":
+                value["files"][0]["size"] = False
+            else:
+                value[field] = True
+            with self.subTest(field=field):
+                self.check_vectors(value, "Native file")
+
+    def test_rejects_missing_kind_and_truncated_packet(self):
+        value = inert_file_vectors(); value["vectors"].pop()
+        self.check_vectors(value, "coverage")
+        value = inert_file_vectors()
+        value["vectors"][0]["encodedBase64"] = base64.b64encode(b"\x40\0\0\0\x02X").decode()
+        self.check_vectors(value, "bounds")
+
+    def test_rejects_file_and_finish_hash_tampering(self):
+        value = inert_file_vectors(); value["files"][0]["sha256"] = "0" * 64
+        self.check_vectors(value, "hash")
+        value = inert_file_vectors()
+        body = bytearray(base64.b64decode(value["transfers"][2]["encodedBase64"]))
+        body[-1] ^= 1
+        value["transfers"][2]["encodedBase64"] = base64.b64encode(body).decode()
+        self.check_vectors(value, "Finish")
+
+    def test_rejects_transfer_offset_gap(self):
+        value = inert_file_vectors()
+        body = bytearray(base64.b64decode(value["transfers"][2]["encodedBase64"]))
+        chunk_header = 5 + struct.unpack_from(">I", body, 1)[0]
+        body[chunk_header + 5:chunk_header + 13] = struct.pack(">Q", 1)
+        value["transfers"][2]["encodedBase64"] = base64.b64encode(body).decode()
+        self.check_vectors(value, "offset")
+
+    def test_rejects_oversized_artifact_before_json_decode(self):
+        with tempfile.TemporaryDirectory(prefix="knot-inert-file-vector-budget-") as directory:
+            path = Path(directory) / "native-file-vectors.json"
+            path.write_bytes(b" " * (1024 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, "bounded"):
+                native.validate_native_file_vectors(path)

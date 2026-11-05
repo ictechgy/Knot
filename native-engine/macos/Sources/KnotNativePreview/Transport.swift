@@ -27,8 +27,8 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
         self.init(endpoint: .hostPort(host: NWEndpoint.Host(invitation.address), port: port), pin: invitation.certificateSHA256)
     }
 
-    /// Internal endpoint injection exists for fresh loopback TLS fixtures only.
-    /// Runtime entry always validates the invitation's canonical private IPv4.
+    /// Typed media/file entrypoints validate their authenticated private IPv4.
+    /// The raw endpoint is also used by fresh owned loopback TLS fixtures.
     init(endpoint: NWEndpoint, pin: String) {
         let tls = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
@@ -118,12 +118,27 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
             timeout = Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18
             guard timeout > 0 else { close(); throw NativeFailure.transport }
         }
-        let budget = timeout
+        try await sendEncoded(packet.encoded, timeout: timeout)
+    }
+
+    // File channels use an independent connection and packet type. The media
+    // NativeChannel.send contract above remains capped at 4096 bytes.
+    func sendFilePacket(_ packet: FilePacket) async throws {
+        var budget = 30.0
+        if packet.kind == .hello {
+            let remaining = helloDeadline - ContinuousClock.now
+            budget = Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18
+            guard budget > 0 else { close(); throw NativeFileError.timeout }
+        }
+        try await sendEncoded(packet.encoded, timeout: budget)
+    }
+
+    private func sendEncoded(_ data: Data, timeout budget: Double) async throws {
         try await withCheckedThrowingContinuation { continuation in
             let id = UUID()
             let gate = CompletionGate<Void>(continuation) { [lifetime] in lifetime.remove(id) }
             guard lifetime.perform(id: id, cancel: { gate.finish(.failure(NativeFailure.transport)) }, operation: {
-                connection.send(content: packet.encoded, completion: .contentProcessed { error in
+                connection.send(content: data, completion: .contentProcessed { error in
                     _ = gate.finish(error == nil ? .success(()) : .failure(NativeFailure.transport))
                 })
                 gate.armDeadline(after: budget, on: queue) { [weak self] in self?.close() }

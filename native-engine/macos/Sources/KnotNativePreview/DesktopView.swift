@@ -13,8 +13,10 @@ private final class LocalKeyUpMonitor: @unchecked Sendable {
 
 struct NativeDesktop: NSViewRepresentable {
     @ObservedObject var model: SessionModel
-    func makeNSView(context: Context) -> DesktopView { let view = DesktopView(); view.model = model; model.surface = view; return view }
-    func updateNSView(_ view: DesktopView, context: Context) { view.imageSize = model.videoSize }
+    var onFilesDropped: (() -> Void)? = nil
+    var inputSuspended = false
+    func makeNSView(context: Context) -> DesktopView { let view = DesktopView(); view.model = model; view.onFilesDropped = onFilesDropped; view.inputSuspended = inputSuspended; model.surface = view; return view }
+    func updateNSView(_ view: DesktopView, context: Context) { view.imageSize = model.videoSize; view.onFilesDropped = onFilesDropped; view.inputSuspended = inputSuspended }
 }
 
 @MainActor
@@ -24,6 +26,9 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     private let video = AVSampleBufferDisplayLayer()
     private var statusObservation: NSKeyValueObservation?
     var onFailure: (() -> Void)?
+    var onFilesDropped: (() -> Void)?
+    var inputSuspended = false
+    private var fileDragInProgress = false
     private var notifications: NativeWindowNotifications?
     private var heldModifiers: Set<UInt16> = []
     private var localModifiers = KeyboardModifierState()
@@ -40,6 +45,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true; layer?.backgroundColor = NSColor.black.cgColor
+        registerForDraggedTypes([.fileURL])
         video.videoGravity = .resizeAspect; layer?.addSublayer(video)
         statusObservation = video.sampleBufferRenderer.observe(\.status, options: [.new]) { @Sendable [weak self] _, change in
             guard change.newValue == .failed else { return }
@@ -50,6 +56,24 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard model?.phase == .streaming, let files = model?.files, !files.isBusy,
+              sender.draggingPasteboard.availableType(from: [.fileURL]) != nil else { return [] }
+        fileDragInProgress = true; model?.releaseInput(); return .copy
+    }
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        let accepted = model?.phase == .streaming && model?.files?.isBusy == false
+        if !accepted { fileDragInProgress = false }
+        return accepted
+    }
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        defer { fileDragInProgress = false }
+        guard model?.phase == .streaming, let files = model?.files, !files.isBusy,
+              let urls = NativeFileDrop.urls(from: sender.draggingPasteboard) else { return false }
+        model?.releaseInput(); files.send(urls: urls); onFilesDropped?(); return true
+    }
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) { fileDragInProgress = false }
+    override func concludeDragOperation(_ sender: (any NSDraggingInfo)?) { fileDragInProgress = false }
     override func layout() { super.layout(); video.frame = bounds }
     override func updateTrackingAreas() {
         super.updateTrackingAreas(); for area in trackingAreas { removeTrackingArea(area) }
@@ -97,10 +121,11 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         window?.isKeyWindow == true && window?.firstResponder === self && NSApp.isActive
     }
     private var acceptsInput: Bool {
-        focusedForInput && model?.phase == .streaming && model?.inputRecovery == false
+        !inputSuspended && !fileDragInProgress && focusedForInput && model?.phase == .streaming && model?.inputRecovery == false
     }
     override func resignFirstResponder() -> Bool { model?.releaseInput(); return super.resignFirstResponder() }
     private func pointer(_ event: NSEvent, action: UInt8) {
+        guard !inputSuspended, !fileDragInProgress else { return }
         let p = convert(event.locationInWindow, from: nil)
         candidateAnchor = p
         let isUp = [2,4,6].contains(action)
@@ -114,6 +139,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         if model?.send(packet) == true, [1,3,5].contains(action) { heldButtons.insert(action) }
     }
     override func mouseDown(with event: NSEvent) {
+        guard !inputSuspended, !fileDragInProgress else { return }
         window?.makeFirstResponder(self)
         if model?.inputRecovery == true { model?.recoverInput(); return }
         pointer(event, action: 1)

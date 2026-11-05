@@ -28,6 +28,12 @@ namespace Knot.NativePreview
         private readonly ComboBox addresses = new ComboBox();
         private readonly ComboBox qualityProfiles = new ComboBox();
         private readonly CheckBox legacyMode = new CheckBox();
+        private readonly CheckBox allowFiles = new CheckBox();
+        private readonly PreviewButton chooseFileFolder, openFileFolder;
+        private readonly Label fileFolderValue, fileFolderHint;
+        private string fileRootPath;
+        private string fileRootName = "Knot Files";
+        private readonly Label shareScope;
         private readonly Label enrollmentCode = new Label();
         private readonly PreviewButton share, copy, stop, approve, decline, desktopNavigation, helpNavigation, networkDisclosure, compactDesktopNavigation, compactHelpNavigation;
         private readonly TextBox status = new TextBox(), pin = new TextBox();
@@ -35,7 +41,7 @@ namespace Knot.NativePreview
         private readonly Panel scroll = new Panel();
         private readonly TableLayoutPanel body, helpBody, networkSettings, shell, header;
         private readonly FlowLayoutPanel actions, compactNavigation;
-        private readonly PreviewCard taskCard, networkCard, qualityCard;
+        private readonly PreviewCard taskCard, networkCard, qualityCard, filesCard;
         private readonly Panel main, rail, footer;
         private readonly TableLayoutPanel requestPanel;
         private readonly PreviewTrustPanel trustPanel;
@@ -53,6 +59,7 @@ namespace Knot.NativePreview
         private HostViewPhase phase;
         private HostViewSnapshot fixture;
         private string rawStatus = "";
+        private string rawFileStatus = "";
         private string fixtureCode = "";
         private bool closing, helpVisible, networkExpanded, settingWrapWidths, invitationAvailable, responsiveLayout, compactMode, densityApplied;
 
@@ -65,6 +72,7 @@ namespace Knot.NativePreview
             if (layoutScale < 1 || layoutScale > 2) throw new ArgumentException("Invalid fixture layout scale.");
             fixtureMode = visualFixture; scale = visualFixture ? layoutScale : 1f; fixtureTrace = visualFixture ? trace : null;
             advertisedName = PreviewCopy.DiscoveryName(visualFixture ? "작업용 Windows" : Environment.MachineName);
+            fileRootPath = visualFixture ? @"C:\Synthetic\Knot Files" : FileSharingOptions.DefaultRootPath;
             Text = "Knot Native Preview"; ClientSize = new Size(P(1040), P(740));
             MinimumSize = new Size(P(500), P(360)); StartPosition = FormStartPosition.CenterScreen;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = visualFixture ? AutoScaleMode.None : AutoScaleMode.Dpi;
@@ -92,6 +100,13 @@ namespace Knot.NativePreview
             networkDisclosure = ActionButton("연결 세부정보", PreviewButtonKind.Secondary);
             SetOwnedFont(networkDisclosure, PreviewStyle.Type(9, FontStyle.Regular, scale));
             networkDisclosure.MinimumSize = new Size(0, P(34));
+            chooseFileFolder = ActionButton("폴더 변경", PreviewButtonKind.Secondary);
+            openFileFolder = ActionButton("공유 폴더 열기", PreviewButtonKind.Secondary);
+            foreach (PreviewButton button in new PreviewButton[] { chooseFileFolder, openFileFolder })
+            {
+                SetOwnedFont(button, PreviewStyle.Type(9, FontStyle.Regular, scale));
+                button.MinimumSize = new Size(0, P(32)); button.Padding = new Padding(P(10), P(6), P(10), P(6));
+            }
 
             shell = Column(); shell.Dock = DockStyle.Fill; shell.AutoSize = false;
             shell.ColumnCount = 2; shell.ColumnStyles.Clear();
@@ -159,9 +174,27 @@ namespace Knot.NativePreview
             trustPanel = new PreviewTrustPanel(trustTitle, pin) { Dock = DockStyle.Top, Margin = new Padding(0, 0, 0, P(18)) };
             taskCard.Content.Controls.Add(trustPanel);
 
+            shareScope = MakeLabel("", 9, FontStyle.Bold);
+            shareScope.Margin = new Padding(0, 0, 0, P(12));
+            shareScope.AccessibleName = "이번 공유에서 허용할 화면 입력 및 파일 폴더 범위";
+            taskCard.Content.Controls.Add(shareScope);
+
             actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
             actions.Controls.AddRange(new Control[] { share, copy, approve, decline });
             taskCard.Content.Controls.Add(actions);
+
+            filesCard = new PreviewCard(scale); filesCard.Dock = DockStyle.Top; body.Controls.Add(filesCard);
+            allowFiles.Text = "파일 송수신도 허용 · 아래 폴더만"; allowFiles.Checked = true;
+            allowFiles.AutoSize = true; allowFiles.Dock = DockStyle.Top; allowFiles.Margin = new Padding(0, 0, 0, P(8));
+            allowFiles.AccessibleName = "화면 공유와 함께 표시한 파일 폴더의 송수신 허용";
+            SetOwnedFont(allowFiles, PreviewStyle.Type(10, FontStyle.Bold, scale)); filesCard.Content.Controls.Add(allowFiles);
+            fileFolderValue = MakeLabel(fileRootPath, 9.5f, FontStyle.Regular);
+            fileFolderValue.AccessibleName = "Mac과 파일을 주고받을 Windows 공유 폴더";
+            fileFolderValue.Margin = new Padding(0, 0, 0, P(8)); filesCard.Content.Controls.Add(fileFolderValue);
+            fileFolderHint = MakeLabel("Mac에서 보낼 파일은 이 폴더에 복사돼요. Mac으로 가져올 Windows 파일도 이 폴더에 넣어주세요.", 9, FontStyle.Regular);
+            fileFolderHint.Margin = new Padding(0, 0, 0, P(10)); filesCard.Content.Controls.Add(fileFolderHint);
+            FlowLayoutPanel fileActions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
+            fileActions.Controls.AddRange(new Control[] { chooseFileFolder, openFileFolder }); filesCard.Content.Controls.Add(fileActions);
 
             qualityCard = new PreviewCard(scale); qualityCard.Dock = DockStyle.Top; body.Controls.Add(qualityCard);
             Label qualityTitle = MakeLabel("화질", 9, FontStyle.Bold);
@@ -207,6 +240,7 @@ namespace Knot.NativePreview
             networkDisclosure.Click += delegate { networkExpanded = !networkExpanded; SetViewVisible(networkSettings, networkExpanded); ApplyCurrentPresentation(); };
             legacyMode.CheckedChanged += delegate { if (server == null) ApplyCurrentPresentation(); };
             addresses.SelectedIndexChanged += delegate { UpdateNetwork(); };
+            allowFiles.CheckedChanged += delegate { if (server == null) rawFileStatus = ""; ApplyCurrentPresentation(); };
             SizeChanged += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
             Shown += delegate
             {
@@ -318,7 +352,8 @@ namespace Knot.NativePreview
             Label title = MakeLabel("8자리 번호로 연결하기", 17, FontStyle.Bold); title.Margin = new Padding(0, 0, 0, P(20)); steps.Content.Controls.Add(title);
             AddHelpStep(steps.Content, "01  Windows에서 공유 시작", "이 Windows와 Mac에서 Knot Native Preview를 여세요. 이 PC의 ‘화면 공유 시작’을 누르면 8자리 번호가 표시돼요. 같은 Wi-Fi나 Tailscale에 연결되어 있어야 해요.");
             AddHelpStep(steps.Content, "02  Mac에서 PC 찾기 → 이 PC 선택", "Mac의 ‘주변 PC 찾기’를 누르고 Windows 공유 화면의 이름·주소와 비교해 이 PC를 선택하세요. PC를 선택해야 다음 번호 입력 화면이 나와요. Tailscale이나 검색이 안 되는 환경에서는 Mac의 ‘다른 연결 방법’에서 이 Windows의 연결 네트워크 주소로 찾으세요.");
-            AddHelpStep(steps.Content, "03  Mac에서 8자리 번호 입력", "선택한 이 PC의 Knot 화면에 표시된 번호를 Mac에 입력하고 ‘이 PC에 연결’을 누르세요. 번호를 아는 Mac 한 대에 이번 화면·입력을 허용하며 Windows에서 추가 승인은 없어요. 번호는 공유 시작 후 2분·1회용이에요. 만료됐다면 이 PC에서 다시 공유해주세요.");
+            AddHelpStep(steps.Content, "03  Mac에서 8자리 번호 입력", "선택한 이 PC의 Knot 화면에 표시된 번호를 Mac에 입력하고 ‘이 PC에 연결’을 누르세요. 번호를 아는 Mac 한 대에 화면·입력과 켜둔 파일 폴더를 허용하며 Windows에서 추가 승인은 없어요. 번호는 공유 시작 후 2분·1회용이에요. 만료됐다면 다시 공유해주세요.");
+            AddHelpStep(steps.Content, "연결 중 파일 주고받기", "Mac의 ‘파일’에서 보내기·받기를 사용하세요. Finder 파일을 원격 화면에 놓으면 표시한 Windows 공유 폴더로 복사돼요. 그 폴더의 Windows 파일은 Mac 파일 목록에서 받거나 아이콘을 Finder로 끌어올 수 있어요. 일반 파일만 최대 8GiB, 원본은 지우지 않아요. 폴더·덮어쓰기·클립보드 동기화는 지원하지 않아요.");
             Label legacyHelp = MakeLabel("고급의 긴 연결코드 방식을 선택했다면 Mac에 코드를 붙여 넣은 뒤, Windows에서 연결 요청을 허용해주세요.", 9, FontStyle.Regular);
             legacyHelp.ForeColor = PreviewStyle.Muted; legacyHelp.Margin = Padding.Empty; steps.Content.Controls.Add(legacyHelp);
             PreviewButton returnToSharing = ActionButton("이 PC 공유로 돌아가기", PreviewButtonKind.Secondary);
@@ -327,7 +362,7 @@ namespace Knot.NativePreview
             help.Controls.Add(steps);
             PreviewCard scope = new PreviewCard(scale); scope.Dock = DockStyle.Top;
             Label scopeTitle = MakeLabel("이번 미리보기에서 알아둘 점", 12, FontStyle.Bold); scopeTitle.Margin = new Padding(0, 0, 0, P(10)); scope.Content.Controls.Add(scopeTitle);
-            scope.Content.Controls.Add(MakeLabel("연결 코드는 2분 동안 한 번만 사용할 수 있어요. 다시 연결할 때는 새 코드가 필요해요.\r\n\r\n로그인된 Windows 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요.\r\n\r\n파일·오디오·무모니터·HDR·잠금/UAC 화면·자동 업데이트는 아직 지원하지 않아요.\r\n\r\n긴 연결코드 복사는 현재 클립보드를 바꾸고 Windows 기록·클라우드 제외를 요청해요. 다른 프로그램의 현재 클립보드 접근까지 막지는 않아요.\r\n\r\n중지는 입력 해제를 요청해요. Windows가 거부하면 제한된 재시도로 해제 성공을 보장할 수는 없어요.", 10, FontStyle.Regular));
+            scope.Content.Controls.Add(MakeLabel("연결 코드는 2분 동안 한 번만 사용할 수 있어요. 다시 연결할 때는 새 코드가 필요해요.\r\n\r\n로그인된 Windows 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요.\r\n\r\n오디오·무모니터·HDR·잠금/UAC 화면·자동 업데이트는 아직 지원하지 않아요.\r\n\r\n긴 연결코드 복사는 현재 클립보드를 바꾸고 Windows 기록·클라우드 제외를 요청해요. 다른 프로그램의 현재 클립보드 접근까지 막지는 않아요.\r\n\r\n중지는 입력 해제를 요청해요. Windows가 거부하면 제한된 재시도로 해제 성공을 보장할 수는 없어요.", 10, FontStyle.Regular));
             help.Controls.Add(scope); return help;
         }
         private void AddHelpStep(TableLayoutPanel parent, string title, string description)
@@ -411,8 +446,8 @@ namespace Knot.NativePreview
                 header.Padding = compact ? new Padding(R(16), R(8), R(16), R(6)) : new Padding(R(32), R(28), R(32), R(20));
                 badge.Margin = new Padding(0, R(compact ? 4 : 12), 0, 0);
                 body.Padding = helpBody.Padding = new Padding(R(compact ? 16 : 32), 0, R(compact ? 16 : 32), R(compact ? 12 : 20));
-                taskCard.Padding = networkCard.Padding = qualityCard.Padding = new Padding(R(compact ? 12 : 24));
-                taskCard.Margin = networkCard.Margin = qualityCard.Margin = new Padding(0, 0, 0, R(compact ? 12 : 16));
+                taskCard.Padding = networkCard.Padding = qualityCard.Padding = filesCard.Padding = new Padding(R(compact ? 12 : 24));
+                taskCard.Margin = networkCard.Margin = qualityCard.Margin = filesCard.Margin = new Padding(0, 0, 0, R(compact ? 12 : 16));
                 foreach (Control control in helpBody.Controls)
                 {
                     PreviewCard card = control as PreviewCard;
@@ -492,7 +527,8 @@ namespace Knot.NativePreview
         private void ApplyPresentation(HostViewSnapshot view)
         {
             bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
-            privacy.Text = view.EnrollmentMode ? "공유를 시작하면 번호를 아는 Mac 한 대에 이번 화면·입력을 허용해요. 연결이 끝나면 권한도 끝나요." : "허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.";
+            privacy.Text = allowFiles.Checked ? "공유를 시작하면 화면·입력과 표시한 파일 폴더를 허용해요. 연결이 끝나면 파일 접근 권한도 끝나요." :
+                view.EnrollmentMode ? "공유를 시작하면 번호를 아는 Mac 한 대에 이번 화면·입력을 허용해요. 연결이 끝나면 권한도 끝나요." : "허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.";
             badge.Text = "●  " + PreviewCopy.Phase(view.Phase);
             badge.ForeColor = view.Phase == HostViewPhase.Failed ? PreviewStyle.Warning : PreviewStyle.Muted;
             stateStep.Text = view.Phase == HostViewPhase.Failed ? "공유 준비 확인" : idle ? "01  화면 공유" : view.Phase == HostViewPhase.Invitation ? "02  Mac에 코드 보내기" : "03  연결 확인";
@@ -534,6 +570,18 @@ namespace Knot.NativePreview
             addresses.Enabled = legacyMode.Enabled = !view.RunPresent; networkDisclosure.Enabled = true;
             qualityProfiles.Enabled = !view.RunPresent;
             SetViewVisible(qualityCard, idle && !view.RunPresent);
+            shareScope.Text = allowFiles.Checked ? "허용 범위: 화면·입력 + 파일 폴더 ‘" + fileRootName + "’" : "허용 범위: 화면과 입력 · 파일 공유 꺼짐";
+            SetViewVisible(shareScope, idle);
+            allowFiles.Enabled = chooseFileFolder.Enabled = !view.RunPresent;
+            chooseFileFolder.Visible = !view.RunPresent;
+            openFileFolder.Visible = view.RunPresent && view.Phase == HostViewPhase.Sharing && allowFiles.Checked;
+            openFileFolder.Enabled = rawFileStatus.Length == 0;
+            fileFolderValue.Text = allowFiles.Checked ? fileRootPath : "파일 공유 꺼짐 · 화면과 입력만 허용해요";
+            fileFolderHint.Text = rawFileStatus.Length != 0 ? rawFileStatus : view.Phase == HostViewPhase.Sharing ?
+                "Mac의 ‘파일’에서 보내기·받기 또는 Finder 드래그를 사용하세요. 이 폴더에 넣은 Windows 파일만 목록에 보여요." :
+                "Mac에서 보낼 파일은 이 폴더에 복사돼요. 가져올 Windows 파일도 여기에 넣어주세요. 폴더 전송은 아직 지원하지 않아요.";
+            fileFolderHint.ForeColor = rawFileStatus.Length == 0 ? PreviewStyle.Muted : PreviewStyle.Warning;
+            SetViewVisible(filesCard, idle || view.Phase == HostViewPhase.Sharing);
             if (status.Text != view.Status) status.Text = view.Status;
             ApplyResponsiveLayout(); UpdateWrapWidths();
         }
@@ -553,7 +601,15 @@ namespace Knot.NativePreview
         internal string DisplayedHostIdentity { get { return hostIdentity.Text; } }
         internal bool FixtureNumberGuidanceVisible { get { return hostIdentity.Visible && numberLifetime.Visible && stateDescription.Text == PreviewCopy.NumberInstruction; } }
         internal bool FixtureOnboardingVisible { get { return stateDescription.Visible && stateDescription.Text == PreviewCopy.Onboarding; } }
-        internal bool FixtureOnboardingActionFits { get { return !share.Visible || scroll.ClientRectangle.Contains(BoundsWithin(share, scroll)); } }
+        internal bool FixtureFileFolderVisible { get { return filesCard.Visible && fileFolderValue.Visible && allowFiles.Checked; } }
+        internal string DisplayedFileFolder { get { return fileFolderValue.Text; } }
+        internal bool FixtureFileServiceUnavailable { get { return rawFileStatus.Length != 0 && fileFolderHint.Text == rawFileStatus && !openFileFolder.Enabled; } }
+        internal void SetFixtureFileStatus(string value)
+        {
+            if (!fixtureMode) throw new InvalidOperationException("Synthetic file status is unavailable in the production form.");
+            rawFileStatus = value ?? ""; ApplyCurrentPresentation();
+        }
+        internal bool FixtureOnboardingActionFits { get { return (!share.Visible || scroll.ClientRectangle.Contains(BoundsWithin(share, scroll))) && (!shareScope.Visible || scroll.ClientRectangle.Contains(BoundsWithin(shareScope, scroll))); } }
         internal string DisplayedStatus { get { return status.Text; } }
         internal bool HelpVisible { get { return helpVisible; } }
         internal string DisplayedPin { get { return pin.Text; } }
@@ -626,6 +682,32 @@ namespace Knot.NativePreview
             };
             stop.Click += delegate { StopShare(); };
             approve.Click += delegate { Decide(true); }; decline.Click += delegate { Decide(false); };
+            chooseFileFolder.Click += delegate
+            {
+                if (server != null) return;
+                using (FolderBrowserDialog picker = new FolderBrowserDialog())
+                {
+                    picker.Description = "이 폴더의 일반 파일만 Mac과 주고받아요. 공유 중에는 변경할 수 없어요.";
+                    if (System.IO.Directory.Exists(fileRootPath)) picker.SelectedPath = fileRootPath;
+                    if (picker.ShowDialog(this) != DialogResult.OK || server != null) return;
+                    try
+                    {
+                        FileSharingOptions options = new FileSharingOptions(picker.SelectedPath);
+                        fileRootPath = options.RootPath; fileRootName = options.RootName; ApplyCurrentPresentation();
+                    }
+                    catch (Exception) { rawStatus = "이 폴더를 공유하도록 준비하지 못했어요. 다른 폴더를 선택해주세요."; ApplyCurrentPresentation(); }
+                }
+            };
+            openFileFolder.Click += delegate
+            {
+                if (server == null || !server.IsActive || !allowFiles.Checked) return;
+                try
+                {
+                    string explorer = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = explorer, Arguments = "\"" + fileRootPath + "\"", UseShellExecute = false });
+                }
+                catch (Exception) { rawStatus = "공유 폴더를 열지 못했어요. 표시한 경로를 탐색기에서 확인해주세요."; ApplyCurrentPresentation(); }
+            };
         }
         private static List<AdapterChoice> PrivateAddresses()
         {
@@ -653,8 +735,20 @@ namespace Knot.NativePreview
             try
             {
                 HostServer run = new HostServer(selected.Address, 48631, new WindowsMediaFactory(SelectedQuality), new WindowsInputSink(), false, null,
-                    !legacyMode.Checked, System.Diagnostics.Stopwatch.GetTimestamp, advertisedName);
-                server = run; presentation.Bind(run.Identity); phase = HostViewPhase.Invitation; invitationAvailable = true;
+                    !legacyMode.Checked, System.Diagnostics.Stopwatch.GetTimestamp, advertisedName,
+                    files: allowFiles.Checked ? new FileSharingOptions(fileRootPath) : null);
+                server = run; rawFileStatus = ""; presentation.Bind(run.Identity); phase = HostViewPhase.Invitation; invitationAvailable = true;
+                run.FileStatusChanged = delegate(string text)
+                {
+                    OnUi(delegate
+                    {
+                        if (server != run || !presentation.IsCurrent(run.Identity)) return;
+                        // Only the authored file-service notice is displayed here;
+                        // media state/status remains owned by the media callbacks.
+                        rawFileStatus = "파일 공유 폴더를 준비하지 못했어요. 화면 연결은 계속 사용할 수 있어요.";
+                        ApplyCurrentPresentation();
+                    });
+                };
                 run.StatusChanged = delegate(string text)
                 {
                     OnUi(delegate

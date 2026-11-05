@@ -83,7 +83,7 @@ private func offerJSON(_ changes: [String: Any] = [:]) throws -> Data {
 @Test func enrollmentConfirmationAndErrorsNeverAdmitArbitraryPermissionsOrRawMessages() throws {
     let confirmation = try EnrollmentWire.confirm(slot: enrollmentSlot, name: "My Mac")
     let object = try StrictJSON.object(confirmation, keys: ["v", "slot", "name", "permissions"], limit: 484)
-    #expect(try object.string("permissions") == "screen,input")
+    #expect(try object.string("permissions") == "screen,input,files")
     #expect(try object.string("name") == "My Mac")
     #expect(throws: (any Error).self) { try EnrollmentWire.confirm(slot: enrollmentSlot, name: "bad\rname") }
     #expect(try EnrollmentWire.serverError(Data("{\"code\":\"auth\"}".utf8)) == .authentication)
