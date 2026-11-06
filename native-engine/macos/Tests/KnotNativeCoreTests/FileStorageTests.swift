@@ -205,3 +205,44 @@ private func ownedFileDirectory() throws -> URL {
     #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["unrelated.txt"])
     #expect(try Data(contentsOf: sentinel) == Data("untouched".utf8))
 }
+
+@Test func failedFileSourceAdoptionClosesEachOwnedDescriptorExactlyOnce() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("owned.txt"); try Data([1, 2, 3]).write(to: path)
+    let parent = try FileTreeFS.openDirectory(root)
+    let descriptor = openat(parent, path.lastPathComponent, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard descriptor >= 0 else { Darwin.close(parent); throw NativeFileError.io }
+    // The observer retains both real descriptors until this defer. No failed
+    // cleanup can release a number for another fixture or race a reused FD.
+    defer { Darwin.close(descriptor); Darwin.close(parent) }
+    var captured = stat(); try #require(fstat(descriptor, &captured) == 0)
+    captured.st_size += 1 // force the actual post-initialization identity guard
+    var closed: [Int32] = []
+    #expect(throws: NativeFileError.changed) {
+        try NativeFileSource(descriptor: descriptor, parent: parent, name: path.lastPathComponent, captured: captured,
+                             closeDescriptor: { closed.append($0) })
+    }
+    #expect(Set(closed) == Set([descriptor, parent]))
+    #expect(closed.count == 2)
+    #expect(closed.filter { $0 == descriptor }.count == 1 && closed.filter { $0 == parent }.count == 1)
+    #expect(fcntl(descriptor, F_GETFD) >= 0 && fcntl(parent, F_GETFD) >= 0)
+}
+
+@Test func failedTreeSourceSnapshotClosesEachOwnedDescriptorExactlyOnce() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("tree")
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+    let leaf = source.appendingPathComponent("leaf"); try Data([1]).write(to: leaf)
+    try FileManager.default.createSymbolicLink(at: source.appendingPathComponent("unsupported-link"), withDestinationURL: leaf)
+    var closed: [Int32] = []
+    // Only these retained, still-open owned descriptors are closed here. The
+    // observer records every ownership close without altering the OS FD table.
+    defer { for descriptor in Set(closed) { Darwin.close(descriptor) } }
+    #expect(throws: NativeFileError.unsupported) {
+        try NativeFileTreeSource(url: source, closeDescriptor: { closed.append($0) })
+    }
+    #expect(Set(closed).count == 2)
+    #expect(closed.count == 2)
+    #expect(closed.allSatisfy { fcntl($0, F_GETFD) >= 0 })
+    #expect(Set(closed).allSatisfy { descriptor in closed.filter { $0 == descriptor }.count == 1 })
+}

@@ -8,7 +8,9 @@ final class NativeFileSource {
     private let parent: Int32
     private let leaf: String
     private let initial: stat
+    private let closeDescriptor: (Int32) -> Void
     init(url: URL) throws {
+        closeDescriptor = { _ = Darwin.close($0) }
         guard url.isFileURL, FileWire.validName(url.lastPathComponent) else { throw NativeFileError.unsupported }
         name = url.lastPathComponent
         parent = try FileTreeFS.openDirectory(url.deletingLastPathComponent())
@@ -22,11 +24,13 @@ final class NativeFileSource {
         }
         initial = info; size = Int64(info.st_size)
     }
-    init(descriptor: Int32, parent: Int32, name: String, captured: stat) throws {
+    init(descriptor: Int32, parent: Int32, name: String, captured: stat,
+         closeDescriptor: @escaping (Int32) -> Void = { _ = Darwin.close($0) }) throws {
+        self.closeDescriptor = closeDescriptor
         self.descriptor = descriptor; self.parent = parent; leaf = name; self.name = name; initial = captured; size = Int64(captured.st_size)
-        do { try requireIdentity() } catch { Darwin.close(descriptor); Darwin.close(parent); throw error }
+        try requireIdentity()
     }
-    deinit { Darwin.close(descriptor); Darwin.close(parent) }
+    deinit { closeDescriptor(descriptor); closeDescriptor(parent) }
     private func requireIdentity() throws {
         var live = stat(), path = stat()
         guard fstat(descriptor, &live) == 0, fstatat(parent, leaf, &path, AT_SYMLINK_NOFOLLOW) == 0,

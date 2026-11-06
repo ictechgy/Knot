@@ -52,23 +52,26 @@ final class NativeFileTreeSource {
     private(set) var size: Int64 = 0
     private let parent: Int32, root: Int32
     private let initial: stat
+    private let closeDescriptor: (Int32) -> Void
     private var admission = try! NativeFileTreeAdmission(count: FileWire.maximumTreeNodes, size: FileWire.maximumSize)
-    init(url: URL) throws {
+    init(url: URL, closeDescriptor: @escaping (Int32) -> Void = { _ = Darwin.close($0) }) throws {
+        self.closeDescriptor = closeDescriptor
         guard url.isFileURL, FileWire.validFolderName(url.lastPathComponent), !FileTreeFS.package(url.lastPathComponent) else { throw NativeFileError.unsupported }
         name = url.lastPathComponent
         parent = try FileTreeFS.openDirectory(url.deletingLastPathComponent())
         root = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         var info = stat()
         guard root >= 0, fstat(root, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else {
-            if root >= 0 { Darwin.close(root) }; Darwin.close(parent); throw NativeFileError.unsupported
+            if root >= 0 { closeDescriptor(root) }; closeDescriptor(parent); throw NativeFileError.unsupported
         }
         initial = info
-        do { try scan(root, parentID: 0); try requireUnchanged() }
-        catch { Darwin.close(root); Darwin.close(parent); throw error }
+        try scan(root, parentID: 0); try requireUnchanged()
     }
-    deinit { Darwin.close(root); Darwin.close(parent) }
+    deinit { closeDescriptor(root); closeDescriptor(parent) }
     private func scan(_ directory: Int32, parentID: Int) throws {
-        guard let stream = fdopendir(dup(directory)) else { throw NativeFileError.io }
+        let enumeration = dup(directory)
+        guard enumeration >= 0 else { throw NativeFileError.io }
+        guard let stream = fdopendir(enumeration) else { Darwin.close(enumeration); throw NativeFileError.io }
         defer { closedir(stream) }
         var names: [String] = []
         while true {
