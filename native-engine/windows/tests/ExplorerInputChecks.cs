@@ -73,7 +73,8 @@ namespace Knot.NativePreview
             Check(sink.Released.WaitOne(4000)); input.Close();
             using (System.IO.MemoryStream framed = new System.IO.MemoryStream())
             {
-                NativeProtocol.Write(framed, 0x26, nonce); framed.Position = 0;
+                framed.Write(new byte[] { 0x26, 0, 0, 0, 16 }, 0, 5);
+                framed.Write(nonce, 0, nonce.Length); framed.Position = 0;
                 Check(NativeProtocol.ReadClient(framed, false).Payload.Length == 16);
             }
             ++explorerInputFixtures;

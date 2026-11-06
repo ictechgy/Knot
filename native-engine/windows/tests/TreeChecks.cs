@@ -76,6 +76,7 @@ namespace Knot.NativePreview
             stage = "tree-export-scopes"; TreeExportChecks();
             stage = "tree-export-tls"; TreeExportTls();
             treeFixtures = fileFixtures - fixturesBefore; treeTlsFixtures = fileTlsFixtures - tlsBefore;
+            fileFixtures = fixturesBefore; fileTlsFixtures = tlsBefore;
         }
         private static void TreeManifestChecks()
         {

@@ -30,7 +30,7 @@ namespace Knot.NativePreview
         private readonly Action beforePublish;
         private readonly Func<string, string[]> captureDrag;
         private readonly Action<string> cancelDrag;
-        private readonly FileExportRegistry exports = new FileExportRegistry();
+        private readonly FileExportRegistry exports;
         private readonly int packetBudgetMilliseconds;
         private readonly byte[] token = EnrollmentProtocol.Random(32);
         private readonly Dictionary<string, FileEntrySnapshot> entries = new Dictionary<string, FileEntrySnapshot>(StringComparer.Ordinal);
@@ -55,8 +55,16 @@ namespace Knot.NativePreview
             this.captureDrag = captureDrag; this.cancelDrag = cancelDrag;
             this.packetBudgetMilliseconds = packetBudgetMilliseconds;
             root = new FileSharedRoot(options);
-            try { listener = new TcpListener(address, port); listener.Start(1); Port = ((IPEndPoint)listener.LocalEndpoint).Port; }
-            catch { root.Dispose(); Array.Clear(token, 0, token.Length); throw; }
+            try
+            {
+                listener = new TcpListener(address, port); listener.Start(1); Port = ((IPEndPoint)listener.LocalEndpoint).Port;
+                exports = new FileExportRegistry();
+            }
+            catch
+            {
+                if (listener != null) listener.Stop(); if (exports != null) exports.Dispose();
+                root.Dispose(); Array.Clear(token, 0, token.Length); throw;
+            }
             worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot native file worker";
         }
         internal void Start()
