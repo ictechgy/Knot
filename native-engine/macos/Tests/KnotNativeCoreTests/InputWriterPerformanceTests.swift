@@ -116,10 +116,10 @@ private final class WriterFixturePresenter: NativePresenter {
 }
 
 @MainActor
-private func waitForWriter(_ predicate: () -> Bool) async throws {
+private func waitForWriter(_ predicate: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation) async throws {
     let deadline = ContinuousClock.now + .seconds(3)
     while !predicate(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
-    try #require(predicate())
+    try #require(predicate(), sourceLocation: sourceLocation)
 }
 
 /// Let the real two-second heartbeat mature while the inert writer gate is
@@ -139,7 +139,14 @@ private func streamingWriterFixture(_ channel: WriterFixtureChannel, presenter: 
                                     pacing: InputPacingFixture? = nil) async throws -> SessionModel {
     let model: SessionModel
     if let pacing {
-        model = SessionModel(makeChannel: { _ in channel }, waitForInputDeadline: { try await pacing.wait(until: $0) })
+        model = SessionModel(makeChannel: { _ in channel }, waitForInputDeadline: { deadline in
+            // Hold only after the first actual input write. Hello/heartbeat and
+            // the initial pointer-down still use ordinary deadline scheduling.
+            // The subsequent barrier is deterministic even if2ms have elapsed.
+            if channel.inputSnapshot().isEmpty {
+                if ContinuousClock.now < deadline { try await Task.sleep(until: deadline) }
+            } else { try await pacing.wait(until: deadline) }
+        })
     } else { model = SessionModel(makeChannel: { _ in channel }) }
     model.surface = presenter
     let token = Invitation.encodeBase64URL(Data(repeating: 9, count: 32))

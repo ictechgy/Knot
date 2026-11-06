@@ -66,7 +66,9 @@ final class SessionModel: ObservableObject {
     var active: Bool { [.connecting, .approval, .decoding, .streaming].contains(phase) }
 
     init(makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) },
-         waitForInputDeadline: @escaping @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void = { try await Task.sleep(until: $0) },
+         waitForInputDeadline: @escaping @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void = { deadline in
+             if ContinuousClock.now < deadline { try await Task.sleep(until: deadline) }
+         },
          makeTrustedClient: @escaping @Sendable (SavedNativeDevice, String) throws -> any NativeTrustedConnecting = { try NativeTrustedClient(device: $0, viewerName: $1) },
          waitForReconnect: @escaping @MainActor @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
          initialSavedDevices: [SavedNativeDevice] = [], initialRegisteredDevice: SavedNativeDevice? = nil) {
@@ -465,7 +467,10 @@ final class SessionModel: ObservableObject {
                 while !Task.isCancelled, self.identity == id {
                     guard self.input.count > 0 || ContinuousClock.now - self.lastHeartbeat >= .seconds(2) else { break }
                     let epoch = self.inputEpoch
-                    if ContinuousClock.now < self.nextInput { try await self.waitForInputDeadline(self.nextInput) }
+                    // The default scheduler returns immediately for an elapsed
+                    // deadline. Always cross this seam so an injected barrier
+                    // cannot disappear when a busy executor misses that window.
+                    try await self.waitForInputDeadline(self.nextInput)
                     try Task.checkCancellation()
                     guard self.identity == id else { return }
                     guard self.inputEpoch == epoch else { continue }
