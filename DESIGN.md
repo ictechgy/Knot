@@ -2,9 +2,9 @@
 
 ## Native certificate compatibility correction (2026-11-07)
 
-Native.11's five-year persistent TLS leaf is rejected by the Mac SSL policy. Fresh synthetic reproduction accepts one-year leaves and rejects the five-year leaf without changing pinning. Native.12 must issue a 365-day total lifetime, including backdating, and test the same production PFX-generation/import path across Windows and Mac.
+Native.11's five-year persistent TLS leaf is rejected by the Mac SSL policy. Its Framework default RSA factory also does not guarantee an actual2048-bit key when assigned through the inherited KeySize setter. Native.12 must explicitly construct and verify a2048-bit RSA key and issue a365-day total lifetime, including backdating, then test the same production PFX-generation/import path across Windows and Mac. Public-key strength must be checked again after PFX import and in the Windows-produced DER on Mac.
 
-Never disable SSL policy or adopt a replacement pin automatically. An existing overlong stored identity requires an explicit Windows primary action, **호환 인증서로 전환하고 공유**. Explain before that action that the old identity is replaced and registered Macs need a new eight-digit pairing. Conversion happens only while idle after the direct button click; automatic restart/resume cannot authorize conversion. Corrupt/expired/keyless state fails closed. New installations need no migration action.
+Never disable SSL policy or adopt a replacement pin automatically. An existing overlong or weak-RSA stored identity requires an explicit Windows primary action, **호환 인증서로 전환하고 공유**. Explain before that action that the old identity is replaced and registered Macs need a new eight-digit pairing. Conversion happens only while idle after the direct button click; automatic restart/resume cannot authorize conversion. Corrupt/expired/keyless state fails closed. New installations need no migration action.
 
 Mac errors distinguish an exact-pin mismatch, OS certificate-policy rejection and network failure; provide authored recovery guidance without showing tokens, raw OS logs or private keys. Fresh synthetic UI fixtures render both migration and certificate-error states without opening a user store or adapter.
 

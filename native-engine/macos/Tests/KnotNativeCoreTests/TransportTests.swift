@@ -14,7 +14,7 @@ private final class CertificateFixture: @unchecked Sendable {
     let certificate: SecCertificate
     let identity: SecIdentity
     let pin: String
-    init(name: String = "knot-native", purpose: String = "serverAuth", days: Int = 1) throws {
+    init(name: String = "knot-native", purpose: String = "serverAuth", days: Int = 1, keyBits: Int = 2048) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("knot-native-tls-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         do {
@@ -29,7 +29,7 @@ private final class CertificateFixture: @unchecked Sendable {
             }
             let key = directory.appendingPathComponent("key.pem").path, pem = directory.appendingPathComponent("cert.pem").path
             let der = directory.appendingPathComponent("cert.der"), p12 = directory.appendingPathComponent("identity.p12")
-            try run(["req","-x509","-newkey","rsa:2048","-nodes","-sha256","-days",String(days),"-config",configuration.path,"-keyout",key,"-out",pem,"-addext","subjectAltName=DNS:\(name)","-addext","extendedKeyUsage=\(purpose)","-addext","basicConstraints=critical,CA:FALSE"])
+            try run(["req","-x509","-newkey","rsa:\(keyBits)","-nodes","-sha256","-days",String(days),"-config",configuration.path,"-keyout",key,"-out",pem,"-addext","subjectAltName=DNS:\(name)","-addext","extendedKeyUsage=\(purpose)","-addext","basicConstraints=critical,CA:FALSE"])
             try run(["x509","-in",pem,"-outform","DER","-out",der.path])
             try run(["pkcs12","-export","-inkey",key,"-in",pem,"-out",p12.path,"-passout","pass:synthetic-fixture-only"])
             let bytes = try Data(contentsOf: der)
@@ -151,6 +151,9 @@ private final class PortGate: @unchecked Sendable {
     let legacy = try CertificateFixture(days: 1826)
     #expect(!TLSChannel.evaluate(try legacy.trust(), expectedPin: legacy.pin))
     #expect(TLSChannel.verificationFailure(try legacy.trust(), expectedPin: legacy.pin) == .certificatePolicy)
+    let weak = try CertificateFixture(keyBits: 1024)
+    #expect(!TLSChannel.evaluate(try weak.trust(), expectedPin: weak.pin))
+    #expect(TLSChannel.verificationFailure(try weak.trust(), expectedPin: weak.pin) == .certificatePolicy)
 }
 
 @Test func freshLoopbackTLSRetainsPolicyFailureAndAcceptsCompatibleLifetime() async throws {
@@ -588,6 +591,9 @@ func freshWindowsPersistentCertificateMeetsTheActualMacOSPolicyAndLifetimeBound(
     try #require(bytes.count <= 65_536)
     let certificate = try #require(SecCertificateCreateWithData(nil, bytes as CFData))
     let pin = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    let publicKey = try #require(SecCertificateCopyKey(certificate))
+    let keyAttributes = try #require(SecKeyCopyAttributes(publicKey) as? [String: Any])
+    #expect((keyAttributes[kSecAttrKeySizeInBits as String] as? NSNumber)?.intValue == 2048)
     let (notBefore, notAfter) = try certificateValidity(certificate)
     #expect(notAfter > notBefore && notAfter.timeIntervalSince(notBefore) <= 397 * 86400)
     func trust(at date: Date? = nil) throws -> SecTrust {

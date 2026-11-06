@@ -323,7 +323,7 @@ struct NativeVisualFixture {
         case "certificate-pin-mismatch":
             model.phase = .failed; model.status = NativeCopy.certificatePinMismatchGuidance
         case "connecting":
-            model.phase = .connecting; model.status = "Verifying the host certificate…"
+            model.phase = .connecting; model.status = "Checking the secure connection…"
         case "approval":
             model.phase = .approval; model.status = "Certificate verified. Waiting for host approval and native encoder startup…"
         case "decoding":

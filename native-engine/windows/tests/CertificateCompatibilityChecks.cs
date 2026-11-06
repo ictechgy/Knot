@@ -80,6 +80,7 @@ namespace Knot.NativePreview
                 {
                     stage = "persistent-certificate-production-pfx-import";
                     Check(certificate.Certificate.HasPrivateKey && certificate.OwnedKeyContainerName == "");
+                    using (RSA publicKey = certificate.Certificate.GetRSAPublicKey()) Check(publicKey != null && publicKey.KeySize == 2048);
                     Check(certificate.Certificate.NotAfter.ToUniversalTime() - certificate.Certificate.NotBefore.ToUniversalTime() == TimeSpan.FromDays(365));
                     Check(!PersistentCertificateFactory.RequiresMigration(certificate.Certificate));
                     Check(RunCertificate.VerifyPinned(certificate.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, certificate.Pin));
@@ -126,11 +127,31 @@ namespace Knot.NativePreview
                 using (SHA256 sha = SHA256.Create()) oldPin = BitConverter.ToString(sha.ComputeHash(prior.RawData)).Replace("-", "").ToLowerInvariant();
                 using (RunCertificate converted = RunCertificate.Persistent(old))
                 {
+                    using (RSA publicKey = converted.Certificate.GetRSAPublicKey()) Check(publicKey != null && publicKey.KeySize == 2048);
                     Check(converted.Pin != oldPin && !PersistentCertificateFactory.RequiresMigration(converted.Certificate));
                     Check(!RunCertificate.VerifyPinned(converted.Certificate, SslPolicyErrors.RemoteCertificateChainErrors, oldPin));
                     stage = "persistent-certificate-converted-userkeyset-tls";
                     PersistentCertificateTls(converted); ++actualPersistentCertificateFixtures;
                 }
+                stage = "persistent-certificate-weak-key-explicit-conversion";
+                byte[] weakPfx = SyntheticPersistentPfx(now, 1024, "1.3.6.1.5.5.7.3.1");
+                try
+                {
+                    ObservedCertificateStorage weak = new ObservedCertificateStorage(Path.Combine(root, "weak")); weak.Inner.Write(weakPfx);
+                    Check(RunCertificate.RequiresCompatibilityMigration(weak));
+                    RejectCertificate(delegate { using (RunCertificate blocked = RunCertificate.Persistent(weak)) { } }, true);
+                    Check(weak.Writes == 0 && weak.Revocations == 0 && SameCertificateStore(weak, weakPfx));
+                    weak.RequireRevocation = true;
+                    weak.BeforeRevocation = delegate { Check(SameCertificateStore(weak, weakPfx)); };
+                    RunCertificate.ConvertPersistentForCompatibility(weak);
+                    Check(weak.Revocations == 1 && weak.Writes == 1 && !RunCertificate.RequiresCompatibilityMigration(weak));
+                    using (RunCertificate converted = RunCertificate.Persistent(weak))
+                    {
+                        using (RSA publicKey = converted.Certificate.GetRSAPublicKey()) Check(publicKey != null && publicKey.KeySize == 2048);
+                        PersistentCertificateTls(converted); ++actualPersistentCertificateFixtures;
+                    }
+                }
+                finally { Array.Clear(weakPfx, 0, weakPfx.Length); }
                 stage = "persistent-certificate-revoke-failure-no-publication";
                 ObservedCertificateStorage revokeFailure = new ObservedCertificateStorage(Path.Combine(root, "revoke-failure")); revokeFailure.Inner.Write(legacy); revokeFailure.FailRevocation = true;
                 RejectCertificateIo(delegate { RunCertificate.ConvertPersistentForCompatibility(revokeFailure); });
@@ -162,7 +183,7 @@ namespace Knot.NativePreview
                 stage = "persistent-certificate-keyless-fails-closed";
                 using (X509Certificate2 cert = PersistentCertificateFactory.Inspect(legacy)) InvalidPersistentCertificate(root, "keyless", cert.Export(X509ContentType.Cert));
                 stage = "persistent-certificate-wrong-purpose-fails-closed";
-                byte[] wrong = WrongPurposePersistentPfx(now);
+                byte[] wrong = SyntheticPersistentPfx(now, 2048, "1.3.6.1.5.5.7.3.2");
                 try { InvalidPersistentCertificate(root, "wrong-purpose", wrong); } finally { Array.Clear(wrong, 0, wrong.Length); }
             }
             finally
@@ -179,16 +200,19 @@ namespace Knot.NativePreview
             RejectCertificate(delegate { RunCertificate.ConvertPersistentForCompatibility(storage); }, false);
             Check(storage.Writes == 0 && storage.Revocations == 0 && SameCertificateStore(storage, pfx));
         }
-        private static byte[] WrongPurposePersistentPfx(DateTimeOffset now)
+        private static byte[] SyntheticPersistentPfx(DateTimeOffset now, int keySize, string purpose)
         {
-            using (RSA rsa = RSA.Create())
+            using (RSACryptoServiceProvider rsa = new RSACryptoServiceProvider(keySize))
             {
-                rsa.KeySize = 2048;
+                rsa.PersistKeyInCsp = false;
+                Check(rsa.KeySize == keySize);
                 CertificateRequest request = new CertificateRequest("CN=knot-native", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+                request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
                 request.CertificateExtensions.Add(new X509Extension("2.5.29.17", new byte[] { 0x30,13,0x82,11,107,110,111,116,45,110,97,116,105,118,101 }, false));
-                OidCollection purposes = new OidCollection(); purposes.Add(new Oid("1.3.6.1.5.5.7.3.2"));
+                OidCollection purposes = new OidCollection(); purposes.Add(new Oid(purpose));
                 request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(purposes, false));
-                using (X509Certificate2 certificate = request.CreateSelfSigned(now.AddDays(-1), now.AddYears(5))) return certificate.Export(X509ContentType.Pfx);
+                using (X509Certificate2 certificate = request.CreateSelfSigned(now.AddDays(-1), now.AddDays(364))) return certificate.Export(X509ContentType.Pfx);
             }
         }
         private static int CertificateLeaseProbe(string root, string nonce)

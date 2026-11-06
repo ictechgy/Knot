@@ -24,7 +24,7 @@ namespace Knot.NativePreview
     {
         internal const string CertificateConversionAction = "호환 인증서로 전환하고 공유";
         internal const string CertificateConversionTitle = "Mac 연결용 인증서를 전환해주세요";
-        internal const string CertificateConversionDisclosure = "이전 5년짜리 인증서는 Mac 보안 규칙에서 거절돼요. 아래 버튼을 누르면 호환 인증서로 교체하고 공유를 시작해요.\r\n등록한 Mac은 초기화되므로 새 8자리 번호로 다시 등록해야 해요.";
+        internal const string CertificateConversionDisclosure = "이전 인증서의 키 또는 유효기간은 Mac 보안 기준에 맞지 않아요. 아래 버튼을 누르면 호환 인증서로 교체하고 공유를 시작해요.\r\n등록한 Mac은 초기화되므로 새 8자리 번호로 다시 등록해야 해요.";
         internal const string ShareTitle = "이 Windows의 화면을 Mac으로 공유";
         internal const string Onboarding = "1  이 Windows에서 ‘화면 공유 시작’\r\n2  Mac에서 ‘주변 PC 찾기’ → 이 PC 선택\r\n3  선택한 PC의 8자리 번호를 Mac에 입력";
         internal const string NumberTitle = "Mac에서 이 PC를 먼저 선택하세요";

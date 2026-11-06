@@ -24,9 +24,14 @@ namespace Knot.NativePreview
         // synthetic checks exercise old/expired identities without reading stores.
         internal static byte[] CreatePfx(DateTimeOffset notBefore, DateTimeOffset notAfter)
         {
-            using (RSA rsa = RSA.Create())
+            // Framework RSA.Create() selects a 1024-bit CSP by default. Its
+            // inherited KeySize setter does not resize the actual CSP key.
+            // Construct the requested key explicitly and remove this fresh
+            // generation container on disposal; only the PFX import persists.
+            using (RSACryptoServiceProvider rsa = new RSACryptoServiceProvider(2048))
             {
-                rsa.KeySize = 2048;
+                rsa.PersistKeyInCsp = false;
+                if (rsa.KeySize != 2048) throw new CryptographicException("Unexpected certificate key size.");
                 CertificateRequest request = new CertificateRequest("CN=knot-native", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
                 request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
@@ -41,7 +46,13 @@ namespace Knot.NativePreview
         // certificate is never passed to Schannel; production TLS uses Import.
         internal static X509Certificate2 Inspect(byte[] pfx) { return new X509Certificate2(pfx, (string)null, X509KeyStorageFlags.EphemeralKeySet); }
         internal static bool RequiresMigration(X509Certificate2 certificate)
-        { return certificate.NotAfter.ToUniversalTime() - certificate.NotBefore.ToUniversalTime() > TimeSpan.FromDays(MaximumValidityDays); }
+        {
+            using (RSA publicKey = certificate.GetRSAPublicKey())
+            {
+                if (publicKey == null) throw new CryptographicException("Invalid registered host key algorithm.");
+                return publicKey.KeySize < 2048 || certificate.NotAfter.ToUniversalTime() - certificate.NotBefore.ToUniversalTime() > TimeSpan.FromDays(MaximumValidityDays);
+            }
+        }
         internal static void Validate(X509Certificate2 certificate)
         {
             DateTime now = DateTime.UtcNow;
