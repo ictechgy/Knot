@@ -43,6 +43,7 @@ namespace Knot.NativePreview
                 stage = "adaptive-quality"; QualityChecks();
                 stage = "explicit-clipboard"; ClipboardChecks();
                 stage = "native-updates"; UpdateChecks();
+                stage = "native-update-resume-scope"; NativePreferencesChecks();
                 stage = "host-policy"; HostPolicyChecks();
                 stage = "host-construction-rollback"; HostRollbackChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();

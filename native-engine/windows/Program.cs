@@ -276,7 +276,18 @@ namespace Knot.NativePreview
                 qualityProfiles.SelectedIndexChanged += delegate { NativePreferences.Quality = qualityProfiles.SelectedIndex; };
                 updates = new NativeUpdates(); updates.Changed += delegate { OnUi(UpdateUpdaterPresentation); };
                 updates.StartAutomaticChecks(); UpdateUpdaterPresentation();
-                if (NativePreferences.ConsumeUpdateResume()) Shown += delegate { try { if (NativeTrustedDevices.List().Count > 0) StartShare(); } catch { } };
+                NativeUpdateResumeState updateResume = NativePreferences.ConsumeUpdateResume();
+                if (updateResume != null) Shown += delegate {
+                    try {
+                        if (updateResume.UntilTicks <= DateTime.UtcNow.Ticks || NativeTrustedDevices.List().Count == 0) return;
+                        // Restore the exact prior consent before any listener or
+                        // file scope can be constructed; never use default scope.
+                        FileSharingOptions scope = new FileSharingOptions(updateResume.FileRootPath);
+                        fileRootPath = updateResume.FileRootPath; fileRootName = scope.RootName;
+                        allowFiles.Checked = updateResume.AllowFiles;
+                        ApplyCurrentPresentation(); StartShare();
+                    } catch { }
+                };
             }
             FormClosing += delegate
             {
@@ -854,7 +865,10 @@ namespace Knot.NativePreview
         {
             if (updates == null) return;
             updates.Install(delegate {
-                if (server != null && (server.IsRegisteredSession || server.HasRegisteredDevices)) NativePreferences.RequestUpdateResume();
+                NativePreferences.ClearUpdateResume();
+                if (NativePreferences.ShouldRequestUpdateResume(shareRequested, server != null,
+                    server != null && server.IsRegisteredSession, server != null && server.HasRegisteredDevices))
+                    NativePreferences.RequestUpdateResume(allowFiles.Checked, fileRootPath);
                 StopShare();
                 Close();
             });
