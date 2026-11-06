@@ -597,7 +597,13 @@ func freshWindowsPersistentCertificateMeetsTheActualMacOSPolicyAndLifetimeBound(
         if let date { try #require(SecTrustSetVerifyDate(trust, date as CFDate) == errSecSuccess) }
         return trust
     }
-    #expect(TLSChannel.evaluate(try trust(), expectedPin: pin))
+    let productionTrust = try trust()
+    let accepted = TLSChannel.evaluate(productionTrust, expectedPin: pin)
+    // This is a fresh CI-exported public certificate, never a user identity.
+    // Preserve the OS reason when policy differs between supported Mac builds.
+    var policyError: CFError?
+    if !accepted { _ = SecTrustEvaluateWithError(productionTrust, &policyError) }
+    #expect(accepted, "Fresh Windows production certificate policy: \(String(describing: policyError)); result: \(String(describing: SecTrustCopyResult(productionTrust)))")
     #expect(TLSChannel.verificationFailure(try trust(), expectedPin: String(repeating: "0", count: 64)) == .certificatePinMismatch)
     #expect(TLSChannel.verificationFailure(try trust(at: notAfter.addingTimeInterval(1)), expectedPin: pin) == .certificatePolicy)
     #expect(TLSChannel.verificationFailure(try trust(at: notBefore.addingTimeInterval(-1)), expectedPin: pin) == .certificatePolicy)

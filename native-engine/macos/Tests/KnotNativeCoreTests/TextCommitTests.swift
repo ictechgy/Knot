@@ -31,7 +31,7 @@ private final class TextCommitChannel: NativeChannel, @unchecked Sendable {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             lock.lock()
             if closed { lock.unlock(); continuation.resume(throwing: NativeFailure.transport) }
-            else if packet.kind != .hello && blockInput {
+            else if packet.kind != .hello && packet.kind != .heartbeat && blockInput {
                 blockInput = false; blocked = (packet, continuation); lock.unlock()
             } else { sent.append(packet); lock.unlock(); continuation.resume() }
         }
@@ -42,7 +42,12 @@ private final class TextCommitChannel: NativeChannel, @unchecked Sendable {
         lock.unlock(); pending?.resume(returning: data)
     }
     var writeBlocked: Bool { lock.lock(); defer { lock.unlock() }; return blocked != nil }
-    func snapshot() -> [Packet] { lock.lock(); defer { lock.unlock() }; return sent }
+    // Heartbeats share the production writer but are not input. They must not
+    // satisfy an input-count wait or consume the deliberately blocked input.
+    func snapshot() -> [Packet] {
+        lock.lock(); defer { lock.unlock() }
+        return sent.filter { $0.kind != .heartbeat }
+    }
     func releaseWrite() {
         lock.lock(); let pending = blocked; blocked = nil
         if let pending { sent.append(pending.0) }
@@ -86,6 +91,9 @@ private final class TextCommitChannel: NativeChannel, @unchecked Sendable {
     try #require(CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixel) == kCVReturnSuccess)
     model.presentDecodedImage(try #require(pixel))
     try #require(model.phase == .streaming)
+    // Exercise the same protocol noise that can precede input on a busy CI
+    // executor, without depending on the real two-second heartbeat timer.
+    try await channel.send(Packet(kind: .heartbeat))
     return model
 }
 
