@@ -5,6 +5,8 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
+using System.Text;
+using System.Threading;
 
 namespace Knot.NativePreview
 {
@@ -54,10 +56,59 @@ namespace Knot.NativePreview
 
     internal interface IPersistentCertificateStorage
     {
+        IDisposable AcquireLease();
         bool Exists { get; }
         byte[] Read();
         void Write(byte[] pfx);
         void RevokeCredentials();
+    }
+
+    // A per-user, per-store kernel lease covers the whole read/generate/revoke/
+    // publish operation across app processes. A second conversion must reread
+    // the first process's result before it can revoke or replace anything.
+    internal sealed class PersistentCertificateLease : IDisposable
+    {
+        private Mutex mutex;
+        private PersistentCertificateLease(Mutex mutex) { this.mutex = mutex; }
+        internal static IDisposable Acquire(string directory)
+        {
+            SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
+            string suffix;
+            using (SHA256 sha = SHA256.Create())
+                suffix = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()))).Replace("-", "");
+            string name = "Global\\KnotNativeCertificate_" + user.Value + "_" + suffix;
+            MutexSecurity security = new MutexSecurity(); security.SetAccessRuleProtection(true, false); security.SetOwner(user);
+            security.AddAccessRule(new MutexAccessRule(user, MutexRights.FullControl, AccessControlType.Allow));
+            bool created;
+            Mutex candidate = new Mutex(false, name, out created, security);
+            bool acquired = false;
+            try
+            {
+                MutexSecurity actual = candidate.GetAccessControl();
+                if (!actual.AreAccessRulesProtected || !user.Equals(actual.GetOwner(typeof(SecurityIdentifier))))
+                    throw new CryptographicException("Invalid certificate operation lease owner.");
+                foreach (MutexAccessRule rule in actual.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+                    if (!user.Equals(rule.IdentityReference) || rule.AccessControlType != AccessControlType.Allow)
+                        throw new CryptographicException("Invalid certificate operation lease access.");
+                try { acquired = candidate.WaitOne(10000); }
+                catch (AbandonedMutexException)
+                {
+                    // WaitOne acquired the abandoned mutex. Release it while
+                    // failing this operation closed; a later explicit retry can
+                    // validate the atomically stored state from the beginning.
+                    candidate.ReleaseMutex();
+                    throw new CryptographicException("A previous certificate operation did not finish. Retry explicitly.");
+                }
+                if (!acquired) throw new CryptographicException("Another certificate operation is still running. Retry explicitly.");
+                PersistentCertificateLease lease = new PersistentCertificateLease(candidate); candidate = null; return lease;
+            }
+            finally { if (candidate != null) { if (acquired) candidate.ReleaseMutex(); candidate.Dispose(); } }
+        }
+        public void Dispose()
+        {
+            Mutex held = mutex; mutex = null;
+            if (held != null) { try { held.ReleaseMutex(); } finally { held.Dispose(); } }
+        }
     }
 
     // The directory is injected only by fresh fixtures; production resolves the
@@ -72,6 +123,7 @@ namespace Knot.NativePreview
             this.directory = directory; path = Path.Combine(directory, "identity.dpapi"); this.revokeCredentials = revokeCredentials;
         }
         internal static ProtectedCertificateStorage Production() { return new ProtectedCertificateStorage(NativeTrustedDevices.DirectoryPath, NativeTrustedDevices.RevokeAll); }
+        public IDisposable AcquireLease() { return PersistentCertificateLease.Acquire(directory); }
         public bool Exists { get { return File.Exists(path); } }
         public byte[] Read() { return NativeTrustedDevices.ReadProtected(path); }
         public void RevokeCredentials() { revokeCredentials(); }

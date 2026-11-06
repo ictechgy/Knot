@@ -308,11 +308,14 @@ namespace Knot.NativePreview
                                 throw new InvalidOperationException("PC selection and number instructions must appear only for a live short-number invitation.");
                             if (expectedNumberGuidance && form.DisplayedHostIdentity != "작업용 Windows\r\n192.168.50.12")
                                 throw new InvalidOperationException("The number must identify the selected Windows name and actual sharing address.");
-                            bool expectedOnboarding = !frame.Help && frame.EnrollmentMode && frame.Phase == HostViewPhase.Idle;
+                            bool expectedOnboarding = !frame.Help && frame.EnrollmentMode && frame.Phase == HostViewPhase.Idle && !frame.CertificateCompatibility;
                             if (form.FixtureOnboardingVisible != expectedOnboarding)
                                 throw new InvalidOperationException("Initial sharing must explain the ordered Windows-start/Mac-select/Mac-number flow.");
                             if (expectedOnboarding && !form.FixtureOnboardingActionFits)
                                 throw new InvalidOperationException("The initial sharing action must be visible without scrolling past onboarding.");
+                            bool expectedConversion = !frame.Help && frame.EnrollmentMode && frame.Phase == HostViewPhase.Idle && frame.CertificateCompatibility;
+                            if (form.FixtureCertificateConversionVisible != expectedConversion || expectedConversion && !form.FixtureOnboardingActionFits)
+                                throw new InvalidOperationException("Certificate conversion must disclose identity replacement and registered-Mac reset before a visible direct action.");
                             bool expectedFiles = !frame.Help && (frame.Phase == HostViewPhase.Idle || frame.Phase == HostViewPhase.Stopped || frame.Phase == HostViewPhase.Failed || frame.Phase == HostViewPhase.Sharing);
                             if (form.FixtureFileFolderVisible != expectedFiles || (expectedFiles && form.DisplayedFileFolder != @"C:\Synthetic\Knot Files"))
                                 throw new InvalidOperationException("File consent must identify the inert shared folder before sharing and during the live session.");

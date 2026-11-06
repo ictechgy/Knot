@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Security;
@@ -14,6 +15,7 @@ namespace Knot.NativePreview
     internal static partial class NativeChecks
     {
         private static int actualPersistentCertificateFixtures;
+        private static int actualCrossProcessCertificateLeaseFixtures;
         private sealed class ObservedCertificateStorage : IPersistentCertificateStorage
         {
             internal readonly ProtectedCertificateStorage Inner;
@@ -22,6 +24,7 @@ namespace Knot.NativePreview
             internal Action BeforeRevocation;
             internal ObservedCertificateStorage(string directory)
             { Inner = new ProtectedCertificateStorage(directory, delegate { }); }
+            public IDisposable AcquireLease() { return Inner.AcquireLease(); }
             public bool Exists { get { return Inner.Exists; } }
             public byte[] Read() { return Inner.Read(); }
             public void RevokeCredentials()
@@ -107,6 +110,8 @@ namespace Knot.NativePreview
 
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 legacy = PersistentCertificateFactory.CreatePfx(now.AddDays(-1), now.AddYears(5));
+                stage = "persistent-certificate-cross-process-lease";
+                CertificateLeaseChecks(root, legacy);
                 stage = "persistent-certificate-legacy-explicit-conversion";
                 ObservedCertificateStorage old = new ObservedCertificateStorage(Path.Combine(root, "legacy")); old.Inner.Write(legacy);
                 Check(RunCertificate.RequiresCompatibilityMigration(old));
@@ -184,6 +189,61 @@ namespace Knot.NativePreview
                 OidCollection purposes = new OidCollection(); purposes.Add(new Oid("1.3.6.1.5.5.7.3.2"));
                 request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(purposes, false));
                 using (X509Certificate2 certificate = request.CreateSelfSigned(now.AddDays(-1), now.AddYears(5))) return certificate.Export(X509ContentType.Pfx);
+            }
+        }
+        private static int CertificateLeaseProbe(string root, string nonce)
+        {
+            Guid parsed;
+            if (nonce.Length != 32 || !Guid.TryParseExact(nonce, "N", out parsed) ||
+                !String.Equals(Path.GetFullPath(root), Path.Combine(Path.GetTempPath(), "KnotCertificateCheck_" + nonce), StringComparison.OrdinalIgnoreCase) ||
+                !Directory.Exists(root)) throw new ArgumentException("Invalid fresh certificate lease fixture.");
+            ObservedCertificateStorage storage = new ObservedCertificateStorage(Path.Combine(root, "lease"));
+            using (FileStream ready = new FileStream(Path.Combine(root, "lease-ready"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) ready.WriteByte(1);
+            // The parent still owns the lease when this starts. All certificate
+            // reads happen after it publishes and releases the replacement.
+            Check(!RunCertificate.RequiresCompatibilityMigration(storage));
+            RejectCertificate(delegate { RunCertificate.ConvertPersistentForCompatibility(storage); }, false);
+            using (RunCertificate current = RunCertificate.Persistent(storage)) Check(current.Certificate.HasPrivateKey);
+            Check(storage.Revocations == 0 && storage.Writes == 0);
+            Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"crossProcessCertificateLease\":true,\"writes\":0,\"revocations\":0}");
+            return 0;
+        }
+        private static void CertificateLeaseChecks(string root, byte[] legacy)
+        {
+            ObservedCertificateStorage storage = new ObservedCertificateStorage(Path.Combine(root, "lease")); storage.Inner.Write(legacy);
+            string nonce = Path.GetFileName(root).Substring("KnotCertificateCheck_".Length);
+            string executable;
+            using (Process current = Process.GetCurrentProcess()) executable = current.MainModule.FileName;
+            ProcessStartInfo start = new ProcessStartInfo(executable, "--certificate-lease-probe \"" + root + "\" " + nonce);
+            start.UseShellExecute = false; start.CreateNoWindow = true; start.RedirectStandardOutput = true; start.RedirectStandardError = true;
+            Process child = null;
+            try
+            {
+                using (storage.AcquireLease())
+                {
+                    child = Process.Start(start); Check(child != null);
+                    Stopwatch ready = Stopwatch.StartNew();
+                    while (!File.Exists(Path.Combine(root, "lease-ready")) && !child.HasExited && ready.ElapsedMilliseconds < 5000) Thread.Sleep(10);
+                    Check(File.Exists(Path.Combine(root, "lease-ready")) && !child.HasExited);
+                    Check(!child.WaitForExit(200));
+                    storage.RequireRevocation = true;
+                    RunCertificate.ConvertPersistentForCompatibility(storage);
+                    Check(storage.Revocations == 1 && storage.Writes == 1);
+                    Check(!child.HasExited);
+                }
+                Check(child.WaitForExit(15000));
+                string output = child.StandardOutput.ReadToEnd(), errors = child.StandardError.ReadToEnd();
+                Check(child.ExitCode == 0 && errors.Length == 0 && output.Contains("\"crossProcessCertificateLease\":true"));
+                Check(!RunCertificate.RequiresCompatibilityMigration(storage));
+                ++actualCrossProcessCertificateLeaseFixtures;
+            }
+            finally
+            {
+                if (child != null)
+                {
+                    if (!child.HasExited) { child.Kill(); child.WaitForExit(5000); }
+                    child.Dispose();
+                }
             }
         }
         private static void PersistentCertificateTls(RunCertificate certificate)

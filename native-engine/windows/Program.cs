@@ -601,10 +601,10 @@ namespace Knot.NativePreview
             SetViewVisible(hostIdentity, numberReady); SetViewVisible(numberLifetime, numberReady);
             SetViewVisible(share, idle); share.Enabled = idle && view.HasAddress && !view.RunPresent;
             bool certificateConversion = idle && !view.RunPresent && !legacyMode.Checked && certificateCompatibilityRequired;
-            share.Text = certificateConversion ? "호환 인증서로 전환하고 공유" : "화면 공유 시작";
+            share.Text = certificateConversion ? PreviewCopy.CertificateConversionAction : "화면 공유 시작";
             if (certificateConversion) {
-                stateTitle.Text = "Mac 연결용 인증서를 전환해주세요";
-                stateDescription.Text = "이전 5년짜리 인증서는 Mac 보안 규칙에서 거절돼요. 아래 버튼을 누르면 호환 인증서로 교체하고 공유를 시작해요.\r\n등록한 Mac은 초기화되므로 새 8자리 번호로 다시 등록해야 해요.";
+                stateTitle.Text = PreviewCopy.CertificateConversionTitle;
+                stateDescription.Text = PreviewCopy.CertificateConversionDisclosure;
             }
             SetViewVisible(copy, !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation); copy.Enabled = !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
             SetViewVisible(approve, !view.EnrollmentMode && view.Phase == HostViewPhase.Request); SetViewVisible(decline, !view.EnrollmentMode && view.Phase == HostViewPhase.Request);
@@ -658,6 +658,9 @@ namespace Knot.NativePreview
             rawFileStatus = value ?? ""; ApplyCurrentPresentation();
         }
         internal bool FixtureOnboardingActionFits { get { return (!share.Visible || scroll.ClientRectangle.Contains(BoundsWithin(share, scroll))) && (!shareScope.Visible || scroll.ClientRectangle.Contains(BoundsWithin(shareScope, scroll))); } }
+        internal bool FixtureCertificateConversionVisible { get { return !helpVisible && certificateCompatibilityRequired && share.Visible && share.Enabled &&
+            share.Text == PreviewCopy.CertificateConversionAction && stateTitle.Text == PreviewCopy.CertificateConversionTitle &&
+            stateDescription.Text == PreviewCopy.CertificateConversionDisclosure; } }
         internal string DisplayedStatus { get { return status.Text; } }
         internal bool HelpVisible { get { return helpVisible; } }
         internal string DisplayedPin { get { return pin.Text; } }

@@ -845,7 +845,8 @@ class Builder:
                 parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False):
             raise ValueError("Native host checks must prove their fresh/inert capture and input scope")
         for key, minimum in [("actualFreshExplorerInputFixtures", 1), ("actualFreshExplorerOleFixtures", 1),
-                             ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28), ("actualPersistentCertificateFixtures", 1)]:
+                             ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28), ("actualPersistentCertificateFixtures", 1),
+                             ("actualCrossProcessCertificateLeaseFixtures", 1)]:
             if type(parsed.get(key)) is not int or parsed[key] < minimum:
                 raise ValueError("Native host folder/Explorer checks incomplete: " + key)
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")

@@ -18,6 +18,7 @@ namespace Knot.NativePreview
         internal static RunCertificate Persistent() { return Persistent(ProtectedCertificateStorage.Production()); }
         internal static RunCertificate Persistent(IPersistentCertificateStorage storage)
         {
+            using (storage.AcquireLease())
             lock (persistentGate)
             {
                 bool existing = storage.Exists;
@@ -42,6 +43,7 @@ namespace Knot.NativePreview
         internal static bool RequiresCompatibilityMigration() { return RequiresCompatibilityMigration(ProtectedCertificateStorage.Production()); }
         internal static bool RequiresCompatibilityMigration(IPersistentCertificateStorage storage)
         {
+            using (storage.AcquireLease())
             lock (persistentGate)
             {
                 if (!storage.Exists) return false;
@@ -57,6 +59,7 @@ namespace Knot.NativePreview
         internal static void ConvertPersistentForCompatibility() { ConvertPersistentForCompatibility(ProtectedCertificateStorage.Production()); }
         internal static void ConvertPersistentForCompatibility(IPersistentCertificateStorage storage)
         {
+            using (storage.AcquireLease())
             lock (persistentGate)
             {
                 if (!storage.Exists) throw new CryptographicException("No registered host identity is available to convert.");
