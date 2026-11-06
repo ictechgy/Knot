@@ -184,14 +184,14 @@ namespace Knot.NativePreview
             taskCard.Content.Controls.Add(actions);
 
             filesCard = new PreviewCard(scale); filesCard.Dock = DockStyle.Top; body.Controls.Add(filesCard);
-            allowFiles.Text = "파일 송수신도 허용 · 아래 폴더만"; allowFiles.Checked = true;
+            allowFiles.Text = "파일·폴더 송수신 허용"; allowFiles.Checked = true;
             allowFiles.AutoSize = true; allowFiles.Dock = DockStyle.Top; allowFiles.Margin = new Padding(0, 0, 0, P(8));
-            allowFiles.AccessibleName = "화면 공유와 함께 표시한 파일 폴더의 송수신 허용";
+            allowFiles.AccessibleName = "공유 폴더 송수신과 직접 끌어온 탐색기 항목 내보내기 허용";
             SetOwnedFont(allowFiles, PreviewStyle.Type(10, FontStyle.Bold, scale)); filesCard.Content.Controls.Add(allowFiles);
             fileFolderValue = MakeLabel(fileRootPath, 9.5f, FontStyle.Regular);
             fileFolderValue.AccessibleName = "Mac과 파일을 주고받을 Windows 공유 폴더";
             fileFolderValue.Margin = new Padding(0, 0, 0, P(8)); filesCard.Content.Controls.Add(fileFolderValue);
-            fileFolderHint = MakeLabel("Mac에서 보낼 파일은 이 폴더에 복사돼요. Mac으로 가져올 Windows 파일도 이 폴더에 넣어주세요.", 9, FontStyle.Regular);
+            fileFolderHint = MakeLabel("Mac 파일·폴더는 여기에 복사돼요. 탐색기에서 직접 끌어온 항목도 Mac으로 보낼 수 있어요.", 9, FontStyle.Regular);
             fileFolderHint.Margin = new Padding(0, 0, 0, P(10)); filesCard.Content.Controls.Add(fileFolderHint);
             FlowLayoutPanel fileActions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
             fileActions.Controls.AddRange(new Control[] { chooseFileFolder, openFileFolder }); filesCard.Content.Controls.Add(fileActions);
@@ -527,7 +527,7 @@ namespace Knot.NativePreview
         private void ApplyPresentation(HostViewSnapshot view)
         {
             bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
-            privacy.Text = allowFiles.Checked ? "공유를 시작하면 화면·입력과 표시한 파일 폴더를 허용해요. 연결이 끝나면 파일 접근 권한도 끝나요." :
+            privacy.Text = allowFiles.Checked ? "화면·입력, 표시한 공유 폴더와 탐색기에서 직접 끌어온 항목을 허용해요. 연결이 끝나면 권한도 끝나요." :
                 view.EnrollmentMode ? "공유를 시작하면 번호를 아는 Mac 한 대에 이번 화면·입력을 허용해요. 연결이 끝나면 권한도 끝나요." : "허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.";
             badge.Text = "●  " + PreviewCopy.Phase(view.Phase);
             badge.ForeColor = view.Phase == HostViewPhase.Failed ? PreviewStyle.Warning : PreviewStyle.Muted;
@@ -570,7 +570,7 @@ namespace Knot.NativePreview
             addresses.Enabled = legacyMode.Enabled = !view.RunPresent; networkDisclosure.Enabled = true;
             qualityProfiles.Enabled = !view.RunPresent;
             SetViewVisible(qualityCard, idle && !view.RunPresent);
-            shareScope.Text = allowFiles.Checked ? "허용 범위: 화면·입력 + 파일 폴더 ‘" + fileRootName + "’" : "허용 범위: 화면과 입력 · 파일 공유 꺼짐";
+            shareScope.Text = allowFiles.Checked ? "화면·입력 + 공유 폴더 ‘" + fileRootName + "’ + 직접 끌어온 탐색기 항목" : "허용 범위: 화면과 입력 · 파일 공유 꺼짐";
             SetViewVisible(shareScope, idle);
             allowFiles.Enabled = chooseFileFolder.Enabled = !view.RunPresent;
             chooseFileFolder.Visible = !view.RunPresent;
@@ -578,8 +578,8 @@ namespace Knot.NativePreview
             openFileFolder.Enabled = rawFileStatus.Length == 0;
             fileFolderValue.Text = allowFiles.Checked ? fileRootPath : "파일 공유 꺼짐 · 화면과 입력만 허용해요";
             fileFolderHint.Text = rawFileStatus.Length != 0 ? rawFileStatus : view.Phase == HostViewPhase.Sharing ?
-                "Mac의 ‘파일’에서 보내기·받기 또는 Finder 드래그를 사용하세요. 이 폴더에 넣은 Windows 파일만 목록에 보여요." :
-                "Mac에서 보낼 파일은 이 폴더에 복사돼요. 가져올 Windows 파일도 여기에 넣어주세요. 폴더 전송은 아직 지원하지 않아요.";
+                "Mac의 ‘파일’에서 파일·폴더를 주고받으세요. 탐색기에서 선택한 항목을 화면 밖 Finder로 직접 끌어올 수도 있어요." :
+                "Mac에서 보낸 파일·폴더는 여기에 복사돼요. 이 폴더 목록과 직접 끌어온 탐색기 항목만 Mac에 제공해요.";
             fileFolderHint.ForeColor = rawFileStatus.Length == 0 ? PreviewStyle.Muted : PreviewStyle.Warning;
             SetViewVisible(filesCard, idle || view.Phase == HostViewPhase.Sharing);
             if (status.Text != view.Status) status.Text = view.Status;

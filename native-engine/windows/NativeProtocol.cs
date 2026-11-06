@@ -200,7 +200,8 @@ namespace Knot.NativePreview
             byte kind = header[0];
             bool valid = hello ? kind == 1 && length >= 1 && length <= 4096 :
                 kind == 0x20 && length == 4 || kind == 0x21 && length >= 1 && length <= 1024 ||
-                kind == 0x22 && length == 5 || kind == 0x23 && length == 8 || (kind == 0x24 || kind == 0x25) && length == 0;
+                kind == 0x22 && length == 5 || kind == 0x23 && length == 8 || (kind == 0x24 || kind == 0x25) && length == 0 ||
+                kind == 0x26 && length == 16;
             if (!valid) throw new ProtocolException("protocol");
             return new Packet(kind, ReadExactly(stream, (int)length));
         }
@@ -260,7 +261,7 @@ namespace Knot.NativePreview
             catch (ProtocolException)
             {
                 hello = StrictJson.Parse(payload, "v", "token", "name", "filesVersion");
-                StrictJson.Integer(hello, "filesVersion", 1, 1); files = true;
+                StrictJson.Integer(hello, "filesVersion", 2, 2); files = true;
             }
             StrictJson.Integer(hello, "v", 1, 1);
             token = DecodeToken(StrictJson.String(hello, "token"));

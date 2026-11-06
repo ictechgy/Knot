@@ -33,27 +33,30 @@ namespace Knot.NativePreview
     {
         internal readonly uint Volume, IndexHigh, IndexLow;
         internal readonly long Size;
+        internal readonly bool Directory;
         internal readonly ulong Modified;
         internal FileHandleInfo(FileNative.Information value)
         {
             Volume = value.VolumeSerialNumber; IndexHigh = value.FileIndexHigh; IndexLow = value.FileIndexLow;
             ulong size = ((ulong)value.FileSizeHigh << 32) | value.FileSizeLow;
             if (size > (ulong)FileProtocol.MaximumSize) throw new FileTransferException("quota");
-            Size = (long)size; Modified = ((ulong)(uint)value.LastWriteTime.dwHighDateTime << 32) | (uint)value.LastWriteTime.dwLowDateTime;
+            Directory = (value.FileAttributes & (uint)FileAttributes.Directory) != 0;
+            Size = Directory ? 0 : (long)size; Modified = ((ulong)(uint)value.LastWriteTime.dwHighDateTime << 32) | (uint)value.LastWriteTime.dwLowDateTime;
         }
         internal bool Same(FileHandleInfo other)
-        { return Volume == other.Volume && IndexHigh == other.IndexHigh && IndexLow == other.IndexLow && Size == other.Size && Modified == other.Modified; }
+        { return Volume == other.Volume && IndexHigh == other.IndexHigh && IndexLow == other.IndexLow && Size == other.Size && Modified == other.Modified && Directory == other.Directory; }
     }
 
     internal sealed class FileEntrySnapshot
     {
         internal readonly string Id, Name;
         internal readonly FileHandleInfo Info;
+        internal string Kind { get { return Info.Directory ? "folder" : "file"; } }
         internal long Size { get { return Info.Size; } }
         internal FileEntrySnapshot(string id, string name, FileHandleInfo info) { Id = id; Name = name; Info = info; }
     }
 
-    internal static class FileNative
+    internal static partial class FileNative
     {
         internal const uint Read = 0x80000000, Write = 0x40000000, Delete = 0x00010000;
         internal const uint OpenReparse = 0x00200000, Backup = 0x02000000;
@@ -334,7 +337,7 @@ namespace Knot.NativePreview
                     InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
                 Directory.CreateDirectory(options.RootPath, acl);
             }
-            directory = FileNative.CreateFile(options.RootPath, 0x100083, FileShare.ReadWrite, IntPtr.Zero, 3, FileNative.Backup | FileNative.OpenReparse, IntPtr.Zero);
+            directory = FileNative.CreateFile(options.RootPath, 0x100087, FileShare.ReadWrite, IntPtr.Zero, 3, FileNative.Backup | FileNative.OpenReparse, IntPtr.Zero);
             try
             {
                 FileNative.Info(directory, true); FileNative.FinalPath(directory);
@@ -346,8 +349,7 @@ namespace Knot.NativePreview
         internal FileStream OpenRead(string name, out FileHandleInfo info)
         {
             FileProtocol.ValidName(name);
-            SafeFileHandle handle = FileNative.CreateFile(Path.Combine(options.RootPath, name), FileNative.Read, FileShare.Read,
-                IntPtr.Zero, 3, FileNative.OpenReparse, IntPtr.Zero);
+            SafeFileHandle handle = FileNative.Relative(directory, name, FileNative.Read, FileShare.Read, false, false, false);
             try
             {
                 FileNative.Information native = FileNative.Info(handle, false); Contained(handle, name);
@@ -368,7 +370,8 @@ namespace Knot.NativePreview
                 try
                 {
                     FileHandleInfo info;
-                    using (FileStream file = OpenRead(name, out info)) { }
+                    using (SafeFileHandle file = FileNative.Relative(directory, name, FileNative.Read, FileShare.ReadWrite, false, null, false))
+                    { info = new FileHandleInfo(FileNative.InfoAny(file)); Contained(file, name); }
                     if (result.Count == FileProtocol.EntryLimit) { truncated = true; break; }
                     result.Add(new FileEntrySnapshot(Guid.NewGuid().ToString("N"), name, info));
                 }
@@ -396,6 +399,17 @@ namespace Knot.NativePreview
             return new FilePartial(this, options.RootPath, size, firstHandle);
         }
         internal bool Rename(SafeFileHandle source, string name) { FileNative.Info(directory, true); return FileNative.Rename(source, directory, name); }
+        internal SafeFileHandle OpenEntry(string name)
+        { FileProtocol.ValidName(name); return FileNative.Relative(directory, name, FileNative.Read, FileShare.Read, false, null, false); }
+        internal FileTreePartial CreateTree(long size, int count, Action<SafeFileHandle> firstHandle = null)
+        {
+            if (size < 0 || size > FileProtocol.MaximumSize || count < 0 || count > FileProtocol.TreeNodeLimit) throw new FileTransferException("quota");
+            DriveInfo drive = new DriveInfo(Path.GetPathRoot(options.RootPath));
+            if (drive.AvailableFreeSpace < size + 67108864L) throw new FileTransferException("quota");
+            return new FileTreePartial(this, directory, count, size, firstHandle);
+        }
+        internal SafeFileHandle CreateStagingFile(string name)
+        { return FileNative.Relative(directory, name, FileNative.Read | FileNative.Write | FileNative.Delete, FileShare.ReadWrite, true, false, true, true); }
         public void Dispose() { directory.Dispose(); }
     }
 
@@ -409,9 +423,7 @@ namespace Knot.NativePreview
         internal FilePartial(FileSharedRoot root, string path, long size, Action<SafeFileHandle> firstHandle)
         {
             this.root = root; this.size = size; temporaryName = ".knot-" + Guid.NewGuid().ToString("N") + ".part";
-            string temporary = Path.Combine(path, temporaryName);
-            SafeFileHandle handle = FileNative.CreatePrivate(temporary, FileNative.Read | FileNative.Write | FileNative.Delete,
-                FileShare.ReadWrite, FileNative.OpenReparse | (uint)FileAttributes.Hidden | (uint)FileAttributes.Temporary);
+            SafeFileHandle handle = root.CreateStagingFile(temporaryName);
             try
             {
                 // Inert regression fixtures may inspect the earliest native handle

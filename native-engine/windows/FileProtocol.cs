@@ -36,6 +36,7 @@ namespace Knot.NativePreview
     internal static class FileProtocol
     {
         internal const int Port = 48634, ChunkSize = 65536, EntryLimit = 256;
+        internal const int TreeNodeLimit = 4096, TreeDepthLimit = 16, TreeMetadataLimit = 1048576, RunNodeLimit = 8192;
         internal const long MaximumSize = 8589934592L, RateBytesPerSecond = 2097152;
         internal static bool IsError(string code)
         { return code == "auth" || code == "busy" || code == "protocol" || code == "timeout" || code == "denied" || code == "missing" || code == "changed" || code == "quota" || code == "io"; }
@@ -92,7 +93,7 @@ namespace Knot.NativePreview
         internal static byte[] Hello(byte[] token)
         {
             if (token == null || token.Length != 32) throw new FileTransferException("protocol");
-            return Json("{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + "}");
+            return Json("{\"v\":2,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + "}");
         }
         internal static byte[] Error(string code)
         {
@@ -103,6 +104,34 @@ namespace Knot.NativePreview
         {
             ValidName(name); if (size < 0 || size > MaximumSize) throw new FileTransferException("protocol");
             return Json("{\"name\":" + StrictJson.Quote(name) + ",\"size\":" + size.ToString(CultureInfo.InvariantCulture) + "}");
+        }
+        internal static int Count(Dictionary<string, object> obj, string key, int maximum)
+        {
+            object value;
+            if (!obj.TryGetValue(key, out value) || !(value is long) || (long)value < 0 || (long)value > maximum)
+                throw new FileTransferException("protocol");
+            return (int)(long)value;
+        }
+        internal static string Kind(Dictionary<string, object> obj)
+        { string value = Text(obj, "kind"); if (value != "file" && value != "folder") throw new FileTransferException("protocol"); return value; }
+        internal static byte[] Accepted(string name, long size, string kind, int count)
+        {
+            ValidName(name);
+            if (size < 0 || size > MaximumSize || (kind != "file" && kind != "folder") || count < 0 || count > TreeNodeLimit || kind == "file" && count != 0)
+                throw new FileTransferException("protocol");
+            return Json("{\"name\":" + StrictJson.Quote(name) + ",\"size\":" + size.ToString(CultureInfo.InvariantCulture) + ",\"kind\":" + StrictJson.Quote(kind) + ",\"count\":" + count.ToString(CultureInfo.InvariantCulture) + "}");
+        }
+        internal static byte[] Entry(FileEntrySnapshot value)
+        { return Json("{\"entry\":" + StrictJson.Quote(value.Id) + ",\"name\":" + StrictJson.Quote(value.Name) + ",\"size\":" + value.Size.ToString(CultureInfo.InvariantCulture) + ",\"kind\":" + StrictJson.Quote(value.Kind) + "}"); }
+        internal static byte[] TreeOffer(string name, long size, int count)
+        {
+            ValidName(name); if (size < 0 || size > MaximumSize || count < 0 || count > TreeNodeLimit) throw new FileTransferException("protocol");
+            return Json("{\"name\":" + StrictJson.Quote(name) + ",\"size\":" + size.ToString(CultureInfo.InvariantCulture) + ",\"count\":" + count.ToString(CultureInfo.InvariantCulture) + "}");
+        }
+        internal static byte[] TreeEnd(int count, long size, byte[] hash)
+        {
+            if (count < 0 || count > TreeNodeLimit || size < 0 || size > MaximumSize || hash == null || hash.Length != 32) throw new FileTransferException("protocol");
+            return Json("{\"count\":" + count.ToString(CultureInfo.InvariantCulture) + ",\"size\":" + size.ToString(CultureInfo.InvariantCulture) + ",\"sha256\":" + StrictJson.Quote(Hex(hash)) + "}");
         }
         internal static byte[] Complete(string name, long size, byte[] hash)
         {
@@ -118,7 +147,7 @@ namespace Knot.NativePreview
         {
             bool valid = kind == 0x42 ? length == 0 : kind == 0x48 ? length >= 9 && length <= ChunkSize + 8 :
                 kind == 0x49 ? length == 40 : kind == 0x7f ? length >= 1 && length <= 128 :
-                kind >= 0x40 && kind <= 0x4a && length >= 1 && length <= 4096;
+                kind >= 0x40 && kind <= 0x4f && length >= 1 && length <= 4096;
             if (!valid) throw new FileTransferException("protocol");
         }
         internal static FilePacket Read(Stream stream)
@@ -140,7 +169,7 @@ namespace Knot.NativePreview
             // Ready itself was already validated by MediaInfo.Ready().
             string text = StrictJson.Utf8.GetString(ready);
             if (!text.EndsWith("}", StringComparison.Ordinal)) throw new FileTransferException("protocol");
-            return Json(text.Substring(0, text.Length - 1) + ",\"filesVersion\":1,\"filePort\":48634,\"fileToken\":" + StrictJson.Quote(token) + ",\"fileRootName\":" + StrictJson.Quote(rootName) + "}");
+            return Json(text.Substring(0, text.Length - 1) + ",\"filesVersion\":2,\"filePort\":48634,\"fileToken\":" + StrictJson.Quote(token) + ",\"fileRootName\":" + StrictJson.Quote(rootName) + "}");
         }
     }
 }

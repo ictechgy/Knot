@@ -22,7 +22,7 @@ namespace Knot.NativePreview
 
     // Input runs synchronously: there is no pending action queue and no stale replay.
     // Only successfully injected downs are retained, and unowned ups are ignored.
-    internal sealed class InputSession
+    internal sealed partial class InputSession
     {
         private readonly object gate = new object();
         private readonly IInputSink sink;
@@ -36,6 +36,7 @@ namespace Knot.NativePreview
             lock (gate)
             {
                 if (closed) throw new ProtocolException("closed");
+                if (!AdmitDuringExplorerDrag(packet)) return;
                 byte[] p = packet.Payload;
                 switch (packet.Kind)
                 {
@@ -67,6 +68,7 @@ namespace Knot.NativePreview
                         bool buttonDown = action % 2 == 1;
                         if (action != 0 && !buttonDown && !buttons.Contains(button)) return;
                         if (!sink.Pointer(action, x, y, rectangle)) throw new ProtocolException("input");
+                        dragPointerX = x; dragPointerY = y;
                         if (action != 0) { if (buttonDown) buttons.Add(button); else buttons.Remove(button); }
                         break;
                     case 0x23:
@@ -79,10 +81,13 @@ namespace Knot.NativePreview
                         if (p.Length != 0) throw new ProtocolException("protocol");
                         // A failed revocation must end input delivery. Retained
                         // owned downs are retried by Close during host teardown.
-                        if (!Release()) throw new ProtocolException("input");
+                        if (!CancelExplorerGesture() || !Release()) throw new ProtocolException("input");
                         break;
                     case 0x25:
                         if (p.Length != 0) throw new ProtocolException("protocol");
+                        break;
+                    case 0x26:
+                        ArmExplorerDrag(p);
                         break;
                     default: throw new ProtocolException("protocol");
                 }
@@ -104,6 +109,7 @@ namespace Knot.NativePreview
             {
                 if (closed) return;
                 closed = true;
+                CancelExplorerGesture();
                 // SendInput can fail during a desktop transition. Bound retries and never
                 // release physical inputs that were not accepted by this session.
                 for (int i = 0; i < 3; ++i) if (Release()) break;

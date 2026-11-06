@@ -54,7 +54,7 @@ namespace Knot.NativePreview
             Check(FileNative.RenameSucceeded(0, unchecked((int)0xc0000035u)));
             Check(!FileNative.RenameSucceeded(unchecked((int)0xc0000035u), 0) && !FileNative.RenameSucceeded(1, 0));
             foreach (int invalidSize in new int[] { -1, 0, 1, 511, 512, int.MaxValue }) FileReject(delegate { FileNative.RenameBufferSize(invalidSize); });
-            foreach (byte kind in new byte[] { 0x40, 0x41, 0x43, 0x44, 0x45, 0x46, 0x47, 0x4a })
+            foreach (byte kind in new byte[] { 0x40, 0x41, 0x43, 0x44, 0x45, 0x46, 0x47, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f })
             {
                 FileProtocol.Validate(kind, 1); FileProtocol.Validate(kind, 4096);
                 FileReject(delegate { FileProtocol.Validate(kind, 0); }); FileReject(delegate { FileProtocol.Validate(kind, 4097); });
@@ -62,7 +62,7 @@ namespace Knot.NativePreview
             FileProtocol.Validate(0x42, 0); FileProtocol.Validate(0x48, 9); FileProtocol.Validate(0x48, 65544); FileProtocol.Validate(0x49, 40);
             FileReject(delegate { FileProtocol.Validate(0x48, 8); }); FileReject(delegate { FileProtocol.Validate(0x48, 65545); });
             FileReject(delegate { FileProtocol.Validate(0x49, 39); }); FileReject(delegate { FileProtocol.Validate(0x49, 41); });
-            FileReject(delegate { FileProtocol.Validate(0x4b, 1); }); FileReject(delegate { FileProtocol.Validate(3, 100); });
+            FileReject(delegate { FileProtocol.Validate(3, 100); });
             FileReject(delegate { FileProtocol.Read(new MemoryStream(new byte[] { 0x48, 0xff, 0xff, 0xff, 0xff })); });
             FileReject(delegate { FileProtocol.Object(Bytes("{\"name\":\"a\",\"name\":\"b\",\"size\":0}"), "name", "size"); });
             FileReject(delegate { FileProtocol.Object(Bytes("{\"name\":\"a\",\"size\":0,\"path\":\"x\"}"), "name", "size"); });
@@ -79,8 +79,8 @@ namespace Knot.NativePreview
             FileReject(delegate { FileProtocol.U64(new byte[8], 1); });
             FileReject(delegate { FileProtocol.U64(new byte[8], int.MaxValue); });
             byte[] token = new byte[32]; bool requested;
-            byte[] decoded; NativeProtocol.HelloName(Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + ",\"name\":\"viewer\",\"filesVersion\":1}"), out decoded, out requested); Check(requested);
-            Reject(delegate { NativeProtocol.HelloName(Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + ",\"name\":\"viewer\",\"filesVersion\":2}"), out decoded, out requested); });
+            byte[] decoded; NativeProtocol.HelloName(Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + ",\"name\":\"viewer\",\"filesVersion\":2}"), out decoded, out requested); Check(requested);
+            Reject(delegate { NativeProtocol.HelloName(Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(NativeProtocol.Base64Url(token)) + ",\"name\":\"viewer\",\"filesVersion\":1}"), out decoded, out requested); });
             byte[] slot = new byte[16]; bool files;
             EnrollmentProtocol.ConfirmName(Confirm(slot, "viewer"), slot, out files); Check(!files);
             EnrollmentProtocol.ConfirmName(Bytes("{\"v\":2,\"slot\":" + StrictJson.Quote(NativeProtocol.Base64Url(slot)) + ",\"name\":\"viewer\",\"permissions\":\"screen,input,files\"}"), slot, out files); Check(files);
@@ -318,7 +318,7 @@ namespace Knot.NativePreview
                     FilePacket packet = client.Read();
                     if (packet.Kind == 0x44)
                     { Dictionary<string, object> end = FileProtocol.Object(packet.Payload, "count", "truncated"); Check(StrictJson.Integer(end, "count", 0, 256) == count); return found; }
-                    Check(packet.Kind == 0x43); Dictionary<string, object> entry = FileProtocol.Object(packet.Payload, "entry", "name", "size");
+                    Check(packet.Kind == 0x43); Dictionary<string, object> entry = FileProtocol.Object(packet.Payload, "entry", "name", "size", "kind");
                     Check(FileProtocol.Hex(FileProtocol.Text(entry, "entry"), 32)); ++count;
                     if (FileProtocol.Text(entry, "name") == name) found = entry;
                 }
@@ -441,7 +441,7 @@ namespace Knot.NativePreview
             }
         }
         private static byte[] FileOptInHello(string token)
-        { return Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(token) + ",\"name\":\"Synthetic viewer\",\"filesVersion\":1}"); }
+        { return Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(token) + ",\"name\":\"Synthetic viewer\",\"filesVersion\":2}"); }
         private static void FileTlsSlowDribble()
         {
             ++fileFixtures;
@@ -494,7 +494,7 @@ namespace Knot.NativePreview
                         client.Send(1, FileOptInHello(token)); Check(pending.WaitOne(3000) && !Directory.Exists(rootPath));
                         server.RespondToApproval(true); Packet ready = client.ReadNonHeartbeat(); Check(ready.Kind == 2 && Directory.Exists(rootPath));
                         Dictionary<string, object> metadata = StrictJson.Parse(ready.Payload, "v", "codec", "width", "height", "fps", "bitrate", "hardwareEncoder", "filesVersion", "filePort", "fileToken", "fileRootName");
-                        Check(StrictJson.Integer(metadata, "filesVersion", 1, 1) == 1 && StrictJson.Integer(metadata, "filePort", 48634, 48634) == 48634);
+                        Check(StrictJson.Integer(metadata, "filesVersion", 2, 2) == 2 && StrictJson.Integer(metadata, "filePort", 48634, 48634) == 48634);
                         using (FileTlsClient files = new FileTlsClient(48634, server.Pin))
                         { files.Authorize(StrictJson.String(metadata, "fileToken")); files.Send(0x42, new byte[0]); Check(files.Read().Kind == 0x44); }
                         Check(server.IsActive); server.Stop(); Check(server.WaitStopped(3000));
@@ -554,10 +554,10 @@ namespace Knot.NativePreview
                 }
             };
             byte[] emptyHash = FileHash(new byte[0]);
-            vector("hello", 0x40, FileProtocol.Hello(token)); vector("authorized", 0x41, Bytes("{\"v\":1}")); vector("list", 0x42, new byte[0]);
-            vector("entry", 0x43, Bytes("{\"entry\":\"0123456789abcdef0123456789abcdef\",\"name\":\"한글😀.txt\",\"size\":0}"));
+            vector("hello", 0x40, FileProtocol.Hello(token)); vector("authorized", 0x41, Bytes("{\"v\":2}")); vector("list", 0x42, new byte[0]);
+            vector("entry", 0x43, Bytes("{\"entry\":\"0123456789abcdef0123456789abcdef\",\"name\":\"한글😀.txt\",\"size\":0,\"kind\":\"file\"}"));
             vector("list-end", 0x44, Bytes("{\"count\":1,\"truncated\":false}")); vector("put", 0x45, FileProtocol.Metadata("a", 0));
-            vector("get", 0x46, Bytes("{\"entry\":\"0123456789abcdef0123456789abcdef\"}")); vector("accepted", 0x47, FileProtocol.Metadata("a", 0));
+            vector("get", 0x46, Bytes("{\"entry\":\"0123456789abcdef0123456789abcdef\"}")); vector("accepted", 0x47, FileProtocol.Accepted("a", 0, "file", 0));
             vector("chunk", 0x48, new byte[9]); vector("finish", 0x49, FileProtocol.Finish(0, emptyHash)); vector("complete", 0x4a, FileProtocol.Complete("a", 0, emptyHash)); vector("error", 0x7f, FileProtocol.Error("denied"));
             byte[] boundary = new byte[65541]; for (int i = 0; i < boundary.Length; ++i) boundary[i] = (byte)(i * 17 + 3);
             byte[][] contents = new byte[][] { new byte[0], Bytes("새 합성 파일 · Native transfer\n"), boundary };
@@ -567,7 +567,7 @@ namespace Knot.NativePreview
                 byte[] bytes = contents[i], digest = FileHash(bytes); string hash = FileProtocol.Hex(digest), encoded;
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    FileProtocol.Write(stream, 0x47, FileProtocol.Metadata(names[i], bytes.Length));
+                    FileProtocol.Write(stream, 0x47, FileProtocol.Accepted(names[i], bytes.Length, "file", 0));
                     for (int offset = 0; offset < bytes.Length; offset += FileProtocol.ChunkSize)
                     {
                         int count = Math.Min(FileProtocol.ChunkSize, bytes.Length - offset); byte[] payload = new byte[count + 8];
@@ -579,7 +579,8 @@ namespace Knot.NativePreview
                 files.Add("{\"name\":" + StrictJson.Quote(names[i]) + ",\"size\":" + bytes.Length + ",\"sha256\":" + StrictJson.Quote(hash) + ",\"bytesBase64\":" + StrictJson.Quote(Convert.ToBase64String(bytes)) + "}");
                 transfers.Add(prefix + ",\"encodedBase64\":" + StrictJson.Quote(encoded) + "}");
             }
-            string json = "{\"schema\":1,\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualInput\":false,\"vectors\":[" + string.Join(",", vectors) + "],\"files\":[" + string.Join(",", files) + "],\"transfers\":[" + string.Join(",", transfers) + "]}";
+            TreeWireVectors(vector);
+            string json = "{\"schema\":1,\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualInput\":false,\"vectors\":[" + string.Join(",", vectors) + "],\"files\":[" + string.Join(",", files) + "],\"transfers\":[" + string.Join(",", transfers) + "],\"trees\":[" + TreeVectors() + "]}";
             string path = Path.Combine(Path.GetDirectoryName(certificateExportPath), "native-file-vectors.json");
             using (FileStream output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             { byte[] bytes = Bytes(json); output.Write(bytes, 0, bytes.Length); output.Flush(true); }

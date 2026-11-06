@@ -36,6 +36,9 @@ namespace Knot.NativePreview
                 else if (args.Length != 0) throw new ArgumentException("Unsupported synthetic check arguments.");
                 stage = "connection-deadline"; DeadlineChecks();
                 stage = "protocol"; ProtocolChecks(); stage = "invitation"; InvitationChecks(); stage = "input"; InputChecks();
+                stage = "explorer-input-barrier"; ExplorerInputChecks();
+                stage = "explorer-ole-data"; DragBridgeChecks(); ++explorerOleFixtures;
+                stage = "folder-trees"; TreeChecks();
                 stage = "media-quality-bounds"; MediaQualityChecks();
                 stage = "host-policy"; HostPolicyChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();
@@ -49,7 +52,7 @@ namespace Knot.NativePreview
                 stage = "tls-release-failure-stop"; TlsReleaseFailureStopsInput();
                 stage = "short-code-enrollment"; EnrollmentChecks();
                 stage = "native-file-transfer"; FileChecks();
-                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures + ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshFileEnrollmentFixtures\":" + fileEnrollmentFixtures + ",\"actualFreshFileDiscoveryFixtures\":" + fileDiscoveryFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
+                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures + ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshFileEnrollmentFixtures\":" + fileEnrollmentFixtures + ",\"actualFreshFileDiscoveryFixtures\":" + fileDiscoveryFixtures + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
                 return 0;
             }
             catch (Exception failure)
@@ -62,7 +65,7 @@ namespace Knot.NativePreview
                 string fileDiagnostic = file == null ? "" : ",\"fileApiCategory\":" + StrictJson.Quote(file.Operation) + ",\"fileNativeError\":" + file.NativeError;
                 if (file != null && file.NativeNtStatus.HasValue && file.NativeIoStatus.HasValue)
                     fileDiagnostic += ",\"fileNtStatus\":" + file.NativeNtStatus.Value + ",\"fileIoStatus\":" + file.NativeIoStatus.Value;
-                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"exceptionType\":" + StrictJson.Quote(kind) + ",\"exceptionHResult\":" + failure.HResult + fileDiagnostic + ",\"assertions\":" + assertions + "}");
+                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"exceptionType\":" + StrictJson.Quote(kind) + ",\"exceptionHResult\":" + failure.HResult + fileDiagnostic + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + "}");
                 return 1;
             }
         }

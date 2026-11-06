@@ -23,6 +23,9 @@ namespace Knot.NativePreview
                     throw new InvalidOperationException("Synthetic probe output must be fresh.");
                 Directory.CreateDirectory(output);
                 certificateExportPath = Path.Combine(output, "vector-output-anchor.cer");
+                stage = "explorer-input-barrier"; ExplorerInputChecks();
+                stage = "explorer-ole-data"; DragBridgeChecks(); ++explorerOleFixtures;
+                stage = "folder-trees"; TreeChecks();
                 stage = "file-wire"; FileWireChecks();
                 stage = "file-storage"; FileStorageChecks();
                 stage = "file-link-containment"; FileLinkChecks();
@@ -37,7 +40,7 @@ namespace Knot.NativePreview
                 Console.WriteLine("{\"status\":\"passed\",\"probeOnly\":true,\"freshSyntheticOnly\":true," +
                     "\"actualCapture\":false,\"actualSendInput\":false,\"nativePairingChecksInvoked\":false," +
                     "\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures +
-                    ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"assertions\":" + assertions + "}");
+                    ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + "}");
                 return 0;
             }
             catch (Exception failure)
@@ -49,7 +52,7 @@ namespace Knot.NativePreview
                 Console.WriteLine("{\"status\":\"failed\",\"probeOnly\":true,\"freshSyntheticOnly\":true," +
                     "\"actualCapture\":false,\"actualSendInput\":false,\"stage\":" + StrictJson.Quote(stage) +
                     ",\"exceptionType\":" + StrictJson.Quote(failure.GetType().FullName) +
-                    ",\"exceptionHResult\":" + failure.HResult + diagnostic + ",\"assertions\":" + assertions + "}");
+                    ",\"exceptionHResult\":" + failure.HResult + diagnostic + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + "}");
                 return 1;
             }
         }

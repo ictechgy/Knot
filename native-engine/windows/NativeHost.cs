@@ -197,7 +197,8 @@ namespace Knot.NativePreview
                     FileServer preparedFiles = null;
                     if (claimedFiles)
                     {
-                        try { preparedFiles = new FileServer(address, claimedPeer, certificate.Certificate, fileOptions, gate, delegate { return active && !isStopped; }); }
+                        try { preparedFiles = new FileServer(address, claimedPeer, certificate.Certificate, fileOptions, gate, delegate { return active && !isStopped; },
+                            captureDrag: CaptureExplorerDrag, cancelDrag: CancelExplorerDrag); }
                         catch (Exception)
                         {
                             Action<string> fileStatus = FileStatusChanged;
@@ -208,6 +209,7 @@ namespace Knot.NativePreview
                     {
                         if (isStopped) { if (preparedFiles != null) preparedFiles.Dispose(); return; }
                         input = new InputSession(inputSink, media.Info.Rectangle);
+                        input.ExplorerReleaseFailed = Stop;
                         files = preparedFiles;
                         // File authorization cannot race delivery of its offer.
                         // A failed Ready write reaches Stop and revokes both.
@@ -401,6 +403,27 @@ namespace Knot.NativePreview
             }
             catch (ProtocolException error) { if (!Stopping) Notify(Guidance(error.GuidanceCategory)); Stop(); }
             catch (Exception) { if (!Stopping) Notify("Connection ended. Create a new invitation."); Stop(); }
+        }
+        private string[] CaptureExplorerDrag(string nonce)
+        {
+            InputSession owned;
+            lock (gate)
+            {
+                if (!active || isStopped || !claimedFiles || files == null || !(inputSink is WindowsInputSink))
+                    throw new FileTransferException("denied");
+                owned = input;
+            }
+            if (owned == null) throw new FileTransferException("denied");
+            return WindowsDragBridge.Capture(owned.AcquireExplorerDrag(nonce), delegate
+            {
+                lock (gate) return active && !isStopped && claimedFiles && input == owned;
+            });
+        }
+        private void CancelExplorerDrag(string nonce)
+        {
+            InputSession owned;
+            lock (gate) owned = input;
+            if (owned != null) owned.CancelExplorerDrag(nonce);
         }
         private void SendError(string code)
         {
