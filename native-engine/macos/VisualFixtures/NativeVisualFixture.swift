@@ -275,7 +275,7 @@ struct NativeVisualFixture {
         case "approval": .approval
         case "decoding": .decoding
         case "streaming", "input-paused", "display-behind": .streaming
-        case "failed": .failed
+        case "failed", "certificate-policy", "certificate-pin-mismatch": .failed
         default: .idle
         }
     }
