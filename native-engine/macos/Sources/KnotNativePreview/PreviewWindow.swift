@@ -435,7 +435,7 @@ struct PreviewWindow: View {
             VStack(alignment: .leading, spacing: 14) {
                 Label("이번 미리보기에서", systemImage: "info.circle").font(.system(size: 15, weight: .semibold))
                 Text("로그인된 Windows 11의 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요. Mac은 Apple Silicon · macOS 26 이상을 지원해요.")
-                Text("파일은 연결 중 ‘파일’에서 보내거나 받을 수 있어요. Finder 파일을 원격 화면에 놓으면 Windows 공유 폴더로 복사돼요. 목록의 파일 아이콘을 Finder로 끌거나 ‘받기’로 저장하세요. Windows 파일은 공유 폴더에 넣어주세요. 폴더 전송·덮어쓰기·클립보드 동기화는 지원하지 않아요.")
+                Text("연결 중 ‘파일’에서 파일·폴더를 주고받으세요. Finder 항목을 원격 화면에 놓으면 Windows 공유 폴더로 복사돼요. Windows 탐색기 항목은 버튼을 누른 채 화면 밖 Finder로 끌어오세요. Mac 쪽 아이콘이 나타난 뒤 놓으면 돼요. 목록의 ‘받기’도 사용할 수 있어요. 원본과 기존 파일은 유지하며 앱 패키지·링크·클립보드 동기화는 지원하지 않아요.")
                 Text("오디오·무모니터·잠금/UAC 화면·HDR·다중 모니터·자동 재연결/업데이트는 아직 지원하지 않아요.")
                 Text("8자리 번호는 2분·1회용이며 실패 횟수가 제한돼요. 종료 후에는 Windows에서 공유를 다시 시작해주세요. 번호와 페어링은 저장하지 않아요. 긴 연결 코드는 호환 모드로 남아 있고, 그 경로는 지문 확인과 Windows의 별도 승인이 필요해요.")
                 Text("기본 Mac 입력기로 한글·영문을 입력해요. 한/영 전환은 Caps Lock 등 이 Mac에 설정된 키를 그대로 사용하세요. 일반적인 Windows 복사·붙여넣기는 Control+C/V를 사용해요. 물리 키 입력에서 Command는 Windows 키에 해당해요.")
@@ -511,7 +511,7 @@ struct PreviewWindow: View {
                     } else {
                         VStack(alignment: .leading, spacing: 16) {
                             Label("파일 공유를 사용할 수 없어요", systemImage: "folder.badge.questionmark").font(.headline)
-                            Text("Windows에서 파일 송수신과 공유 폴더를 확인한 뒤 다시 공유해주세요. 폴더를 준비하지 못했거나 파일 공유가 꺼져 있을 수 있어요. 두 앱 모두 native.9 이상이 필요해요.")
+                            Text("Windows에서 파일·폴더 송수신과 공유 폴더를 확인한 뒤 다시 공유해주세요. 폴더를 준비하지 못했거나 파일 공유가 꺼져 있을 수 있어요. 두 앱 모두 native.10으로 업데이트해주세요.")
                                 .font(.system(size: 13)).foregroundStyle(.secondary)
                             Button("닫기") { setFilesVisible(false) }
                         }.padding(24).frame(maxWidth: 440).nativePanel().padding(24)

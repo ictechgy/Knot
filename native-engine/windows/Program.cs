@@ -176,7 +176,7 @@ namespace Knot.NativePreview
 
             shareScope = MakeLabel("", 9, FontStyle.Bold);
             shareScope.Margin = new Padding(0, 0, 0, P(12));
-            shareScope.AccessibleName = "이번 공유에서 허용할 화면 입력 및 파일 폴더 범위";
+            shareScope.AccessibleName = "이번 공유의 화면 입력, 공유 폴더와 직접 끌어온 탐색기 항목 범위";
             taskCard.Content.Controls.Add(shareScope);
 
             actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
@@ -352,8 +352,8 @@ namespace Knot.NativePreview
             Label title = MakeLabel("8자리 번호로 연결하기", 17, FontStyle.Bold); title.Margin = new Padding(0, 0, 0, P(20)); steps.Content.Controls.Add(title);
             AddHelpStep(steps.Content, "01  Windows에서 공유 시작", "이 Windows와 Mac에서 Knot Native Preview를 여세요. 이 PC의 ‘화면 공유 시작’을 누르면 8자리 번호가 표시돼요. 같은 Wi-Fi나 Tailscale에 연결되어 있어야 해요.");
             AddHelpStep(steps.Content, "02  Mac에서 PC 찾기 → 이 PC 선택", "Mac의 ‘주변 PC 찾기’를 누르고 Windows 공유 화면의 이름·주소와 비교해 이 PC를 선택하세요. PC를 선택해야 다음 번호 입력 화면이 나와요. Tailscale이나 검색이 안 되는 환경에서는 Mac의 ‘다른 연결 방법’에서 이 Windows의 연결 네트워크 주소로 찾으세요.");
-            AddHelpStep(steps.Content, "03  Mac에서 8자리 번호 입력", "선택한 이 PC의 Knot 화면에 표시된 번호를 Mac에 입력하고 ‘이 PC에 연결’을 누르세요. 번호를 아는 Mac 한 대에 화면·입력과 켜둔 파일 폴더를 허용하며 Windows에서 추가 승인은 없어요. 번호는 공유 시작 후 2분·1회용이에요. 만료됐다면 다시 공유해주세요.");
-            AddHelpStep(steps.Content, "연결 중 파일 주고받기", "Mac의 ‘파일’에서 보내기·받기를 사용하세요. Finder 파일을 원격 화면에 놓으면 표시한 Windows 공유 폴더로 복사돼요. 그 폴더의 Windows 파일은 Mac 파일 목록에서 받거나 아이콘을 Finder로 끌어올 수 있어요. 일반 파일만 최대 8GiB, 원본은 지우지 않아요. 폴더·덮어쓰기·클립보드 동기화는 지원하지 않아요.");
+            AddHelpStep(steps.Content, "03  Mac에서 8자리 번호 입력", "선택한 이 PC의 Knot 번호를 Mac에 입력하고 ‘이 PC에 연결’을 누르세요. 화면·입력과, 파일 공유를 켰다면 공유 폴더 및 직접 끌어온 탐색기 항목을 허용해요. Windows에서 추가 승인은 없어요. 번호는 2분·1회용이며 만료되면 다시 공유하세요.");
+            AddHelpStep(steps.Content, "연결 중 파일·폴더 주고받기", "Mac의 ‘파일’에서 파일·폴더를 보내거나 받으세요. Finder 항목을 원격 화면에 놓으면 표시한 공유 폴더로 복사돼요. 탐색기 항목은 버튼을 누른 채 화면 밖 Finder로 끌어오고, Mac 쪽 아이콘이 나타난 뒤 놓으세요. 목록의 ‘받기’도 사용할 수 있어요. 최대 8GiB이며 원본과 기존 파일은 유지해요. 앱 패키지·링크·클립보드 동기화는 지원하지 않아요.");
             Label legacyHelp = MakeLabel("고급의 긴 연결코드 방식을 선택했다면 Mac에 코드를 붙여 넣은 뒤, Windows에서 연결 요청을 허용해주세요.", 9, FontStyle.Regular);
             legacyHelp.ForeColor = PreviewStyle.Muted; legacyHelp.Margin = Padding.Empty; steps.Content.Controls.Add(legacyHelp);
             PreviewButton returnToSharing = ActionButton("이 PC 공유로 돌아가기", PreviewButtonKind.Secondary);
@@ -687,7 +687,7 @@ namespace Knot.NativePreview
                 if (server != null) return;
                 using (FolderBrowserDialog picker = new FolderBrowserDialog())
                 {
-                    picker.Description = "이 폴더의 일반 파일만 Mac과 주고받아요. 공유 중에는 변경할 수 없어요.";
+                    picker.Description = "이 폴더의 파일·폴더를 Mac과 주고받아요. 공유 중에는 변경할 수 없어요.";
                     if (System.IO.Directory.Exists(fileRootPath)) picker.SelectedPath = fileRootPath;
                     if (picker.ShowDialog(this) != DialogResult.OK || server != null) return;
                     try
