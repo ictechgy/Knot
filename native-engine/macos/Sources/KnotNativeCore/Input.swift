@@ -100,6 +100,15 @@ public struct InputBuffer: Sendable {
     public mutating func pop() -> Packet? {
         guard !queue.isEmpty else { return nil }; let packet = queue.removeFirst(); byteCount -= packet.wireByteCount; return packet
     }
+    /// A same-focus clipboard gesture releases held input AFTER already admitted
+    /// actions. Cancel only stale clipboard requests, not typed text/key events.
+    public mutating func appendReleaseBarrier() throws {
+        queue.removeAll { $0.kind == .clipboardRequest }
+        byteCount = queue.reduce(0) { $0 + $1.wireByteCount }
+        if queue.last?.kind == .releaseAll { return }
+        guard queue.count < 256, byteCount + 5 <= 16_384 else { revoke(); throw NativeFailure.saturated }
+        queue.append(Packet(kind: .releaseAll)); byteCount += 5
+    }
     public mutating func revoke() { queue = [Packet(kind: .releaseAll)]; byteCount = 5; needsRecovery = true }
     /// Only an explicit focus/click recovery may re-admit input; release remains first in line.
     public mutating func recover() { needsRecovery = false }

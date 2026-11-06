@@ -415,7 +415,12 @@ final class SessionModel: ObservableObject {
         clipboard?.cancel()
         let wasPaused = inputRecovery
         inputEpoch &+= 1
-        input.revoke()
+        do { try input.appendReleaseBarrier() }
+        catch {
+            inputRecovery = true; surface?.forgetHeldKeys(); pumpWriter()
+            status = "Input paused after queue saturation. Click the desktop to resume."
+            return false
+        }
         if !wasPaused { input.recover() }
         surface?.forgetHeldKeys()
         pumpWriter()

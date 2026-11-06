@@ -44,6 +44,7 @@ namespace Knot.NativePreview
                 stage = "explicit-clipboard"; ClipboardChecks();
                 stage = "native-updates"; UpdateChecks();
                 stage = "host-policy"; HostPolicyChecks();
+                stage = "host-construction-rollback"; HostRollbackChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();
                 stage = "fresh-certificate"; FreshCertificateChecks();
                 stage = "tls-pin-mismatch"; TlsPinMismatch(); stage = "tls-approval-stop"; TlsApprovalStop();

@@ -11,6 +11,8 @@ private final class ClipboardGestureChannel: NativeChannel, @unchecked Sendable 
     private var waiter: CheckedContinuation<Data, any Error>?
     private var closed = false
     private var sent: [Packet] = []
+    private var blockKey = false
+    private var blocked: (Packet, CheckedContinuation<Void, any Error>)?
     func start() async throws {}
     func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
@@ -24,11 +26,18 @@ private final class ClipboardGestureChannel: NativeChannel, @unchecked Sendable 
         }
     }
     func send(_ packet: Packet) async throws {
-        try record(packet)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            lock.lock()
+            if closed { lock.unlock(); continuation.resume(throwing: NativeFailure.transport) }
+            else if blockKey, packet.kind == .key { blockKey = false; blocked = (packet, continuation); lock.unlock() }
+            else { sent.append(packet); lock.unlock(); continuation.resume() }
+        }
     }
-    private func record(_ packet: Packet) throws {
-        lock.lock(); defer { lock.unlock() }
-        guard !closed else { throw NativeFailure.transport }; sent.append(packet)
+    func blockNextKey() { lock.lock(); blockKey = true; lock.unlock() }
+    var writeIsBlocked: Bool { lock.lock(); defer { lock.unlock() }; return blocked != nil }
+    func releaseBlockedWrite() {
+        lock.lock(); let pending = blocked; blocked = nil
+        if let pending { sent.append(pending.0) }; lock.unlock(); pending?.1.resume()
     }
     func feed(_ bytes: Data) {
         lock.lock(); let pending = waiter; waiter = nil
@@ -39,8 +48,9 @@ private final class ClipboardGestureChannel: NativeChannel, @unchecked Sendable 
         lock.lock(); defer { lock.unlock() }; return sent.filter { $0.kind != .hello && $0.kind != .heartbeat }
     }
     func close() {
-        lock.lock(); closed = true; let pending = waiter; waiter = nil; reads = []; lock.unlock()
+        lock.lock(); closed = true; let pending = waiter, write = blocked; blocked = nil; waiter = nil; reads = []; lock.unlock()
         pending?.resume(throwing: NativeFailure.transport)
+        write?.1.resume(throwing: NativeFailure.transport)
     }
 }
 @MainActor private final class ClipboardGesturePresenter: NativePresenter {
@@ -115,4 +125,21 @@ private final class ClipboardGestureChannel: NativeChannel, @unchecked Sendable 
     clipboard.copyFromRemote()
     try await awaitClipboardGesture { channel.inputPackets().count >= 3 }
     #expect(channel.inputPackets().map(\.kind) == [.clipboardRequest, .releaseAll, .clipboardRequest])
+}
+
+@Test @MainActor func clipboardReleaseBarrierPreservesAdmittedTextBehindBlockedWriter() async throws {
+    let channel = ClipboardGestureChannel(), presenter = ClipboardGesturePresenter()
+    let model = try await clipboardGestureSession(channel, presenter); defer { model.disconnect() }
+    channel.blockNextKey()
+    let control = try Input.key(down: true, scan: 0x1d, extended: false)
+    try #require(model.send(control)); try await awaitClipboardGesture { channel.writeIsBlocked }
+    let admitted = try Input.text("already-admitted-text")
+    try #require(model.sendCommittedText("already-admitted-text"))
+    let clipboard = ClipboardModel(send: { model.sendControl($0) }, readText: { "paste-after-text" }, writeText: { _ in false })
+    try #require(model.prepareClipboardGesture()); clipboard.pasteToRemote()
+    channel.releaseBlockedWrite()
+    try await awaitClipboardGesture { channel.inputPackets().count == 4 }
+    let sent = channel.inputPackets()
+    #expect(Array(sent.prefix(3)) == [control, admitted, Packet(kind: .releaseAll)])
+    #expect(sent.last?.kind == .clipboardRequest && !model.inputRecovery)
 }

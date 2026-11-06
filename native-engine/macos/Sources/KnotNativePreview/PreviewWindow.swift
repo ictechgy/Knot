@@ -580,6 +580,7 @@ struct PreviewWindow: View {
             Menu {
                 NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: model.clipboard, quality: model.quality)
             } label: { Label("작업 도구", systemImage: "slider.horizontal.3") }.menuStyle(.borderlessButton).fixedSize()
+                .onChange(of: model.macShortcuts) { _, _ in model.releaseInput() }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
                 Text(NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod)).font(.system(size: 12)).foregroundStyle(.secondary)

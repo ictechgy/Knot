@@ -40,9 +40,9 @@ namespace Knot.NativePreview
         private int enrollmentGrantsIssued;
         private string enrollmentName;
         private IPAddress enrollmentPeer;
-        private readonly ManualResetEvent approval = new ManualResetEvent(false);
-        private readonly ManualResetEvent stopped = new ManualResetEvent(false);
-        private readonly ManualResetEvent workerDone = new ManualResetEvent(false);
+        private readonly ManualResetEvent approval;
+        private readonly ManualResetEvent stopped;
+        private readonly ManualResetEvent workerDone;
         private readonly Thread worker;
         private readonly TcpListener listener;
         private TcpClient client;
@@ -74,22 +74,25 @@ namespace Knot.NativePreview
             : this(address, port, mediaFactory, inputSink, syntheticLoopback, invitation, false, Stopwatch.GetTimestamp, null) { }
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback,
                             Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null,
-                            FileSharingOptions files = null)
+                            FileSharingOptions files = null, Action<int, int, int> syntheticAfterEnrollment = null)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
+            if (syntheticAfterEnrollment != null && (!syntheticLoopback || !enrollmentMode))
+                throw new ArgumentException("Construction fault injection requires an owned synthetic enrollment fixture.");
             this.address = address; this.syntheticLoopback = syntheticLoopback;
             this.enrollmentMode = enrollmentMode; this.clock = clock ?? new Func<long>(Stopwatch.GetTimestamp);
             this.inputClock = inputClock ?? new Func<long>(Stopwatch.GetTimestamp);
             fileOptions = files;
             this.mediaFactory = mediaFactory; this.inputSink = inputSink;
-            this.invitation = invitation ?? new Invitation(this.clock);
-            certificate = enrollmentMode && !syntheticLoopback ? RunCertificate.Persistent() : new RunCertificate();
-            Identity = new RunIdentity(certificate.Pin);
-            registeredAvailable = enrollmentMode && !syntheticLoopback && NativeTrustedDevices.List().Count != 0;
-            listener = new TcpListener(address, port);
             try
             {
+                approval = new ManualResetEvent(false); stopped = new ManualResetEvent(false); workerDone = new ManualResetEvent(false);
+                this.invitation = invitation ?? new Invitation(this.clock);
+                certificate = enrollmentMode && !syntheticLoopback ? RunCertificate.Persistent() : new RunCertificate();
+                Identity = new RunIdentity(certificate.Pin);
+                registeredAvailable = enrollmentMode && !syntheticLoopback && NativeTrustedDevices.List().Count != 0;
+                listener = new TcpListener(address, port);
                 listener.Start(1);
                 this.port = ((IPEndPoint)listener.LocalEndpoint).Port;
                 if (enrollmentMode)
@@ -102,13 +105,29 @@ namespace Knot.NativePreview
                             if (syntheticLoopback || !HasRegisteredDevices) Stop();
                         }, Notify,
                         issueWithFiles: IssueEnrollmentGrantWithFiles);
+                    if (syntheticAfterEnrollment != null) syntheticAfterEnrollment(this.port, enrollment.Port, enrollment.DiscoveryPort);
                     if (!syntheticLoopback)
                         trustedServer = new TrustedDeviceServer(address, certificate.Certificate, Pin, RegisterDevice, IssueTrustedGrant, delegate { return !Stopping; });
                 }
+                worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot native media writer";
+                worker.SetApartmentState(ApartmentState.MTA);
             }
-            catch { try { listener.Stop(); } catch { } certificate.Dispose(); throw; }
-            worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot native media writer";
-            worker.SetApartmentState(ApartmentState.MTA);
+            catch
+            {
+                // Construction owns every resource until this transaction commits.
+                // In particular, enrollment has already bound TCP/UDP before the
+                // trusted listener is attempted. Teardown must not wait for GC or
+                // mask the original failure if one independent cleanup fails.
+                try { if (trustedServer != null) trustedServer.Dispose(); } catch { }
+                try { if (enrollment != null) enrollment.Dispose(); } catch { }
+                try { if (listener != null) listener.Stop(); } catch { }
+                try { if (certificate != null) certificate.Dispose(); } catch { }
+                try { if (this.invitation != null) this.invitation.Revoke(); } catch { }
+                try { if (workerDone != null) workerDone.Dispose(); } catch { }
+                try { if (stopped != null) stopped.Dispose(); } catch { }
+                try { if (approval != null) approval.Dispose(); } catch { }
+                throw;
+            }
         }
         internal void Start() { if (enrollment != null) enrollment.Start(); if (trustedServer != null) trustedServer.Start(); worker.Start(); }
         internal string GetInvitation()
