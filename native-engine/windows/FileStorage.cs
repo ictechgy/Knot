@@ -45,6 +45,8 @@ namespace Knot.NativePreview
         }
         internal bool Same(FileHandleInfo other)
         { return Volume == other.Volume && IndexHigh == other.IndexHigh && IndexLow == other.IndexLow && Size == other.Size && Modified == other.Modified && Directory == other.Directory; }
+        internal bool SameIdentity(FileHandleInfo other)
+        { return Volume == other.Volume && IndexHigh == other.IndexHigh && IndexLow == other.IndexLow && Directory == other.Directory; }
     }
 
     internal sealed class FileEntrySnapshot

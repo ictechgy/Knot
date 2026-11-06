@@ -33,16 +33,20 @@ def inert_file_vectors():
 
     empty_hash = hashlib.sha256(b"").hexdigest()
     payloads = {
-        0x40: control(dict(v=1, token=base64.urlsafe_b64encode(bytes(32)).decode().rstrip("="))),
-        0x41: control(dict(v=1)), 0x42: b"",
-        0x43: control(dict(entry="a" * 32, name="fixture.txt", size=0)),
+        0x40: control(dict(v=2, token=base64.urlsafe_b64encode(bytes(32)).decode().rstrip("="))),
+        0x41: control(dict(v=2)), 0x42: b"",
+        0x43: control(dict(entry="a" * 32, name="fixture.txt", size=0, kind="file")),
         0x44: control(dict(count=1, truncated=False)),
         0x45: control(dict(name="fixture.txt", size=0)),
         0x46: control(dict(entry="a" * 32)),
-        0x47: control(dict(name="fixture.txt", size=0)),
+        0x47: control(dict(name="fixture.txt", size=0, kind="file", count=0)),
         0x48: struct.pack(">Q", 0) + b"X",
         0x49: struct.pack(">Q", 0) + hashlib.sha256(b"").digest(),
         0x4a: control(dict(name="fixture.txt", size=0, sha256=empty_hash)),
+        0x4b: control(dict(name="folder", size=0, count=0)),
+        0x4c: control(dict(id=1, parent=0, name="child", kind="folder", size=0)),
+        0x4d: control(dict(count=0, size=0, sha256=empty_hash)),
+        0x4e: control(dict(nonce="a" * 32)), 0x4f: control(dict(nonce="a" * 32)),
         0x7f: control(dict(code="protocol")),
     }
     vectors = [dict(name="inert-kind-%02x" % kind, kind=kind, payloadBase64=encoded(body),
@@ -52,14 +56,38 @@ def inert_file_vectors():
                                  ("boundary", "boundary.bin", bytes(i % 251 for i in range(65541)))]:
         digest = hashlib.sha256(body).hexdigest()
         files.append(dict(name=filename, bytesBase64=encoded(body), sha256=digest, size=len(body)))
-        stream = packet(0x47, control(dict(name=filename, size=len(body))))
+        stream = packet(0x47, control(dict(name=filename, size=len(body), kind="file", count=0)))
         for offset in range(0, len(body), 65536):
             stream += packet(0x48, struct.pack(">Q", offset) + body[offset:offset + 65536])
         stream += packet(0x49, struct.pack(">Q", len(body)) + hashlib.sha256(body).digest())
         transfers.append(dict(name=name, fileName=filename, size=len(body), sha256=digest,
                               bytesBase64=encoded(body), encodedBase64=encoded(stream)))
+    trees = [inert_tree_vector("empty", "empty folder", []),
+             inert_tree_vector("nested", "개발 자료", [(0, "빈 폴더", "folder", b""), (0, "한글.txt", "file", "안녕\n".encode())]),
+             inert_tree_vector("boundary", "boundary", [(0, "boundary.bin", "file", bytes(i % 251 for i in range(65541)))])]
     return dict(schema=1, status="passed", freshSyntheticOnly=True, actualCapture=False, actualInput=False,
-                vectors=vectors, files=files, transfers=transfers)
+                vectors=vectors, files=files, transfers=transfers, trees=trees)
+
+
+def inert_tree_vector(name, folder_name, node_data):
+    """Explicit inert transcript; never a substitute for the actual C# vectors."""
+    def packet(kind, body): return bytes([kind]) + struct.pack(">I", len(body)) + body
+    def control(obj): return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+    def encoded(body): return base64.b64encode(body).decode()
+    total = sum(len(body) for _, _, _, body in node_data)
+    stream = packet(0x47, control(dict(name=folder_name, size=total, kind="folder", count=len(node_data))))
+    digest, nodes = hashlib.sha256(), []
+    for index, (parent, child, kind, body) in enumerate(node_data, 1):
+        raw = control(dict(id=index, parent=parent, name=child, kind=kind, size=len(body)))
+        nodes.append(dict(jsonBase64=encoded(raw), bytesBase64=encoded(body)))
+        stream += packet(0x4c, raw); digest.update(struct.pack(">I", len(raw))); digest.update(raw); digest.update(body)
+        if kind == "file":
+            for offset in range(0, len(body), 65536):
+                stream += packet(0x48, struct.pack(">Q", offset) + body[offset:offset + 65536])
+            stream += packet(0x49, struct.pack(">Q", len(body)) + hashlib.sha256(body).digest())
+    stream += packet(0x4d, control(dict(count=len(nodes), size=total, sha256=digest.hexdigest())))
+    return dict(name=name, folderName=folder_name, count=len(nodes), size=total, sha256=digest.hexdigest(),
+                nodes=nodes, encodedBase64=encoded(stream))
 
 
 class NativeRebuildTests(unittest.TestCase):
@@ -158,7 +186,9 @@ class NativeRebuildTests(unittest.TestCase):
                 with (self.output / "native-file-vectors.json").open("x") as fixture:
                     json.dump(inert_file_vectors(), fixture)
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
-                                       actualCapture=False, actualSendInput=False)).encode()
+                                       actualCapture=False, actualSendInput=False,
+                                       actualFreshExplorerInputFixtures=1, actualFreshExplorerOleFixtures=1,
+                                       actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=1)).encode()
             elif label == "native-pairing-managed-checks":
                 return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,
                     networkInvoked=False, captureInvoked=False, actualInputInvoked=False)).encode()
@@ -654,6 +684,39 @@ class NativeFileVectorTests(unittest.TestCase):
         body[chunk_header + 5:chunk_header + 13] = struct.pack(">Q", 1)
         value["transfers"][2]["encodedBase64"] = base64.b64encode(body).decode()
         self.check_vectors(value, "offset")
+
+    def test_rejects_missing_tree_or_boolean_count(self):
+        value = inert_file_vectors(); value.pop("trees")
+        self.check_vectors(value, "Native tree")
+        value = inert_file_vectors(); value["trees"][0]["count"] = False
+        self.check_vectors(value, "Native tree declared")
+
+    def test_rejects_tree_parent_collisions_and_depth(self):
+        value = inert_file_vectors()
+        value["trees"][1] = inert_tree_vector("nested", "폴더", [(7, "빈 폴더", "folder", b"")])
+        self.check_vectors(value, "Native tree parent")
+        for names in [["A", "a"], ["é", "e\u0301"]]:
+            value = inert_file_vectors()
+            value["trees"][1] = inert_tree_vector("nested", "폴더", [(0, n, "folder", b"") for n in names])
+            self.check_vectors(value, "Native tree sibling")
+        value = inert_file_vectors()
+        value["trees"][1] = inert_tree_vector("nested", "폴더", [(i, "깊은 폴더", "folder", b"") for i in range(17)])
+        self.check_vectors(value, "Native tree sibling/depth")
+
+    def test_rejects_tree_hash_and_node_data_tampering(self):
+        value = inert_file_vectors(); value["trees"][2]["sha256"] = "0" * 64
+        self.check_vectors(value, "Native tree terminal")
+        value = inert_file_vectors()
+        value["trees"][2]["nodes"][0]["bytesBase64"] = base64.b64encode(b"different").decode()
+        self.check_vectors(value, "Native tree file size")
+
+    def test_rejects_tree_unsafe_names_and_folder_payload(self):
+        value = inert_file_vectors()
+        value["trees"][1] = inert_tree_vector("nested", "폴더", [(0, "../escape", "folder", b"")])
+        self.check_vectors(value, "Native tree basename")
+        value = inert_file_vectors()
+        value["trees"][1] = inert_tree_vector("nested", "폴더", [(0, "빈 폴더", "folder", b"data")])
+        self.check_vectors(value, "Native tree folder bytes")
 
     def test_rejects_oversized_artifact_before_json_decode(self):
         with tempfile.TemporaryDirectory(prefix="knot-inert-file-vector-budget-") as directory:

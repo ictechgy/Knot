@@ -1,12 +1,12 @@
-# Native file transfer v1
+# Native file transfer v2
 
-Status: implementation contract for native.9; separate from media framing. Files are copies of regular files in one explicitly shared Windows directory. No remote paths, recursion, deletion, shell, file execution or clipboard synchronization.
+Status: implementation contract for native.10; separate from media framing. Copy regular files and bounded folder trees through one explicitly shared Windows directory, or export only the current Explorer drag selection. [TREES.md](TREES.md) specifies the additional exact folder/drag grammar and supersedes the former native.9 flat-file limitation. No client-supplied Windows paths, deletion, Shell automation, file execution or clipboard synchronization.
 
 ## Session admission
 
-Media Hello accepts exactly `{v,token,name}` or `{v,token,name,filesVersion}`; the optional integer must be1. New clients opt in with `filesVersion:1`. Old clients receive the original seven-key Ready. Enrollment confirmation accepts exactly the existing schema, with permissions either `screen,input` or `screen,input,files`; requested file scope is carried through the run's issued grant and checked at media claim. Legacy approval may authorize the locally displayed file folder when the Hello opts in. A capability is offered only when local folder consent, the authenticated claim's scope, and Hello opt-in all permit files.
+Media Hello accepts exactly `{v,token,name}` or `{v,token,name,filesVersion}`; the optional integer must be2. New clients opt in with `filesVersion:2`. Old clients receive the original seven-key Ready. Enrollment confirmation accepts exactly the existing schema, with permissions either `screen,input` or `screen,input,files`; requested file scope is carried through the run's issued grant and checked at media claim. Legacy approval may authorize the locally displayed file folder when the Hello opts in. The displayed consent includes shared-folder transfers and only explicitly dragged Explorer selections; it never permits parent-directory browsing. A capability is offered only when local folder consent, the authenticated claim's scope, and Hello opt-in all permit files.
 
-Ready accepts exactly its original seven scalar keys or that complete set plus `filesVersion`, `filePort`, `fileToken`, `fileRootName`. No partial group/unknown/duplicate keys. Version1, port48634, token canonical base64url32randombytes (43characters), root name1..64UTF-8bytes with the existing safe display-name policy. The offer supplies no address or certificate: clients retain the authenticated media invitation's private address and exact DER pin. An old Windows host may reject the new opt-in/confirmation; update both apps for files. Do not silently retry broader permissions against a different host or repair trust.
+Ready accepts exactly its original seven scalar keys or that complete set plus `filesVersion`, `filePort`, `fileToken`, `fileRootName`. No partial group/unknown/duplicate keys. Version2, port48634, token canonical base64url32randombytes (43characters), root name1..64UTF-8bytes with the existing safe display-name policy. The offer supplies no address or certificate: clients retain the authenticated media invitation's private address and exact DER pin. An old Windows host may reject the new opt-in/confirmation; update both apps for files. Do not silently retry broader permissions against a different host or repair trust.
 
 The file listener binds the selected Windows address on48634 and reuses the current run's TLS1.2+ server certificate. It starts only after media authorization and successful media initialization. Publish activation under the same host gate before Ready delivery; any Ready/write/session failure revokes it. Check active run, constant-time token comparison and exact observed media source IPv4 before file authorization. Never advertise/log/save the capability or reuse an invitation/T2 as the file token.
 
@@ -20,20 +20,20 @@ Every file packet is `u8 kind + u32BE payloadLength + payload`. These types and 
 
 | Kind | Name | Payload |
 | --- | --- | --- |
-| 0x40 | Hello | `{v:1,token:string}` |
-| 0x41 | Authorized | `{v:1}` |
+| 0x40 | Hello | `{v:2,token:string}` |
+| 0x41 | Authorized | `{v:2}` |
 | 0x42 | ListRequest | empty |
-| 0x43 | Entry | `{entry:string,name:string,size:integer}` |
+| 0x43 | Entry | `{entry:string,name:string,size:integer,kind:string}` |
 | 0x44 | ListEnd | `{count:integer,truncated:boolean}` |
 | 0x45 | PutRequest | `{name:string,size:integer}` |
 | 0x46 | GetRequest | `{entry:string}` |
-| 0x47 | Accepted | `{name:string,size:integer}` |
+| 0x47 | Accepted | `{name:string,size:integer,kind:string,count:integer}` |
 | 0x48 | Chunk | `u64BE offset` +1..65,536filebytes (payload9..65,544) |
 | 0x49 | Finish | `u64BE totalBytes` +32raw SHA-256bytes (payload40) |
 | 0x4A | Complete | `{name:string,size:integer,sha256:string}` |
 | 0x7F | Error | `{code:string}` |
 
-Closed error codes: `auth,busy,protocol,timeout,denied,missing,changed,quota,io`. Entry IDs are32lowercasehex random opaque identifiers, not paths. Hash strings are64lowercasehex. Basenames are1..255UTF-8bytes, no slash/backslash/colon/NUL/control/format/line separators, Windows-invalid characters (`< > " | ? *`), dot/dotdot, trailing dot/space, reserved `.knot-` partial prefix or Windows device basename. Device checks include CON/PRN/AUX/NUL/CLOCK$/CONIN$/CONOUT$, COM/LPT0..9 and superscript1/2/3, including extensions and trailing stem spaces. Reject links, directories and nonregular sources. A listing scans a bounded number of entries and returns at most256; IDs refer to the active run's bounded snapshot and expire on replacement/revocation. Verify source handle identity and size/timestamp against the snapshot before reading; never resolve client-supplied paths.
+Closed error codes: `auth,busy,protocol,timeout,denied,missing,changed,quota,io`. Entry IDs are32lowercasehex random opaque identifiers, not paths. Hash strings are64lowercasehex. Basenames are1..255UTF-8bytes, no slash/backslash/colon/NUL/control/format/line separators, Windows-invalid characters (`< > " | ? *`), dot/dotdot, trailing dot/space, reserved `.knot-` partial prefix or Windows device basename. Device checks include CON/PRN/AUX/NUL/CLOCK$/CONIN$/CONOUT$, COM/LPT0..9 and superscript1/2/3, including extensions and trailing stem spaces. Reject symbolic/reparse links, hardlinked leaves and nonregular/non-directory sources. `kind` is file or folder; folder listing size is0, with contents preflighted on Get. A listing scans a bounded number of entries and returns at most256; IDs refer to the active run's bounded snapshot and expire on replacement/revocation. Verify source handle identity and size/timestamp against the snapshot before reading; never resolve client-supplied paths.
 
 Every connection: client Hello → server Authorized → exactly one operation:
 
@@ -41,9 +41,9 @@ Every connection: client Hello → server Authorized → exactly one operation:
 - Upload: client PutRequest → server Accepted → client Chunk* → client Finish → server Complete → close.
 - Download: client GetRequest → server Accepted → server Chunk* → server Finish → client Complete → close.
 
-One reusable64KiB sender chunk, one bounded receiver write before reading the next packet, incremental SHA-256, and2MiB/s pacing. Offset must equal the receiver's exact current count; Finish must equal declared and received lengths and hash. Zero-byte files use Accepted→Finish with the empty digest. Reject unexpected kinds/order/trailing typed payload data. Complete reports the actual collision-resolved destination basename, exact size and matching hash; the sender validates it before reporting remote completion. No ACK/cancel/heartbeat packets are needed: TLS write backpressure bounds application work and cancellation closes this operation's socket. OS buffering is not claimed as a measured latency bound.
+One reusable64KiB sender chunk, one bounded receiver write before reading the next packet, incremental SHA-256, and2MiB/s pacing. Offset must equal the receiver's exact current count; Finish must equal declared and received lengths and hash. Zero-byte files use Accepted→Finish with the empty digest. Reject unexpected kinds/order/trailing typed payload data. Complete reports the actual collision-resolved destination basename, exact size and matching hash; the sender validates it before reporting remote completion. Ordinary file cancellation closes the operation socket; Explorer handoff additionally has the nonce-bound cancellation in TREES.md. No per-chunk ACK/heartbeat is needed: TLS write backpressure bounds application work and cancellation closes this operation's socket. OS buffering is not claimed as a measured latency bound.
 
-Reserve declared bytes against an8GiB aggregate run quota across both directions; cancelled/retried transfers do not refund that reservation. At most32 queued Mac upload files. Check destination free-space where supported, and fail safely on disk-full rather than publishing an incomplete file.
+Reserve declared bytes against an8GiB aggregate run quota across both directions, and at most8192 file/tree nodes; cancelled/retried transfers do not refund reservations. At most32 queued Mac upload items. Check destination free-space where supported, and fail safely on disk-full rather than publishing an incomplete file.
 
 ## Filesystem and revocation boundary
 

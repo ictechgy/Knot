@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
@@ -131,8 +132,9 @@ namespace Knot.NativePreview
             {
                 foreach (TreeFixture fixture in FreshTrees())
                 {
-                    bool privateRoot = false;
-                    using (FileTreePartial partial = root.CreateTree(fixture.Size, fixture.Count, delegate(SafeFileHandle h) { CheckEarliestPrivateHandle(h); privateRoot = true; }))
+                    stage = "tree-storage-" + fixture.Name + "-private-create";
+                    bool privateRoot = false; string stagedPath = null;
+                    using (FileTreePartial partial = root.CreateTree(fixture.Size, fixture.Count, delegate(SafeFileHandle h) { CheckEarliestPrivateHandle(h); stagedPath = FileNative.FinalPath(h); privateRoot = true; }))
                     {
                         Check(privateRoot);
                         for (int i = 0; i < fixture.Count; ++i)
@@ -140,13 +142,21 @@ namespace Knot.NativePreview
                             FileTreeNode node; FileStream stream = partial.Add(fixture.Json[i], out node);
                             if (stream != null) { CheckEarliestPrivateHandle(stream.SafeFileHandle); stream.Write(fixture.Data[i],0,fixture.Data[i].Length); }
                         }
-                        partial.PreparePublication(); Check(partial.Publish(fixture.FolderName) == fixture.FolderName);
+                        stage = "tree-storage-" + fixture.Name + "-root-delete-denied";
+                        using (SafeFileHandle competing = FileNative.CreateFile(stagedPath,FileNative.Delete,FileShare.ReadWrite | FileShare.Delete,IntPtr.Zero,3,FileNative.Backup | FileNative.OpenReparse,IntPtr.Zero))
+                        { int error = Marshal.GetLastWin32Error(); Check(competing.IsInvalid && error == 32); }
+                        stage = "tree-storage-" + fixture.Name + "-publish";
+                        partial.PreparePublication();
+                        using (SafeFileHandle competing = FileNative.CreateFile(stagedPath,FileNative.Delete,FileShare.ReadWrite | FileShare.Delete,IntPtr.Zero,3,FileNative.Backup | FileNative.OpenReparse,IntPtr.Zero))
+                        { int error = Marshal.GetLastWin32Error(); Check(competing.IsInvalid && error == 32); }
+                        Check(partial.Publish(fixture.FolderName) == fixture.FolderName);
                     }
                     Check(Directory.Exists(Path.Combine(temp.PathValue, fixture.FolderName)));
                     using (FileTreePartial collision = root.CreateTree(0,0))
-                    { collision.PreparePublication(); Check(collision.Publish(fixture.FolderName) == fixture.FolderName + " (1)"); }
+                    { stage = "tree-storage-" + fixture.Name + "-collision"; collision.PreparePublication(); Check(collision.Publish(fixture.FolderName) == fixture.FolderName + " (1)"); }
                 }
                 string received = Path.Combine(temp.PathValue, "상자😀", "문서", "한글😀.txt");
+                Check(NativeProtocol.Equal(File.ReadAllBytes(received),FreshTrees()[1].Data[1]));
                 using (SafeFileHandle file = FileNative.CreateFile(received,FileNative.Read,FileShare.ReadWrite,IntPtr.Zero,3,FileNative.OpenReparse,IntPtr.Zero))
                 using (SafeFileHandle zone = FileNative.ZoneStream(file,FileNative.Read,false))
                 using (FileStream stream = new FileStream(zone,FileAccess.Read,1024,false))
@@ -158,6 +168,31 @@ namespace Knot.NativePreview
                 }
                 using (FileTreePartial partial = root.CreateTree(0,1)) { FileTreeNode node; partial.Add(FileTreeNode.Encode(1,0,"cancel","folder",0),out node); }
                 Check(Directory.GetDirectories(temp.PathValue,".knot-*.part").Length == 0);
+                stage = "tree-storage-prepared-cancel-cleanup";
+                TreeFixture prepared = FreshTrees()[1];
+                using (FileTreePartial partial = root.CreateTree(prepared.Size,prepared.Count))
+                {
+                    for (int i = 0; i < prepared.Count; ++i)
+                    {
+                        FileTreeNode node; FileStream stream = partial.Add(prepared.Json[i],out node);
+                        if (stream != null) stream.Write(prepared.Data[i],0,prepared.Data[i].Length);
+                    }
+                    partial.PreparePublication();
+                }
+                Check(Directory.GetDirectories(temp.PathValue,".knot-*.part").Length == 0);
+                stage = "tree-storage-unowned-replacement-cleanup";
+                string staleStage = null;
+                using (FileTreePartial partial = root.CreateTree(1,1))
+                {
+                    FileTreeNode node; partial.Add(FileTreeNode.Encode(1,0,"leaf","file",1),out node).WriteByte(7); partial.PreparePublication();
+                    staleStage = Directory.GetDirectories(temp.PathValue,".knot-*.part")[0];
+                    File.Move(Path.Combine(staleStage,"leaf"),Path.Combine(staleStage,"owned-moved")); File.WriteAllText(Path.Combine(staleStage,"leaf"),"fresh replacement");
+                }
+                Check(Directory.Exists(staleStage) && File.ReadAllText(Path.Combine(staleStage,"leaf")) == "fresh replacement" && File.ReadAllBytes(Path.Combine(staleStage,"owned-moved"))[0] == 7);
+                // These are both explicitly created fixture objects. Production
+                // deliberately retained the private directory rather than delete
+                // a replacement or recursively adopt an unknown child.
+                File.Delete(Path.Combine(staleStage,"leaf")); File.Delete(Path.Combine(staleStage,"owned-moved")); Directory.Delete(staleStage);
             }
         }
         private static void TreeSourceChecks()
@@ -291,10 +326,11 @@ namespace Knot.NativePreview
             {
                 try
                 {
+                    TreeFixture fixture = FreshTrees()[1];
                     using (FileTlsClient client = new FileTlsClient(server.Port,cert.Pin))
                     {
-                        client.Authorize(server.Token); client.Send(0x4b,FileProtocol.TreeOffer("revoked",0,0)); Check(client.Read().Kind == 0x47);
-                        client.Send(0x4d,FileProtocol.TreeEnd(0,0,FileHash(new byte[0]))); Check(reached.WaitOne(3000));
+                        client.Authorize(server.Token); client.Send(0x4b,FileProtocol.TreeOffer("revoked",fixture.Size,fixture.Count)); Check(client.Read().Kind == 0x47);
+                        fixture.Write(client.Send); Check(reached.WaitOne(3000));
                         lock (gate) active = false; server.Stop(); release.Set();
                     }
                     WaitNoTrees(temp.PathValue); Check(!Directory.Exists(Path.Combine(temp.PathValue,"revoked")));

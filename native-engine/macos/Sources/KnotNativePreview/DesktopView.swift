@@ -20,7 +20,7 @@ struct NativeDesktop: NSViewRepresentable {
 }
 
 @MainActor
-final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
+final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, NSDraggingSource {
     weak var model: SessionModel?
     var imageSize = CGSize(width: 1920, height: 1080)
     private let video = AVSampleBufferDisplayLayer()
@@ -29,6 +29,14 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
     var onFilesDropped: (() -> Void)?
     var inputSuspended = false
     private var fileDragInProgress = false
+    private let explorerPromises = NativeFilePromiseOwner()
+    private var explorerTask: Task<Void, Never>?
+    private var explorerOrigin: CGPoint?
+    private var explorerGeneration = UUID()
+    private var explorerNonce: String?
+    private var explorerProviders: [UUID] = []
+    private var localExplorerDragging = false
+    private var preserveExplorerDuringRelease = false
     private var notifications: NativeWindowNotifications?
     private var heldModifiers: Set<UInt16> = []
     private var localModifiers = KeyboardModifierState()
@@ -109,6 +117,9 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         commandKeyUpMonitor = nil
         heldModifiers.removeAll(); localModifiers.reset(); physicalKeys.reset(); heldButtons.removeAll()
         cancelComposition()
+        if !preserveExplorerDuringRelease, !localExplorerDragging || model?.phase != .streaming {
+            cancelExplorerHandoff()
+        }
     }
     private func cancelComposition() {
         textAuthorization.revoke(); marked = NSAttributedString(string: "")
@@ -143,14 +154,84 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient {
         window?.makeFirstResponder(self)
         if model?.inputRecovery == true { model?.recoverInput(); return }
         pointer(event, action: 1)
+        explorerOrigin = heldButtons.contains(1) ? convert(event.locationInWindow, from: nil) : nil
     }
-    override func mouseUp(with event: NSEvent) { pointer(event, action: 2) }
+    override func mouseUp(with event: NSEvent) {
+        explorerOrigin = nil
+        if explorerTask != nil { cancelExplorerHandoff(); model?.releaseInput(); return }
+        pointer(event, action: 2)
+    }
     override func rightMouseDown(with event: NSEvent) { pointer(event, action: 3) }
     override func rightMouseUp(with event: NSEvent) { pointer(event, action: 4) }
     override func otherMouseDown(with event: NSEvent) { if event.buttonNumber == 2 { pointer(event, action: 5) } }
     override func otherMouseUp(with event: NSEvent) { if event.buttonNumber == 2 { pointer(event, action: 6) } }
     override func mouseMoved(with event: NSEvent) { pointer(event, action: 0) }
-    override func mouseDragged(with event: NSEvent) { pointer(event, action: 0) }
+    override func mouseDragged(with event: NSEvent) {
+        guard explorerTask == nil, !localExplorerDragging else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let inside = Input.point(x: point.x, y: point.y, viewWidth: bounds.width, viewHeight: bounds.height,
+                                 imageWidth: imageSize.width, imageHeight: imageSize.height) != nil
+        if ExplorerDragGesture.shouldHandoff(origin: explorerOrigin, point: point, ownsLeft: heldButtons.contains(1),
+            insideImage: inside, available: acceptsInput && model?.files != nil && model?.files?.isBusy == false) {
+            beginExplorerHandoff(event); return
+        }
+        pointer(event, action: 0)
+    }
+    private func beginExplorerHandoff(_ event: NSEvent) {
+        guard let model, let files = model.files else { return }
+        let id = UUID(), bytes = withUnsafeBytes(of: UUID().uuid) { Data($0) }
+        let nonce = NativeFileClient.hex(bytes)
+        explorerGeneration = id; explorerNonce = nonce; fileDragInProgress = true
+        explorerTask = Task { @MainActor [weak self, weak model, weak files] in
+            guard let self, let model, let files else { return }
+            do {
+                let entries = try await model.captureExplorerDrag(nonce: bytes)
+                guard self.explorerGeneration == id, !Task.isCancelled, model.phase == .streaming,
+                      model.files === files, NSEvent.pressedMouseButtons & 1 != 0,
+                      self.window?.isKeyWindow == true, NSApp.isActive, !entries.isEmpty else {
+                    throw NativeFileError.cancelled
+                }
+                var items: [NSDraggingItem] = []
+                for entry in entries {
+                    guard let (providerID, provider) = self.explorerPromises.provider(entry: entry, files: files) else {
+                        throw NativeFileError.busy
+                    }
+                    self.explorerProviders.append(providerID)
+                    let item = NSDraggingItem(pasteboardWriter: provider)
+                    let p = self.convert(event.locationInWindow, from: nil)
+                    item.setDraggingFrame(NSRect(x: p.x - 16, y: p.y - 16, width: 32, height: 32),
+                        contents: NSImage(systemSymbolName: entry.isFolder ? "folder" : "doc", accessibilityDescription: nil))
+                    items.append(item)
+                }
+                self.preserveExplorerDuringRelease = true
+                model.releaseInput()
+                self.preserveExplorerDuringRelease = false
+                self.explorerTask = nil; self.localExplorerDragging = true
+                self.beginDraggingSession(with: items, event: event, source: self)
+            } catch {
+                guard self.explorerGeneration == id else { return }
+                self.cancelExplorerHandoff(); model.releaseInput(); self.onFilesDropped?()
+            }
+        }
+    }
+    private func cancelExplorerHandoff() {
+        explorerGeneration = UUID(); explorerTask?.cancel(); explorerTask = nil; explorerOrigin = nil
+        if let nonce = explorerNonce { model?.files?.cancelExplorer(nonce: nonce) }
+        explorerNonce = nil
+        for id in explorerProviders { explorerPromises.finish(id) }
+        explorerProviders = []; fileDragInProgress = false; localExplorerDragging = false
+    }
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        model?.phase == .streaming && model?.files != nil ? .copy : []
+    }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        if operation.isEmpty { cancelExplorerHandoff() }
+        else {
+            explorerTask = nil; explorerOrigin = nil; explorerNonce = nil; explorerProviders = []
+            fileDragInProgress = false; localExplorerDragging = false
+        }
+        model?.releaseInput()
+    }
     override func rightMouseDragged(with event: NSEvent) { pointer(event, action: 0) }
     override func otherMouseDragged(with event: NSEvent) { pointer(event, action: 0) }
     override func scrollWheel(with event: NSEvent) {

@@ -13,9 +13,9 @@ public enum NativeFileError: String, Error, Sendable, Equatable {
         case .unconfirmed: return "전송 완료를 확인하지 못했어요. Windows 공유 폴더를 확인한 뒤 다시 시도하세요. 이미 저장된 파일은 자동으로 지우지 않아요."
         case .missing: return "이 파일을 찾지 못했어요. 목록을 새로고침해주세요."
         case .changed: return "전송 중 원본 파일이 바뀌었어요. 원본을 닫고 목록을 새로고침해주세요."
-        case .quota: return "파일은 한 개와 이번 연결의 합계 모두 8GiB까지 전송할 수 있어요. 저장 공간도 확인해주세요."
+        case .quota: return "이번 연결은 8GiB·8192개 항목까지, 폴더 하나는 4096개 항목·16단계까지 전송할 수 있어요. 저장 공간도 확인해주세요."
         case .cancelled: return "파일 전송을 취소했어요. 화면 연결은 유지돼요."
-        case .unsupported: return "일반 파일만 전송할 수 있어요. 폴더·앱 패키지·링크와 지원하지 않는 파일 이름은 제외해주세요."
+        case .unsupported: return "일반 파일과 폴더를 전송할 수 있어요. 앱 패키지·링크·특수 파일과 지원하지 않는 이름은 제외해주세요."
         case .closed: return "연결이 종료되어 파일 작업을 중단했어요. 다시 연결해주세요."
         case .protocolViolation: return "파일 전송 형식을 확인하지 못했어요. 두 앱을 업데이트한 뒤 다시 시도하세요."
         case .io: return "파일을 읽거나 저장하지 못했어요. 권한과 저장 공간을 확인해주세요."
@@ -48,25 +48,31 @@ public struct NativeFileOffer: Sendable, Equatable {
     }
 }
 
+public enum NativeFileEntryKind: String, Sendable, Equatable { case file, folder }
+
 public struct NativeFileEntry: Identifiable, Sendable, Equatable {
     public let id: String
     public let name: String
     public let size: Int64
-    public init(id: String, name: String, size: Int64) throws {
-        guard FileWire.isHex(id, count: 32), FileWire.validName(name), FileWire.validSize(size) else {
+    public let kind: NativeFileEntryKind
+    public var isFolder: Bool { kind == .folder }
+    public init(id: String, name: String, size: Int64, kind: NativeFileEntryKind = .file) throws {
+        guard FileWire.isHex(id, count: 32), FileWire.validName(name), FileWire.validSize(size), kind != .folder || size == 0 else {
             throw NativeFileError.protocolViolation
         }
-        self.id = id; self.name = name; self.size = size
+        self.id = id; self.name = name; self.size = size; self.kind = kind
     }
     public init(_ data: Data) throws {
-        let object = try FileWire.object(data, keys: ["entry", "name", "size"])
-        try self.init(id: object.string("entry"), name: object.string("name"), size: Int64(object.integer("size")))
+        let object = try FileWire.object(data, keys: ["entry", "name", "size", "kind"])
+        guard let kind = NativeFileEntryKind(rawValue: try object.string("kind")) else { throw NativeFileError.protocolViolation }
+        try self.init(id: object.string("entry"), name: object.string("name"), size: Int64(object.integer("size")), kind: kind)
     }
 }
 
 public enum FileKind: UInt8, Sendable {
     case hello = 0x40, authorized = 0x41, list = 0x42, entry = 0x43, listEnd = 0x44
-    case put = 0x45, get = 0x46, accepted = 0x47, chunk = 0x48, finish = 0x49, complete = 0x4a, error = 0x7f
+    case put = 0x45, get = 0x46, accepted = 0x47, chunk = 0x48, finish = 0x49, complete = 0x4a
+    case treePut = 0x4b, node = 0x4c, treeEnd = 0x4d, explorerCapture = 0x4e, explorerCancel = 0x4f, error = 0x7f
 }
 
 public struct FilePacket: Sendable, Equatable {
@@ -100,6 +106,10 @@ public enum FileWire {
     public static let chunkBytes = 65_536
     public static let maximumSize: Int64 = 8_589_934_592
     public static let maximumEntries = 256
+    public static let maximumTreeNodes = 4096
+    public static let maximumRunNodes = 8192
+    public static let maximumTreeDepth = 16
+    public static let maximumTreeMetadata = 1_048_576
     public static let bytesPerSecond: Int64 = 2_097_152
     public static let remoteErrors: Set<String> = ["auth", "busy", "protocol", "timeout", "denied", "missing", "changed", "quota", "io"]
 
@@ -136,6 +146,32 @@ public enum FileWire {
         let object = try object(data, keys: ["name", "size"])
         let name = try object.string("name"), size = Int64(try object.integer("size"))
         guard validName(name), validSize(size) else { throw NativeFileError.protocolViolation }; return (name, size)
+    }
+    public static func accepted(_ data: Data) throws -> (name: String, size: Int64, kind: NativeFileEntryKind, count: Int) {
+        let object = try object(data, keys: ["name", "size", "kind", "count"])
+        let name = try object.string("name"), size = Int64(try object.integer("size")), count = try object.integer("count")
+        guard let kind = NativeFileEntryKind(rawValue: try object.string("kind")), validName(name), validSize(size),
+              (0...maximumTreeNodes).contains(count), kind != .file || count == 0, kind != .folder || count != 0 || size == 0 else { throw NativeFileError.protocolViolation }
+        return (name, size, kind, count)
+    }
+    public static func treeMetadata(_ data: Data) throws -> (name: String, size: Int64, count: Int) {
+        let object = try object(data, keys: ["name", "size", "count"])
+        let name = try object.string("name"), size = Int64(try object.integer("size")), count = try object.integer("count")
+        guard validName(name), validSize(size), (0...maximumTreeNodes).contains(count), count != 0 || size == 0 else { throw NativeFileError.protocolViolation }
+        return (name, size, count)
+    }
+    public static func treeEnd(_ data: Data) throws -> (count: Int, size: Int64, hash: String) {
+        let object = try object(data, keys: ["count", "size", "sha256"])
+        let count = try object.integer("count"), size = Int64(try object.integer("size")), hash = try object.string("sha256")
+        guard (0...maximumTreeNodes).contains(count), validSize(size), count != 0 || size == 0, isHex(hash, count: 64) else { throw NativeFileError.protocolViolation }
+        return (count, size, hash)
+    }
+    public static func explorerNonce(_ data: Data) throws -> String {
+        let nonce = try object(data, keys: ["nonce"]).string("nonce")
+        guard isHex(nonce, count: 32) else { throw NativeFileError.protocolViolation }; return nonce
+    }
+    public static func siblingKey(_ name: String) -> String {
+        name.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
     }
     public static func completion(_ data: Data) throws -> (name: String, size: Int64, hash: String) {
         let object = try object(data, keys: ["name", "size", "sha256"])

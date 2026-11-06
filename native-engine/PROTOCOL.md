@@ -1,6 +1,6 @@
 # Knot Native Engine v1 research contract
 
-Status: experimental vertical slice; independent of Sunshine, Moonlight and Glimmer. Windows11 x64/Home logged-in SDR primary desktop host -> AppleSilicon macOS26+ viewer. Native.9 adds bounded regular-file transfer through an explicitly shared folder; its separate protocol is [FILES.md](FILES.md). No prelogin, lock/UAC secure desktop, audio, clipboard sync, recursive folders, virtual monitor, updater, saved pairing or automatic reconnect. Existing product remains unchanged for comparison.
+Status: experimental vertical slice; independent of Sunshine, Moonlight and Glimmer. Windows11 x64/Home logged-in SDR primary desktop host -> AppleSilicon macOS26+ viewer. Native.10 adds bounded file/folder transfer and active Explorer drag export; separate contracts are [FILES.md](FILES.md) and [TREES.md](TREES.md). No prelogin, lock/UAC secure desktop, audio, clipboard sync, virtual monitor, updater, saved pairing or automatic reconnect. Existing product remains unchanged for comparison.
 
 ## Short-code provisioning
 
@@ -72,3 +72,5 @@ Compile host+DLL with WindowsSDK/MSVC and native Macviewer using only system fra
 Quality is selected on Windows before sharing: maximum3840×2160/30fps/40Mbps by default, optional4K60/40Mbps or1080p60/20Mbps. Ready reports actual capture dimensions; capture preserves aspect and never upscales a smaller source. All producer/consumer size gates use even dimensions and the8,294,400pixel bound. Encoder in-flight count2, decoder slots3 and compressed access-unit limits remain unchanged. MFT output scratch uses a finite dimension-derived budget of two validated NV12 frames (at most24,883,200bytes at4K), distinct from actual compressed bytes. The allocation is only max(AUlimit, reported minimum), not the budget ceiling; larger reported minimums fail closed. This is a resource policy, not a guarantee for every encoder.
 
 Mac ordinary typing uses its local input method and sends committed Unicode. Local Caps Lock language/capitalization events never become Windows Caps Lock toggles. Navigation/shortcuts remain physical with owned matching key-ups; composition is cancelled and late commits rejected on revocation/focus loss. Native fullscreen removes persistent chrome height while preserving one presenter and matching aspect-fit pointer geometry. Actual IME/fullscreen/GPU4K acceptance remains a device task.
+
+Input0x26 carries a16-byte ordered Explorer handoff nonce; it is admitted only against session-owned left input and matched to the separately authenticated capture request. It is not a media-writer response or arbitrary file path. See TREES.md for expiry, cancellation and COPY-only semantics.

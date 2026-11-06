@@ -14,6 +14,7 @@ import stat
 import struct
 import subprocess
 import sys
+import unicodedata
 import zlib
 from datetime import datetime, timezone
 
@@ -21,7 +22,7 @@ sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.9"
+VERSION = "0.1.0-native.10"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -60,7 +61,7 @@ def validate_native_file_vectors(path):
             kind, size = data[offset], struct.unpack_from(">I", data, offset + 1)[0]
             valid = (size == 0 if kind == 0x42 else 9 <= size <= 65544 if kind == 0x48 else
                      size == 40 if kind == 0x49 else 1 <= size <= 128 if kind == 0x7f else
-                     1 <= size <= 4096 if kind in range(0x40, 0x4b) else False)
+                     1 <= size <= 4096 if kind in range(0x40, 0x50) else False)
             offset += 5
             if not valid or size > len(data) - offset:
                 raise ValueError("Native file vector packet bounds invalid")
@@ -68,7 +69,7 @@ def validate_native_file_vectors(path):
         return result
 
     vectors = value.get("vectors")
-    if not isinstance(vectors, list) or not 12 <= len(vectors) <= 32:
+    if not isinstance(vectors, list) or not 17 <= len(vectors) <= 32:
         raise ValueError("Native file packet vector coverage missing")
     kinds, names = set(), set()
     for row in vectors:
@@ -79,7 +80,9 @@ def validate_native_file_vectors(path):
         if type(row.get("kind")) is not int or packets(encoded) != [(row["kind"], payload)]:
             raise ValueError("Native file encoded packet differs from its declaration")
         kinds.add(row["kind"])
-    if kinds != set(range(0x40, 0x4b)) | {0x7f}:
+        if row["kind"] in [0x40, 0x41] and json.loads(payload).get("v") != 2:
+            raise ValueError("Native file protocol version differs")
+    if kinds != set(range(0x40, 0x50)) | {0x7f}:
         raise ValueError("Native file packet kinds are incomplete")
 
     files, transfers = value.get("files"), value.get("transfers")
@@ -114,7 +117,7 @@ def validate_native_file_vectors(path):
                 (name == "unicode" and (not body or not any(ord(char) > 127 for char in filename)))):
             raise ValueError("Native file named boundary coverage differs")
         accepted = json.loads(stream[0][1])
-        if accepted != {"name": row.get("fileName"), "size": len(body)}:
+        if accepted != {"name": row.get("fileName"), "size": len(body), "kind": "file", "count": 0}:
             raise ValueError("Native file Accepted metadata differs")
         received = bytearray()
         for kind, payload in stream[1:-1]:
@@ -127,7 +130,90 @@ def validate_native_file_vectors(path):
             raise ValueError("Native file Finish content/size/hash differs")
     if seen != set(cases) or seen_cases != {"empty", "unicode", "boundary"}:
         raise ValueError("Native file transfer cases differ")
+    validate_native_tree_vectors(value.get("trees"), binary, packets)
     return value
+
+
+def validate_native_tree_vectors(trees, binary, packets):
+    """Check actual Windows tree streams against their declared synthetic bytes."""
+    if not isinstance(trees, list) or len(trees) != 3:
+        raise ValueError("Native tree boundary fixtures missing")
+    seen = set()
+    def basename(name):
+        if (not isinstance(name, str) or not name or name in [".", ".."] or len(name.encode()) > 255 or
+                name.endswith((".", " ")) or name.lower().startswith(".knot-") or
+                any(c in '/\\:<>"|?*' or unicodedata.category(c) in ["Cc", "Cf", "Zl", "Zp", "Cs"] for c in name)):
+            raise ValueError("Native tree basename differs")
+        stem = name.split(".")[0].rstrip(" ").upper()
+        if stem in {"CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"} or (
+                len(stem) == 4 and stem[:3] in ["COM", "LPT"] and stem[3] in "0123456789¹²³"):
+            raise ValueError("Native tree reserved basename")
+    for tree in trees:
+        if not isinstance(tree, dict) or tree.get("name") not in {"empty", "nested", "boundary"} or tree["name"] in seen:
+            raise ValueError("Native tree named coverage differs")
+        seen.add(tree["name"]); basename(tree.get("folderName"))
+        nodes, count, total = tree.get("nodes"), tree.get("count"), tree.get("size")
+        if (not isinstance(nodes, list) or type(count) is not int or not 0 <= count <= 4096 or count != len(nodes) or
+                type(total) is not int or not 0 <= total <= 8589934592):
+            raise ValueError("Native tree declared limits differ")
+        stream = packets(binary(tree.get("encodedBase64")))
+        if len(stream) < 2 or stream[0][0] != 0x47 or json.loads(stream[0][1]) != dict(
+                name=tree["folderName"], size=total, kind="folder", count=count):
+            raise ValueError("Native tree Accepted differs")
+        position, raw_count, received_total = 1, 0, 0
+        parents, siblings, digest = {0: ("folder", 0)}, set(), hashlib.sha256()
+        empty_folder, unicode_name, boundary = False, False, False
+        for index, declared in enumerate(nodes, 1):
+            if not isinstance(declared, dict):
+                raise ValueError("Native tree node fixture is not an object")
+            raw, body = binary(declared.get("jsonBase64")), binary(declared.get("bytesBase64"))
+            raw_count += len(raw)
+            if raw_count > 1048576 or position >= len(stream) or stream[position] != (0x4c, raw):
+                raise ValueError("Native tree node sequence/metadata differs")
+            position += 1; node = json.loads(raw)
+            if (not isinstance(node, dict) or set(node) != {"id", "parent", "name", "kind", "size"} or
+                    type(node["id"]) is not int or node["id"] != index or type(node["parent"]) is not int or
+                    node["parent"] not in parents or parents[node["parent"]][0] != "folder" or
+                    node["kind"] not in ["file", "folder"] or type(node["size"]) is not int or
+                    not 0 <= node["size"] <= 8589934592):
+                raise ValueError("Native tree parent/id/kind differs")
+            basename(node["name"])
+            key = (node["parent"], unicodedata.normalize("NFC", node["name"]).casefold())
+            depth = parents[node["parent"]][1] + 1
+            if key in siblings or depth > 16:
+                raise ValueError("Native tree sibling/depth differs")
+            siblings.add(key); parents[index] = (node["kind"], depth)
+            digest.update(struct.pack(">I", len(raw))); digest.update(raw)
+            unicode_name |= any(ord(c) > 127 for c in node["name"])
+            if node["kind"] == "folder":
+                if node["size"] != 0 or body:
+                    raise ValueError("Native tree folder bytes differ")
+                empty_folder = True
+                continue
+            if node["size"] != len(body) or received_total > total - len(body):
+                raise ValueError("Native tree file size/total differs")
+            received = bytearray()
+            while len(received) < len(body):
+                if position >= len(stream) or stream[position][0] != 0x48:
+                    raise ValueError("Native tree Chunk missing")
+                payload = stream[position][1]; position += 1
+                if struct.unpack_from(">Q", payload)[0] != len(received) or len(payload) - 8 > len(body) - len(received):
+                    raise ValueError("Native tree Chunk offset/size differs")
+                received.extend(payload[8:])
+            if (received != body or position >= len(stream) or stream[position] != (0x49,
+                    struct.pack(">Q", len(body)) + hashlib.sha256(body).digest())):
+                raise ValueError("Native tree file Finish/hash differs")
+            position += 1; received_total += len(body); digest.update(body); boundary |= len(body) == 65541
+        if (received_total != total or position != len(stream) - 1 or stream[position][0] != 0x4d or
+                tree.get("sha256") != digest.hexdigest() or json.loads(stream[position][1]) != dict(
+                    count=count, size=total, sha256=digest.hexdigest())):
+            raise ValueError("Native tree terminal transcript/hash differs")
+        if ((tree["name"] == "empty" and (count != 0 or total != 0)) or
+                (tree["name"] == "nested" and (not empty_folder or not unicode_name)) or
+                (tree["name"] == "boundary" and not boundary)):
+            raise ValueError("Native tree empty/Unicode/boundary coverage differs")
+    if seen != {"empty", "nested", "boundary"}:
+        raise ValueError("Native tree coverage differs")
 
 
 def output_stat(path):
@@ -735,6 +821,10 @@ class Builder:
         if (parsed.get("status") != "passed" or parsed.get("freshSyntheticOnly") is not True or
                 parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False):
             raise ValueError("Native host checks must prove their fresh/inert capture and input scope")
+        for key, minimum in [("actualFreshExplorerInputFixtures", 1), ("actualFreshExplorerOleFixtures", 1),
+                             ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 1)]:
+            if type(parsed.get(key)) is not int or parsed[key] < minimum:
+                raise ValueError("Native host folder/Explorer checks incomplete: " + key)
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")
         if public_pin.read_text().strip() != digest(public_certificate):
             raise ValueError("Fresh Windows certificate pin differs from exported public DER")

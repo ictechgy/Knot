@@ -214,6 +214,20 @@ final class SessionModel: ObservableObject {
             return false
         }
     }
+    func captureExplorerDrag(nonce: Data) async throws -> [NativeFileEntry] {
+        guard nonce.count == 16, phase == .streaming, let files, !files.isBusy,
+              !inputRecovery, !fileUIInputSuspended else { throw NativeFileError.busy }
+        let run = identity
+        // This barrier shares the bounded ordered input queue with the accepted
+        // left-down and moves. The file socket alone cannot authorize a drag.
+        guard send(Packet(kind: .explorerDrag, payload: nonce)) else { throw NativeFileError.cancelled }
+        let hex = NativeFileClient.hex(nonce)
+        let result = try await files.captureExplorer(nonce: hex)
+        guard run == identity, phase == .streaming, self.files === files, !Task.isCancelled else {
+            files.cancelExplorer(nonce: hex); throw NativeFileError.closed
+        }
+        return result
+    }
     @discardableResult func sendCommittedText(_ text: String) -> Bool {
         // Empty AppKit commits are a no-op, including while input is paused.
         guard !text.isEmpty else { return true }

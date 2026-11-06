@@ -180,7 +180,7 @@ private final class PortGate: @unchecked Sendable {
     for _ in 0..<100 { if model.phase == .approval { break }; try await Task.sleep(for: .milliseconds(5)) }
     try #require(model.phase == .approval)
     let ready = try JSONSerialization.data(withJSONObject: ["v": 1, "codec": "h264-annexb", "width": 64,
-        "height": 64, "fps": 30, "bitrate": 1_000_000, "hardwareEncoder": true, "filesVersion": 1,
+        "height": 64, "fps": 30, "bitrate": 1_000_000, "hardwareEncoder": true, "filesVersion": 2,
         "filePort": 48634, "fileToken": Invitation.encodeBase64URL(Data(repeating: 9, count: 32)), "fileRootName": "Synthetic"])
     let packet = Packet(kind: .ready, payload: ready); transport.feed(Data(packet.encoded.prefix(5))); transport.feed(ready)
     for _ in 0..<100 { if model.phase == .decoding { break }; try await Task.sleep(for: .milliseconds(5)) }

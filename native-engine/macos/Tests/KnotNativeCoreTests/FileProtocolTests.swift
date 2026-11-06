@@ -12,16 +12,21 @@ private func validateWindowsFileVector(kind: FileKind, payload: Data) throws {
     switch kind {
     case .hello:
         let object = try FileWire.object(payload, keys: ["v", "token"])
-        #expect(try object.integer("v") == 1)
+        #expect(try object.integer("v") == 2)
         let token = try object.string("token"), decoded = try Invitation.base64URL(object.string("token"))
         #expect(token.utf8.count == 43 && decoded.count == 32)
-    case .authorized: #expect(try FileWire.object(payload, keys: ["v"]).integer("v") == 1)
+    case .authorized: #expect(try FileWire.object(payload, keys: ["v"]).integer("v") == 2)
     case .list: #expect(payload.isEmpty)
     case .entry: _ = try NativeFileEntry(payload)
     case .listEnd:
         let object = try FileWire.object(payload, keys: ["count", "truncated"])
         #expect(try (0...256).contains(object.integer("count"))); _ = try object.boolean("truncated")
-    case .put, .accepted: _ = try FileWire.metadata(payload)
+    case .put: _ = try FileWire.metadata(payload)
+    case .accepted: _ = try FileWire.accepted(payload)
+    case .treePut: _ = try FileWire.treeMetadata(payload)
+    case .node: _ = try NativeFileNode(payload)
+    case .treeEnd: _ = try FileWire.treeEnd(payload)
+    case .explorerCapture, .explorerCancel: _ = try FileWire.explorerNonce(payload)
     case .get: #expect(try FileWire.isHex(FileWire.object(payload, keys: ["entry"]).string("entry"), count: 32))
     case .chunk: #expect(payload.readBE(UInt64.self, at: 0) <= UInt64(FileWire.maximumSize))
     case .finish: #expect(payload.readBE(UInt64.self, at: 0) <= UInt64(FileWire.maximumSize))
@@ -35,14 +40,14 @@ private func validateWindowsFileVector(kind: FileKind, payload: Data) throws {
                                 "bitrate": 1_000_000, "hardwareEncoder": true]
     #expect(try Ready(JSONSerialization.data(withJSONObject: base)).files == nil)
     let token = Invitation.encodeBase64URL(Data(repeating: 0x37, count: 32))
-    let group: [String: Any] = ["filesVersion": 1, "filePort": 48634, "fileToken": token, "fileRootName": "Knot Files"]
+    let group: [String: Any] = ["filesVersion": 2, "filePort": 48634, "fileToken": token, "fileRootName": "Knot Files"]
     let ready = try Ready(JSONSerialization.data(withJSONObject: base.merging(group) { _, new in new }))
     #expect(ready.files?.port == 48634 && ready.files?.rootName == "Knot Files")
     for key in group.keys {
         var incomplete = base.merging(group) { _, new in new }; incomplete.removeValue(forKey: key)
         #expect(throws: (any Error).self) { try Ready(JSONSerialization.data(withJSONObject: incomplete)) }
     }
-    for mutation: [String: Any] in [["filePort": 80], ["filesVersion": true], ["filesVersion": 2],
+    for mutation: [String: Any] in [["filePort": 80], ["filesVersion": true], ["filesVersion": 1],
                                    ["fileToken": token + "="], ["fileRootName": "bad\nfolder"], ["fileAddress": "8.8.8.8"]] {
         let invalid = base.merging(group) { _, new in new }.merging(mutation) { _, new in new }
         #expect(throws: (any Error).self) { try Ready(JSONSerialization.data(withJSONObject: invalid)) }
@@ -135,7 +140,7 @@ func actualWindowsFileCodecVectorsAndChunkedTransfersAreAcceptedExactly() throws
             let data = encoded.subdata(in: cursor..<(cursor + count)); cursor += count
             switch kind {
             case .accepted:
-                #expect(!accepted && offset == 0); let info = try FileWire.metadata(data)
+                #expect(!accepted && offset == 0); let info = try FileWire.accepted(data)
                 #expect(info.name == expectedName && info.size == Int64(expected.count)); accepted = true
             case .chunk:
                 #expect(accepted && !finished && data.readBE(UInt64.self, at: 0) == offset)
@@ -151,4 +156,99 @@ func actualWindowsFileCodecVectorsAndChunkedTransfersAreAcceptedExactly() throws
         hasEmpty = hasEmpty || expected.isEmpty; hasBoundary = hasBoundary || expected.count == 65_541
     }
     #expect(hasEmpty && hasBoundary)
+}
+
+@Test func treeGrammarRejectsForwardParentsCaseNormalizationCollisionsAndBounds() throws {
+    let id = String(repeating: "a", count: 32)
+    #expect(try NativeFileEntry(id: id, name: "folder", size: 0, kind: .folder).isFolder)
+    #expect(throws: (any Error).self) { try NativeFileEntry(id: id, name: "folder", size: 1, kind: .folder) }
+    #expect(throws: (any Error).self) { try NativeFileEntry(Data("{\"entry\":\"\(id)\",\"name\":\"a\",\"size\":0}".utf8)) }
+    for raw in ["{\"id\":1,\"parent\":1,\"name\":\"a\",\"kind\":\"file\",\"size\":0}",
+                "{\"id\":1,\"parent\":0,\"name\":\"a\",\"kind\":\"folder\",\"size\":1}",
+                "{\"id\":1,\"parent\":0,\"name\":\"a\",\"kind\":\"file\",\"size\":0,\"path\":\"x\"}"] {
+        #expect(throws: (any Error).self) { try NativeFileNode(Data(raw.utf8)) }
+    }
+    for pair in [("same", "SAME"), ("é", "e\u{301}")] {
+        var tree = try NativeFileTreeAdmission(count: 2, size: 0)
+        try tree.append(NativeFileNode(id: 1, parent: 0, name: pair.0, kind: .folder, size: 0).json)
+        #expect(throws: NativeFileError.protocolViolation) { try tree.append(NativeFileNode(id: 2, parent: 0, name: pair.1, kind: .file, size: 0).json) }
+    }
+    var depth = try NativeFileTreeAdmission(count: 17, size: 0)
+    for id in 1...16 { try depth.append(NativeFileNode(id: id, parent: id - 1, name: "dir", kind: .folder, size: 0).json) }
+    #expect(throws: NativeFileError.quota) { try depth.append(NativeFileNode(id: 17, parent: 16, name: "leaf", kind: .file, size: 0).json) }
+    #expect(throws: (any Error).self) { try NativeFileTreeAdmission(count: 4097, size: 0) }
+    #expect(throws: (any Error).self) { try NativeFileTreeAdmission(count: 0, size: 1) }
+    var missing = try NativeFileTreeAdmission(count: 1, size: 1)
+    try missing.append(NativeFileNode(id: 1, parent: 0, name: "a", kind: .file, size: 0).json)
+    #expect(throws: NativeFileError.protocolViolation) { try missing.finish() }
+    #expect(throws: (any Error).self) { try FileWire.explorerNonce(Data("{\"nonce\":\"ABC\"}".utf8)) }
+    #expect(throws: (any Error).self) { try FileWire.accepted(FileWire.json(["name": "a", "size": 0, "kind": "file", "count": 1])) }
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"] != nil,
+               "Actual Windows tree codec vectors are supplied by full CI."))
+func actualWindowsTreeVectorsBindRawNodeJSONAndAllFileBytes() throws {
+    let root = try #require(ProcessInfo.processInfo.environment["KNOT_NATIVE_WINDOWS_FIXTURES"])
+    let path = URL(fileURLWithPath: root).appendingPathComponent("native-file-vectors.json")
+    let raw = try Data(contentsOf: path)
+    try #require(raw.count <= 1_048_576)
+    let object = try #require(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+    let trees = try #require(object["trees"] as? [[String: Any]])
+    #expect(trees.count >= 3)
+    var empty = false, unicode = false, boundary = false
+    for tree in trees {
+        let count = try #require(tree["count"] as? Int), size = try #require(tree["size"] as? Int)
+        var admission = try NativeFileTreeAdmission(count: count, size: Int64(size)), hash = SHA256(), cursor = 0, offset: Int64 = 0
+        let stream = try fileVectorData(tree, "encodedBase64"), nodes = try #require(tree["nodes"] as? [[String: Any]])
+        var current: NativeFileNode?, leafHash = SHA256(), finished = false, accepted = false
+        for item in nodes {
+            let raw = try fileVectorData(item, "jsonBase64"), bytes = try fileVectorData(item, "bytesBase64")
+            let node = try NativeFileNode(raw)
+            #expect(node.kind == .file ? node.size == Int64(bytes.count) : bytes.isEmpty)
+        }
+        while cursor < stream.count {
+            try #require(cursor + 5 <= stream.count)
+            let (kind, length) = try FilePacket.header(stream.subdata(in: cursor..<(cursor + 5))); cursor += 5
+            try #require(cursor + length <= stream.count)
+            let payload = stream.subdata(in: cursor..<(cursor + length)); cursor += length
+            switch kind {
+            case .accepted:
+                #expect(!accepted); let info = try FileWire.accepted(payload)
+                #expect(info.kind == .folder && info.count == count && info.size == Int64(size)); accepted = true
+            case .node:
+                #expect(accepted && !finished && current == nil)
+                let node = try admission.append(payload)
+                let expected = try fileVectorData(nodes[node.id - 1], "jsonBase64"); #expect(expected == payload)
+                var length = Data(); length.appendBE(UInt32(payload.count)); hash.update(data: length); hash.update(data: payload)
+                unicode = unicode || node.name.unicodeScalars.contains(where: { $0.value > 127 })
+                if node.kind == .file { current = node; leafHash = SHA256(); offset = 0; boundary = boundary || node.size == 65_541 }
+            case .chunk:
+                let node = try #require(current)
+                #expect(payload.readBE(UInt64.self, at: 0) == UInt64(offset))
+                let bytes = Data(payload.dropFirst(8)); offset += Int64(bytes.count); #expect(offset <= node.size)
+                hash.update(data: bytes); leafHash.update(data: bytes)
+            case .finish:
+                let node = try #require(current); #expect(offset == node.size)
+                try FileWire.checkFinish(payload, size: node.size, digest: Data(leafHash.finalize())); current = nil
+            case .treeEnd:
+                #expect(current == nil && cursor == stream.count); try admission.finish()
+                let end = try FileWire.treeEnd(payload), digest = Data(hash.finalize()).map { String(format: "%02x", $0) }.joined()
+                #expect(end.count == count && end.size == Int64(size) && end.hash == digest && tree["sha256"] as? String == digest); finished = true
+            default: Issue.record("Unexpected tree vector frame")
+            }
+        }
+        empty = empty || count == 0
+        #expect(accepted && finished && nodes.count == count)
+    }
+    #expect(empty && unicode && boundary)
+}
+
+@Test func treeRawMetadataBudgetIsEnforcedWithoutAcceptingExtraNode() throws {
+    var admission = try NativeFileTreeAdmission(count: 4096, size: 0), rejected = false
+    for id in 1...4096 {
+        let name = String(repeating: "a", count: 245) + String(format: "%010d", id)
+        do { try admission.append(NativeFileNode(id: id, parent: 0, name: name, kind: .file, size: 0).json) }
+        catch { #expect(error as? NativeFileError == .quota); rejected = true; break }
+    }
+    #expect(rejected && admission.nodes.count < 4096 && admission.metadataBytes <= FileWire.maximumTreeMetadata)
 }

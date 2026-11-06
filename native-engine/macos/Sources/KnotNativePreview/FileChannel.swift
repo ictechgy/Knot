@@ -46,6 +46,7 @@ final class FileRunGate: @unchecked Sendable {
     private var current: UUID?
     private var channel: (any NativeFileChannel)?
     private var reserved: Int64 = 0
+    private var reservedNodes = 0
     func begin() throws -> UUID {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { throw NativeFileError.closed }
@@ -67,11 +68,11 @@ final class FileRunGate: @unchecked Sendable {
         if current == id, channel === value { channel = nil }
         value.close()
     }
-    func reserve(_ size: Int64, id: UUID) throws {
+    func reserve(_ size: Int64, nodes: Int = 1, id: UUID) throws {
         lock.lock(); defer { lock.unlock() }
         guard !closed, current == id else { throw NativeFileError.closed }
-        guard FileWire.validSize(size), size <= FileWire.maximumSize - reserved else { throw NativeFileError.quota }
-        reserved += size // cancellations deliberately do not refund the run quota
+        guard FileWire.validSize(size), size <= FileWire.maximumSize - reserved, nodes >= 1, nodes <= FileWire.maximumRunNodes - reservedNodes else { throw NativeFileError.quota }
+        reserved += size; reservedNodes += nodes // cancellations deliberately do not refund the run quota
     }
     func publish<T>(id: UUID, _ operation: () throws -> T) throws -> T {
         lock.lock(); defer { lock.unlock() }

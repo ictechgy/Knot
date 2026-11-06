@@ -1,5 +1,13 @@
 # Native preview changes
 
+## 0.1.0-native.10
+
+- Continue actual Windows Explorer file/folder selections as native Mac Finder promises through a short-lived, session-owned OLE target and ordered input nonce. Update visible Windows consent; no clipboard, Explorer selection enumeration or arbitrary remote paths.
+- Copy recursive ordinary folders in both directions, including empty subfolders. Use bounded scalar parent-ID manifests, per-file and whole-tree hashes, private no-follow staging and one exclusive root publication. Retain source files; reject packages/links/hardlinks/special files and directory merging.
+- Bound tree depth/count/metadata and nonrefundable run node/data quotas. Keep regular-file framing, separate pinned TLS, pacing, cancellation and media continuity. Both apps require the v2 file protocol.
+- Add fresh synthetic OLE/HWND/input ownership, folder storage/TLS, mutation/collision/cancel/cleanup and actual Windows-to-Mac tree vector checks. These checks are distinct from live Explorer/Finder or physical performance acceptance.
+- Advance installers to `0.1.0-native.10`, numeric PE version `0.1.0.10` and Mac bundle revision `10`.
+
 ## 0.1.0-native.9
 
 - Add bidirectional regular-file copying during an authenticated live desktop session, using one explicitly shared Windows folder. Mac supports native send/receive pickers, Finder files dropped onto the viewer/panel, and shared-folder file rows promised to Finder.

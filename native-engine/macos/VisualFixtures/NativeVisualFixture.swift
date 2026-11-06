@@ -156,6 +156,8 @@ struct NativeVisualFixture {
                 "searchCompleted": enrollment.hasSearched,
                 "filePanelVisible": !filePanels.isEmpty,
                 "renderedFilePanels": filePanels.count,
+                "fileFolderEntryCount": files?.entries.filter(\.isFolder).count ?? 0,
+                "renderedFolderEntries": folderDragViews(view).count,
                 "filePanelFrame": filePanelFrame.map { $0 as Any } ?? NSNull(),
                 "fileInputSuspended": model.fileUIInputSuspended,
                 "fileEntryCount": files?.entries.count ?? 0,
@@ -197,6 +199,10 @@ struct NativeVisualFixture {
     }
     @MainActor private static func filePanelViews(_ root: NSView) -> [NativeFilePanelHost] {
         (root as? NativeFilePanelHost).map { [$0] } ?? root.subviews.flatMap { filePanelViews($0) }
+    }
+    @MainActor private static func folderDragViews(_ root: NSView) -> [NativeRemoteFileDragView] {
+        let own = (root as? NativeRemoteFileDragView).flatMap { $0.entry?.isFolder == true ? $0 : nil }
+        return own.map { [$0] } ?? root.subviews.flatMap { folderDragViews($0) }
     }
 
     @MainActor private static func desktopFrame(model: SessionModel, root: NSView) -> CGRect {
@@ -254,7 +260,7 @@ struct NativeVisualFixture {
         guard state.hasPrefix("files") else { return nil }
         let entries = state == "files-empty" ? [] : [
             try NativeFileEntry(id: String(repeating: "1", count: 32), name: "회의 자료.pdf", size: 2_400_000),
-            try NativeFileEntry(id: String(repeating: "2", count: 32), name: "project-source.zip", size: 18_000_000),
+            try NativeFileEntry(id: String(repeating: "2", count: 32), name: "프로젝트 폴더", size: 0, kind: .folder),
             try NativeFileEntry(id: String(repeating: "3", count: 32), name: "README.md", size: 4096)
         ]
         return FileTransferModel(rootName: "Knot Files", entries: entries, isBusy: state == "files-working",

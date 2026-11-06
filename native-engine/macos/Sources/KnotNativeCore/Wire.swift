@@ -2,7 +2,7 @@ import Foundation
 
 public enum Kind: UInt8, Sendable {
     case hello = 1, ready = 2, video = 3, hostHeartbeat = 4
-    case key = 0x20, text = 0x21, pointer = 0x22, wheel = 0x23, releaseAll = 0x24, heartbeat = 0x25, error = 0x7f
+    case key = 0x20, text = 0x21, pointer = 0x22, wheel = 0x23, releaseAll = 0x24, heartbeat = 0x25, explorerDrag = 0x26, error = 0x7f
 }
 public struct Packet: Sendable, Equatable {
     public let kind: Kind
@@ -44,7 +44,7 @@ public struct Ready: Sendable, Equatable {
         if let old = try? StrictJSON.object(bytes, keys: base, limit: 4096) { json = old; files = nil }
         else {
             json = try StrictJSON.object(bytes, keys: base.union(["filesVersion", "filePort", "fileToken", "fileRootName"]), limit: 4096)
-            guard try json.integer("filesVersion") == 1 else { throw NativeFailure.unsupported }
+            guard try json.integer("filesVersion") == 2 else { throw NativeFailure.unsupported }
             files = try NativeFileOffer(port: json.integer("filePort"), token: json.string("fileToken"), rootName: json.string("fileRootName"))
         }
         let width = try json.integer("width"), height = try json.integer("height")

@@ -5,20 +5,33 @@ import KnotNativeCore
 final class NativeFileSource {
     let name: String, size: Int64
     private let descriptor: Int32
+    private let parent: Int32
+    private let leaf: String
     private let initial: stat
     init(url: URL) throws {
         guard url.isFileURL, FileWire.validName(url.lastPathComponent) else { throw NativeFileError.unsupported }
         name = url.lastPathComponent
-        descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard descriptor >= 0 else { throw NativeFileError.denied }
+        parent = try FileTreeFS.openDirectory(url.deletingLastPathComponent())
+        leaf = url.lastPathComponent
+        descriptor = openat(parent, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { Darwin.close(parent); throw NativeFileError.denied }
         var info = stat()
-        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1,
               FileWire.validSize(Int64(info.st_size)) else {
-            Darwin.close(descriptor); throw NativeFileError.unsupported
+            Darwin.close(descriptor); Darwin.close(parent); throw NativeFileError.unsupported
         }
         initial = info; size = Int64(info.st_size)
     }
-    deinit { Darwin.close(descriptor) }
+    init(descriptor: Int32, parent: Int32, name: String, captured: stat) throws {
+        self.descriptor = descriptor; self.parent = parent; leaf = name; self.name = name; initial = captured; size = Int64(captured.st_size)
+        do { try requireIdentity() } catch { Darwin.close(descriptor); Darwin.close(parent); throw error }
+    }
+    deinit { Darwin.close(descriptor); Darwin.close(parent) }
+    private func requireIdentity() throws {
+        var live = stat(), path = stat()
+        guard fstat(descriptor, &live) == 0, fstatat(parent, leaf, &path, AT_SYMLINK_NOFOLLOW) == 0,
+              FileTreeFS.same(live, initial), FileTreeFS.same(path, initial), live.st_nlink == 1 else { throw NativeFileError.changed }
+    }
     func read(_ count: Int) throws -> Data {
         guard count > 0, count <= FileWire.chunkBytes else { throw NativeFileError.protocolViolation }
         var bytes = Data(count: count)
@@ -27,6 +40,7 @@ final class NativeFileSource {
         bytes.count = result; return bytes
     }
     func requireUnchanged() throws {
+        try requireIdentity()
         var final = stat()
         guard fstat(descriptor, &final) == 0, final.st_dev == initial.st_dev, final.st_ino == initial.st_ino,
               final.st_size == initial.st_size, final.st_mtimespec.tv_sec == initial.st_mtimespec.tv_sec,
@@ -56,8 +70,7 @@ final class NativeFileDestination {
     init(url: URL, size: Int64) throws {
         guard url.isFileURL, FileWire.validName(url.lastPathComponent), FileWire.validSize(size) else { throw NativeFileError.unsupported }
         let localName = url.lastPathComponent, localStage = ".knot-\(UUID().uuidString).part", localPartial = "payload.part"
-        let folder = url.deletingLastPathComponent().resolvingSymlinksInPath()
-        let folderFD = Darwin.open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        let folderFD = try FileTreeFS.openDirectory(url.deletingLastPathComponent())
         guard folderFD >= 0 else { throw NativeFileError.denied }
         let privateParent = Self.privateParent(folderFD)
         var fileFD: Int32 = -1, stageFD: Int32 = -1, info = stat(), stageInfo = stat(), owns = false, createdStage = false
@@ -131,18 +144,18 @@ final class NativeFileDestination {
            current.st_dev == stagingIdentity.st_dev, current.st_ino == stagingIdentity.st_ino,
            (current.st_mode & S_IFMT) == S_IFDIR { unlinkat(directory, stagingName, AT_REMOVEDIR) }
     }
-    private static func noACL(_ fd: Int32) -> Bool {
+    static func noACL(_ fd: Int32) -> Bool {
         guard let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else { return errno == ENOENT }
         defer { acl_free(UnsafeMutableRawPointer(acl)) }
         guard acl_valid(acl) == 0 else { return false }
         var entry: acl_entry_t?; errno = 0
         return acl_get_entry(acl, Int32(ACL_FIRST_ENTRY.rawValue), &entry) == -1 && errno == EINVAL
     }
-    private static func privateParent(_ fd: Int32) -> Bool {
+    static func privateParent(_ fd: Int32) -> Bool {
         var info = stat()
         return fstat(fd, &info) == 0 && info.st_uid == geteuid() && (info.st_mode & 0o022) == 0 && noACL(fd)
     }
-    private static func makePrivate(_ fd: Int32, mode: mode_t) throws {
+    static func makePrivate(_ fd: Int32, mode: mode_t) throws {
         guard fchmod(fd, mode) == 0, let acl = acl_init(0) else { throw NativeFileError.denied }
         defer { acl_free(UnsafeMutableRawPointer(acl)) }
         guard acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED) == 0, noACL(fd) else { throw NativeFileError.denied }

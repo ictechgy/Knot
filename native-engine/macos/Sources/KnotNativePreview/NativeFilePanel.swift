@@ -28,7 +28,8 @@ final class NativeFilePromiseOwner: ObservableObject {
         let id = UUID()
         let delegate = NativeFilePromiseDelegate(id: id, entry: entry, files: files, owner: self)
         let type = UTType(filenameExtension: (entry.name as NSString).pathExtension) ?? .data
-        let provider = NSFilePromiseProvider(fileType: type.conforms(to: .data) ? type.identifier : UTType.data.identifier, delegate: delegate)
+        let promisedType = entry.isFolder ? UTType.folder.identifier : type.conforms(to: .data) ? type.identifier : UTType.data.identifier
+        let provider = NSFilePromiseProvider(fileType: promisedType, delegate: delegate)
         provider.userInfo = delegate
         providers[id] = provider
         return (id, provider)
@@ -106,7 +107,7 @@ final class NativeRemoteFileDragView: NSView, NSDraggingSource {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: nil)?.draw(in: bounds.insetBy(dx: 7, dy: 7))
+        NSImage(systemSymbolName: entry?.isFolder == true ? "folder" : "arrow.down.doc", accessibilityDescription: nil)?.draw(in: bounds.insetBy(dx: 7, dy: 7))
     }
     override func mouseDown(with event: NSEvent) { down = event }
     override func mouseDragged(with event: NSEvent) {
@@ -115,7 +116,7 @@ final class NativeRemoteFileDragView: NSView, NSDraggingSource {
               let (id, provider) = owner.provider(entry: entry, files: files) else { return }
         self.down = nil; promise = id; beforeAction?()
         let item = NSDraggingItem(pasteboardWriter: provider)
-        item.setDraggingFrame(bounds, contents: NSImage(systemSymbolName: "doc", accessibilityDescription: nil))
+        item.setDraggingFrame(bounds, contents: NSImage(systemSymbolName: entry.isFolder ? "folder" : "doc", accessibilityDescription: nil))
         beginDraggingSession(with: [item], event: event, source: self)
     }
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
@@ -159,17 +160,17 @@ struct NativeFilePanelContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Label("Windows와 파일 주고받기", systemImage: "folder").font(.system(size: 18, weight: .semibold))
+                Label("파일·폴더 주고받기", systemImage: "folder").font(.system(size: 18, weight: .semibold))
                 Spacer()
                 Button(action: close) { Image(systemName: "xmark") }.accessibilityLabel("파일 패널 닫기")
             }
             Text("Windows 공유 폴더 · " + files.rootName).font(.system(size: 12, weight: .medium)).textSelection(.enabled)
-            Text("여기나 원격 화면에 Mac 파일을 놓으면 이 폴더로 복사돼요. Windows 파일은 아래 목록에서 받거나 아이콘을 Finder로 끌어주세요.")
+            Text("Mac 파일·폴더를 여기에 놓으면 이 공유 폴더로 복사돼요. Windows 탐색기 항목은 화면 밖 Finder로 끌어오거나 아래 목록에서 받으세요.")
                 .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button { beforeAction(); localNotice = nil; files.refresh() } label: { Label("새로고침", systemImage: "arrow.clockwise") }
                 Spacer()
-                Button(action: chooseFiles) { Label("파일 보내기", systemImage: "square.and.arrow.up") }.buttonStyle(.borderedProminent)
+                Button(action: chooseFiles) { Label("보내기", systemImage: "square.and.arrow.up") }.buttonStyle(.borderedProminent)
             }.disabled(files.isBusy)
             Divider()
             ScrollView {
@@ -187,7 +188,7 @@ struct NativeFilePanelContent: View {
                                 .frame(width: 34, height: 34).opacity(files.isBusy ? 0.4 : 1)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(verbatim: entry.name).font(.system(size: 13, weight: .medium)).lineLimit(1).help(entry.name)
-                                Text(ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file)).font(.system(size: 11)).foregroundStyle(.secondary)
+                                Text(entry.isFolder ? "폴더 · 하위 항목 포함" : ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file)).font(.system(size: 11)).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: 8)
                             Button("받기") { chooseDestination(entry) }.disabled(files.isBusy)
@@ -209,15 +210,15 @@ struct NativeFilePanelContent: View {
                     if files.isBusy { Button("전송 취소") { files.cancel() }.buttonStyle(.bordered) }
                 }
             }.padding(12).background(NativeStyle.canvas, in: RoundedRectangle(cornerRadius: 8))
-            Text("일반 파일만 · 최대 8GiB · 원본 유지 · 폴더·덮어쓰기 미지원")
+            Text("파일·폴더 · 최대 8GiB · 원본 유지 · 기존 항목 덮어쓰기 없음")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }.padding(20).frame(minWidth: 360, minHeight: 360).nativePanel()
     }
     private func chooseFiles() {
         guard !files.isBusy else { return }
         beforeAction()
-        let picker = NSOpenPanel(); picker.title = "Windows 공유 폴더로 보낼 파일"; picker.prompt = "보내기"
-        picker.canChooseFiles = true; picker.canChooseDirectories = false; picker.allowsMultipleSelection = true
+        let picker = NSOpenPanel(); picker.title = "Windows로 보낼 파일·폴더"; picker.prompt = "보내기"
+        picker.canChooseFiles = true; picker.canChooseDirectories = true; picker.treatsFilePackagesAsDirectories = false; picker.allowsMultipleSelection = true
         picker.begin { result in
             guard result == .OK else { return }
             files.send(urls: picker.urls)
@@ -226,7 +227,7 @@ struct NativeFilePanelContent: View {
     private func chooseDestination(_ entry: NativeFileEntry) {
         guard !files.isBusy else { return }
         beforeAction()
-        let picker = NSSavePanel(); picker.title = "Windows 파일 받기"; picker.prompt = "받기"; picker.nameFieldStringValue = entry.name
+        let picker = NSSavePanel(); picker.title = entry.isFolder ? "Windows 폴더 받기" : "Windows 파일 받기"; picker.prompt = "받기"; picker.nameFieldStringValue = entry.name
         picker.message = "원본은 유지해요. 같은 이름의 파일이 있으면 다른 이름을 선택해주세요."
         picker.begin { result in
             guard result == .OK, let destination = picker.url else { return }

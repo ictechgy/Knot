@@ -5,7 +5,7 @@ import KnotNativeCore
 @testable import KnotNativePreview
 
 private func ownedFileDirectory() throws -> URL {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("knot-owned-files-" + UUID().uuidString)
+    let root = URL(fileURLWithPath: FileManager.default.temporaryDirectory.path.hasPrefix("/var/") ? "/private" + FileManager.default.temporaryDirectory.path : FileManager.default.temporaryDirectory.path).appendingPathComponent("knot-owned-files-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     return root
 }
@@ -105,4 +105,73 @@ private func ownedFileDirectory() throws -> URL {
     #expect(!FileManager.default.fileExists(atPath: target.path))
     #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
     #expect(throws: NativeFileError.closed) { try gate.begin() }
+}
+
+@Test func fileTreesSnapshotEmptyUnicodeAndRejectLinksHardlinksPackagesAndMutation() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appendingPathComponent("tree")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+    let empty = try NativeFileTreeSource(url: folder); #expect(empty.items.isEmpty && empty.size == 0)
+    let sub = folder.appendingPathComponent("빈 폴더"); try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: false)
+    let leaf = sub.appendingPathComponent("검증.txt"); try Data([1, 2, 3]).write(to: leaf)
+    let tree = try NativeFileTreeSource(url: folder); #expect(tree.items.count == 2 && tree.size == 3)
+    let file = try tree.openFile(try #require(tree.items.last)); #expect(try file.read(3) == Data([1, 2, 3])); try file.requireUnchanged()
+    try Data([4, 5, 6]).write(to: leaf)
+    #expect(throws: NativeFileError.changed) { try tree.requireUnchanged() }
+    let link = folder.appendingPathComponent("link"); try FileManager.default.createSymbolicLink(at: link, withDestinationURL: leaf)
+    #expect(throws: (any Error).self) { try NativeFileTreeSource(url: folder) }; try FileManager.default.removeItem(at: link)
+    let hard = folder.appendingPathComponent("hard"); try FileManager.default.linkItem(at: leaf, to: hard)
+    #expect(throws: (any Error).self) { try NativeFileTreeSource(url: folder) }
+    #expect(throws: (any Error).self) { try NativeFileSource(url: leaf) }; try FileManager.default.removeItem(at: hard)
+    let package = folder.appendingPathComponent("unsafe.app"); try FileManager.default.createDirectory(at: package, withIntermediateDirectories: false)
+    #expect(throws: (any Error).self) { try NativeFileTreeSource(url: folder) }
+    #expect(throws: (any Error).self) { try NativeFileTreeSource(url: package) }
+}
+
+@Test func fileTreeStagePublishesOnceWithEveryLeafQuarantinedAndCleansOwnedFailures() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let destination = root.appendingPathComponent("received")
+    var tree: NativeFileTreeDestination? = try NativeFileTreeDestination(url: destination, size: 3)
+    let folder = try NativeFileNode(id: 1, parent: 0, name: "빈 폴더", kind: .folder, size: 0)
+    let empty = try NativeFileNode(id: 2, parent: 1, name: "empty", kind: .file, size: 0)
+    let leaf = try NativeFileNode(id: 3, parent: 0, name: "검증.bin", kind: .file, size: 3)
+    try tree?.create(folder); try tree?.create(empty); try tree?.finishFile(); try tree?.create(leaf); try tree?.write(Data([1, 2, 3])); try tree?.finishFile(); try tree?.prepare()
+    #expect(!FileManager.default.fileExists(atPath: destination.path)); #expect(try tree?.publish() == destination)
+    #expect(try Data(contentsOf: destination.appendingPathComponent(leaf.name)) == Data([1, 2, 3]))
+    for path in [destination.appendingPathComponent(leaf.name), destination.appendingPathComponent(folder.name).appendingPathComponent(empty.name)] {
+        #expect(getxattr(path.path, "com.apple.quarantine", nil, 0, 0, 0) > 0)
+    }
+    tree = nil
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["received"])
+    #expect(throws: NativeFileError.exists) { try NativeFileTreeDestination(url: destination, size: 0) }
+    tree = try NativeFileTreeDestination(url: root.appendingPathComponent("failed"), size: 3)
+    try tree?.create(NativeFileNode(id: 1, parent: 0, name: "failed-leaf", kind: .file, size: 3)); tree = nil
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["received"])
+}
+
+@Test func fileTreeCleanupPreservesReplacedLeafAndCancelledNodeQuotaIsNotRefunded() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    var tree: NativeFileTreeDestination? = try NativeFileTreeDestination(url: root.appendingPathComponent("target"), size: 0)
+    let leaf = try NativeFileNode(id: 1, parent: 0, name: "leaf", kind: .file, size: 0)
+    try tree?.create(leaf); try tree?.finishFile()
+    let stage = root.appendingPathComponent(try #require(FileManager.default.contentsOfDirectory(atPath: root.path).first))
+    let path = stage.appendingPathComponent("payload/leaf")
+    try FileManager.default.removeItem(at: path); try Data("replacement".utf8).write(to: path)
+    #expect(throws: NativeFileError.changed) { try tree?.prepare() }; tree = nil
+    #expect(try Data(contentsOf: path) == Data("replacement".utf8))
+    let gate = FileRunGate(), operation = try gate.begin(); try gate.reserve(0, nodes: 8192, id: operation); gate.cancel(operation)
+    let next = try gate.begin(); #expect(throws: NativeFileError.quota) { try gate.reserve(0, id: next) }
+}
+
+@Test func fileTreesAndDestinationsRejectSymlinkAncestorComponents() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let original = root.appendingPathComponent("original"), alias = root.appendingPathComponent("alias")
+    try FileManager.default.createDirectory(at: original, withIntermediateDirectories: false)
+    try Data([1]).write(to: original.appendingPathComponent("leaf"))
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: original)
+    #expect(throws: (any Error).self) { try NativeFileSource(url: alias.appendingPathComponent("leaf")) }
+    #expect(throws: (any Error).self) { try NativeFileTreeSource(url: alias) }
+    #expect(throws: (any Error).self) { try NativeFileDestination(url: alias.appendingPathComponent("received"), size: 0) }
+    #expect(throws: (any Error).self) { try NativeFileTreeDestination(url: alias.appendingPathComponent("folder"), size: 0) }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: original.path) == ["leaf"])
 }

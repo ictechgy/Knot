@@ -54,7 +54,8 @@ public struct InputBuffer: Sendable {
     public init() {}
     public mutating func append(_ packet: Packet) throws {
         guard !needsRecovery else { throw NativeFailure.saturated }
-        guard [.key, .text, .pointer, .wheel].contains(packet.kind) else { throw NativeFailure.malformed }
+        guard [.key, .text, .pointer, .wheel, .explorerDrag].contains(packet.kind) else { throw NativeFailure.malformed }
+        if packet.kind == .explorerDrag, packet.payload.count != 16 { throw NativeFailure.malformed }
         if packet.kind == .wheel {
             guard packet.payload.count == 8 else { throw NativeFailure.malformed }
             let vertical = packet.payload.readBE(Int32.self, at: 0), horizontal = packet.payload.readBE(Int32.self, at: 4)

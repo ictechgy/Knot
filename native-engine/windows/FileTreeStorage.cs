@@ -70,6 +70,8 @@ namespace Knot.NativePreview
             internal SafeFileHandle Handle;
             internal FileStream Stream;
             internal long Size;
+            internal FileTreeNode Node;
+            internal FileHandleInfo Identity;
         }
         private readonly FileSharedRoot root;
         private readonly string temporaryName;
@@ -89,9 +91,12 @@ namespace Knot.NativePreview
         {
             if (prepared || disposed) throw new FileTransferException("protocol"); node = manifest.Add(json);
             SafeFileHandle parent = node.Parent == 0 ? directory : children[node.Parent - 1].Handle;
+            // The private root retains no-delete sharing. Descendants are
+            // flushed and closed before the one directory rename, as required
+            // by Windows; every later cleanup reopen verifies captured identity.
             SafeFileHandle handle = FileNative.Relative(parent, node.Name, FileNative.Read | FileNative.Write | FileNative.Delete,
-                FileShare.ReadWrite, true, node.Kind == "folder", true);
-            Child child = new Child { Handle = handle, Size = node.Size }; children.Add(child);
+                FileShare.ReadWrite | FileShare.Delete, true, node.Kind == "folder", true);
+            Child child = new Child { Handle = handle, Size = node.Size, Node = node, Identity = new FileHandleInfo(FileNative.InfoAny(handle)) }; children.Add(child);
             try
             {
                 if (node.Kind == "file")
@@ -108,8 +113,17 @@ namespace Knot.NativePreview
             foreach (Child child in children)
             {
                 if (child.Stream != null) { if (child.Stream.Length != child.Size) throw new FileTransferException("changed"); child.Stream.Flush(true); }
-                FileNative.InfoAny(child.Handle);
+                FileHandleInfo actual = new FileHandleInfo(FileNative.InfoAny(child.Handle));
+                if (!child.Identity.SameIdentity(actual) || !actual.Directory && actual.Size != child.Size) throw new FileTransferException("changed");
+                child.Identity = actual;
+                SafeFileHandle parent = child.Node.Parent == 0 ? directory : children[child.Node.Parent - 1].Handle;
+                using (SafeFileHandle current = FileNative.Relative(parent, child.Node.Name, 0x80u, FileShare.ReadWrite | FileShare.Delete, false, actual.Directory, false))
+                    if (!actual.SameIdentity(new FileHandleInfo(FileNative.InfoAny(current)))) throw new FileTransferException("changed");
             }
+            // Retain only the pinned, receiver-private root across publication.
+            // Other users cannot enter it. Hostile code running as this same
+            // receiver remains outside FILES.md's in-process isolation scope.
+            for (int i = children.Count - 1; i >= 0; --i) Close(children[i]);
             root.Contained(directory, temporaryName); FileNative.MakeVisible(directory); prepared = true;
         }
         internal string Publish(string name)
@@ -126,12 +140,42 @@ namespace Knot.NativePreview
         public void Dispose()
         {
             if (disposed) return; disposed = true;
+            if (!published) ReopenOwnedChildren();
             for (int i = children.Count - 1; i >= 0; --i)
             {
                 Child child = children[i]; if (!published) FileNative.DeleteOwned(child.Handle);
-                if (child.Stream != null) child.Stream.Dispose(); else child.Handle.Dispose();
+                Close(child);
             }
             if (!published) FileNative.DeleteOwned(directory); directory.Dispose();
+        }
+        private static void Close(Child child)
+        {
+            try { if (child.Stream != null) child.Stream.Dispose(); else if (child.Handle != null) child.Handle.Dispose(); }
+            finally { child.Stream = null; child.Handle = null; }
+        }
+        private void ReopenOwnedChildren()
+        {
+            // Walk only names from this receiver's bounded manifest. A failed
+            // identity check skips that node and its descendants; an unknown
+            // replacement is never recursively removed or adopted as our own.
+            foreach (Child child in children)
+            {
+                if (child.Handle != null && !child.Handle.IsClosed) continue;
+                SafeFileHandle parent = child.Node.Parent == 0 ? directory : children[child.Node.Parent - 1].Handle;
+                if (parent == null || parent.IsClosed || parent.IsInvalid) continue;
+                SafeFileHandle reopened = null;
+                try
+                {
+                    reopened = FileNative.Relative(parent, child.Node.Name, 0x80u | FileNative.Delete, FileShare.ReadWrite | FileShare.Delete,
+                        false, child.Identity.Directory, false);
+                    if (!child.Identity.SameIdentity(new FileHandleInfo(FileNative.InfoAny(reopened)))) continue;
+                    child.Handle = reopened; reopened = null;
+                }
+                catch (FileTransferException) { }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                finally { if (reopened != null) reopened.Dispose(); }
+            }
         }
     }
     internal static class FileTreeNames

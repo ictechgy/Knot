@@ -52,7 +52,7 @@ public struct Invitation: Sendable, Equatable {
     }
     public func hello(name: String = "Mac viewer") throws -> Packet {
         guard Self.validViewerLabel(name) else { throw NativeFailure.malformed }
-        let body = try JSONSerialization.data(withJSONObject: ["v": 1, "token": token, "name": name, "filesVersion": 1])
+        let body = try JSONSerialization.data(withJSONObject: ["v": 1, "token": token, "name": name, "filesVersion": 2])
         return Packet(kind: .hello, payload: body)
     }
 }
