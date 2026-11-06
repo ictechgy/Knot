@@ -4,6 +4,12 @@ import Testing
 import KnotNativeCore
 @testable import KnotNativePreview
 
+/// Exclude only transport Hello/heartbeat frames. Releases, errors, capture
+/// barriers and every other unexpected packet remain in the asserted sequence.
+private func isWriterInputEvidence(_ packet: Packet) -> Bool {
+    packet.kind != .hello && packet.kind != .heartbeat
+}
+
 /// A stalled synthetic media reader and one explicitly releasable input write.
 /// There is no Network connection, capture API, AppKit input or real presenter.
 private final class WriterFixtureChannel: NativeChannel, @unchecked Sendable {
@@ -36,7 +42,7 @@ private final class WriterFixtureChannel: NativeChannel, @unchecked Sendable {
             lock.lock()
             guard !closed else { lock.unlock(); continuation.resume(throwing: NativeFailure.transport); return }
             activeWrites += 1; peakWrites = max(peakWrites, activeWrites)
-            if packet.kind != .hello && shouldBlockInput {
+            if isWriterInputEvidence(packet) && shouldBlockInput {
                 shouldBlockInput = false; blocked = (packet, continuation); lock.unlock()
             } else {
                 recorded.append(packet); sentAt.append(.now); activeWrites -= 1
@@ -59,7 +65,13 @@ private final class WriterFixtureChannel: NativeChannel, @unchecked Sendable {
     var readerIsBlocked: Bool { lock.lock(); defer { lock.unlock() }; return read != nil }
     var maximumConcurrentWrites: Int { lock.lock(); defer { lock.unlock() }; return peakWrites }
     func snapshot() -> [Packet] { lock.lock(); defer { lock.unlock() }; return recorded }
-    func timestamps() -> [ContinuousClock.Instant] { lock.lock(); defer { lock.unlock() }; return sentAt }
+    func inputSnapshot() -> [Packet] {
+        lock.lock(); defer { lock.unlock() }; return recorded.filter(isWriterInputEvidence)
+    }
+    func inputTimestamps() -> [ContinuousClock.Instant] {
+        lock.lock(); defer { lock.unlock() }
+        return zip(recorded, sentAt).compactMap { isWriterInputEvidence($0.0) ? $0.1 : nil }
+    }
     func close() {
         lock.lock(); guard !closed else { lock.unlock(); return }
         closed = true
@@ -76,6 +88,7 @@ private final class WriterFixtureChannel: NativeChannel, @unchecked Sendable {
 private final class InputPacingFixture {
     private var continuation: CheckedContinuation<Void, any Error>?
     private(set) var reached = false
+    var isWaiting: Bool { continuation != nil }
     private var used = false
     func wait(until deadline: ContinuousClock.Instant) async throws {
         if !used {
@@ -107,6 +120,18 @@ private func waitForWriter(_ predicate: () -> Bool) async throws {
     let deadline = ContinuousClock.now + .seconds(3)
     while !predicate(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
     try #require(predicate())
+}
+
+/// Let the real two-second heartbeat mature while the inert writer gate is
+/// still held. This yields MainActor and proves that input assertions must
+/// tolerate an actual transport heartbeat, including on a busy CI runner.
+@MainActor
+private func matureHeartbeatWhileWriterIsHeld(_ isHeld: () -> Bool) async throws {
+    try #require(isHeld())
+    let began = ContinuousClock.now
+    try await Task.sleep(for: .milliseconds(2100))
+    try #require(ContinuousClock.now - began > .seconds(2))
+    try #require(isHeld())
 }
 
 @MainActor
@@ -145,13 +170,16 @@ private func streamingWriterFixture(_ channel: WriterFixtureChannel, presenter: 
     try #require(model.send(older))
     channel.releaseWrite()
     try await waitForWriter { pacing.reached }
+    try await matureHeartbeatWhileWriterIsHeld { pacing.isWaiting }
     try #require(model.send(newest))
     pacing.release()
-    try await waitForWriter { channel.snapshot().count >= 3 }
-    // Hello, held-button down, then the latest move. A pop-before-wait writer
-    // would transmit `older` as an additional, already obsolete drag position.
-    #expect(channel.snapshot() == [channel.snapshot()[0], down, newest])
-    #expect(channel.snapshot()[0].kind == .hello)
+    try await waitForWriter { channel.snapshot().contains { $0.kind == .heartbeat } }
+    try await waitForWriter { channel.inputSnapshot().count >= 2 }
+    // Held-button down, then the latest move, across a real heartbeat. A
+    // pop-before-wait writer would transmit the obsolete `older` position.
+    #expect(channel.inputSnapshot() == [down, newest])
+    #expect(channel.snapshot().first?.kind == .hello)
+    #expect(channel.snapshot().filter { $0.kind == .hello }.count == 1)
     #expect(channel.readerIsBlocked && channel.maximumConcurrentWrites == 1)
 }
 
@@ -171,14 +199,18 @@ private func streamingWriterFixture(_ channel: WriterFixtureChannel, presenter: 
     let middle = try Input.pointer(action: 0, x: 2000, y: 200)
     let last = try Input.pointer(action: 0, x: 3000, y: 200)
     for packet in [up, keyDown, middle, keyUp, wheel, last] { try #require(model.send(packet)) }
-    #expect(channel.snapshot().map(\.kind) == [.hello])
+    #expect(channel.inputSnapshot().isEmpty)
+    #expect(channel.snapshot().first?.kind == .hello)
+    #expect(channel.snapshot().filter { $0.kind == .hello }.count == 1)
+    try await matureHeartbeatWhileWriterIsHeld { channel.writeIsBlocked }
     channel.releaseWrite()
+    try await waitForWriter { channel.snapshot().contains { $0.kind == .heartbeat } }
     let expected = [down, latest, up, keyDown, middle, keyUp, wheel, last]
-    try await waitForWriter { channel.snapshot().count == expected.count + 1 }
-    #expect(Array(channel.snapshot().dropFirst()) == expected)
+    try await waitForWriter { channel.inputSnapshot().count >= expected.count }
+    #expect(channel.inputSnapshot() == expected)
     #expect(!model.inputRecovery && model.phase == .streaming)
     #expect(channel.readerIsBlocked && channel.maximumConcurrentWrites == 1)
-    let inputTimes = Array(channel.timestamps().dropFirst())
+    let inputTimes = channel.inputTimestamps()
     for index in 1..<inputTimes.count { #expect(inputTimes[index] - inputTimes[index - 1] >= .milliseconds(2)) }
 }
 
@@ -201,7 +233,9 @@ private func streamingWriterFixture(_ channel: WriterFixtureChannel, presenter: 
     model.recoverInput()
     try #require(model.send(recovered))
     pacing.release()
-    try await waitForWriter { channel.snapshot().count >= 4 }
-    #expect(Array(channel.snapshot().dropFirst()) == [down, Packet(kind: .releaseAll), recovered])
+    try await waitForWriter { channel.inputSnapshot().count >= 3 }
+    #expect(channel.inputSnapshot() == [down, Packet(kind: .releaseAll), recovered])
+    #expect(channel.snapshot().first?.kind == .hello)
+    #expect(channel.snapshot().filter { $0.kind == .hello }.count == 1)
     #expect(channel.readerIsBlocked && channel.maximumConcurrentWrites == 1)
 }
