@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Net;
 using Microsoft.Win32;
 
 namespace Knot.NativePreview
@@ -8,10 +9,10 @@ namespace Knot.NativePreview
     internal sealed class NativeUpdateResumeState
     {
         internal readonly bool AllowFiles;
-        internal readonly string FileRootPath;
+        internal readonly string FileRootPath, Address;
         internal readonly long UntilTicks;
-        internal NativeUpdateResumeState(bool allowFiles, string fileRootPath, long untilTicks)
-        { AllowFiles = allowFiles; FileRootPath = fileRootPath; UntilTicks = untilTicks; }
+        internal NativeUpdateResumeState(bool allowFiles, string fileRootPath, string address, long untilTicks)
+        { AllowFiles = allowFiles; FileRootPath = fileRootPath; Address = address; UntilTicks = untilTicks; }
     }
 
     // Nonsecret UI state only; credentials live in the DPAPI trusted-device store.
@@ -24,8 +25,21 @@ namespace Knot.NativePreview
             get { try { using (RegistryKey key = Registry.CurrentUser.OpenSubKey(Path)) { object value = key == null ? null : key.GetValue("Quality"); return value is int && (int)value >= 0 && (int)value <= 2 ? (int)value : 0; } } catch { return 0; } }
             set { try { using (RegistryKey key = Registry.CurrentUser.CreateSubKey(Path)) key.SetValue("Quality", Math.Max(0, Math.Min(2, value)), RegistryValueKind.DWord); } catch { } }
         }
-        internal static bool ShouldRequestUpdateResume(bool shareRequested, bool serverPresent, bool registeredSession, bool registeredDevices)
-        { return shareRequested && serverPresent && (registeredSession || registeredDevices); }
+        internal static bool ShouldRequestUpdateResume(bool shareRequested, bool serverPresent, bool registeredSession, bool registeredDevices, bool addressPresent)
+        { return shareRequested && serverPresent && addressPresent && (registeredSession || registeredDevices); }
+        internal static bool CanonicalPrivateAddress(string value)
+        {
+            IPAddress address;
+            return !string.IsNullOrEmpty(value) && value.Length <= 15 && IPAddress.TryParse(value, out address) &&
+                NativeProtocol.IsPrivate(address) && string.Equals(address.ToString(), value, StringComparison.Ordinal);
+        }
+        internal static AdapterChoice SelectResumeAdapter(string address, IEnumerable<AdapterChoice> current)
+        {
+            if (!CanonicalPrivateAddress(address) || current == null) return null;
+            foreach (AdapterChoice choice in current)
+                if (choice != null && string.Equals(choice.Address.ToString(), address, StringComparison.Ordinal)) return choice;
+            return null; // Never substitute the first LAN or overlay adapter.
+        }
         private static bool ExactLocalRoot(string value)
         {
             if (string.IsNullOrEmpty(value) || value.Length > 32768 || value.Length < 3 ||
@@ -37,12 +51,12 @@ namespace Knot.NativePreview
             FileSharingOptions options = new FileSharingOptions(value);
             return string.Equals(value, options.RootPath, StringComparison.Ordinal);
         }
-        internal static string EncodeUpdateResume(bool allowFiles, string fileRootPath, DateTime nowUtc)
+        internal static string EncodeUpdateResume(bool allowFiles, string fileRootPath, string address, DateTime nowUtc)
         {
-            if (nowUtc.Kind != DateTimeKind.Utc || !ExactLocalRoot(fileRootPath)) throw new ArgumentException("Invalid update resume scope.");
+            if (nowUtc.Kind != DateTimeKind.Utc || !ExactLocalRoot(fileRootPath) || !CanonicalPrivateAddress(address)) throw new ArgumentException("Invalid update resume scope.");
             long until = nowUtc.AddMinutes(5).Ticks;
             return "{\"v\":2,\"untilTicks\":" + until.ToString(CultureInfo.InvariantCulture) +
-                ",\"allowFiles\":" + (allowFiles ? "true" : "false") + ",\"fileRootPath\":" + StrictJson.Quote(fileRootPath) + "}";
+                ",\"allowFiles\":" + (allowFiles ? "true" : "false") + ",\"fileRootPath\":" + StrictJson.Quote(fileRootPath) + ",\"address\":" + StrictJson.Quote(address) + "}";
         }
         internal static NativeUpdateResumeState ParseUpdateResume(object value, DateTime nowUtc)
         {
@@ -50,12 +64,12 @@ namespace Knot.NativePreview
             {
                 string text = value as string;
                 if (nowUtc.Kind != DateTimeKind.Utc || string.IsNullOrEmpty(text) || text.Length > 65536) return null;
-                Dictionary<string, object> fields = StrictJson.Parse(StrictJson.Utf8.GetBytes(text), "v", "untilTicks", "allowFiles", "fileRootPath");
+                Dictionary<string, object> fields = StrictJson.Parse(StrictJson.Utf8.GetBytes(text), "v", "untilTicks", "allowFiles", "fileRootPath", "address");
                 if (StrictJson.Integer(fields, "v", 2, 2) != 2 || !(fields["untilTicks"] is long) || !(fields["allowFiles"] is bool)) return null;
                 long until = (long)fields["untilTicks"];
-                string root = StrictJson.String(fields, "fileRootPath");
-                if (until <= nowUtc.Ticks || until > nowUtc.AddMinutes(5).Ticks || !ExactLocalRoot(root)) return null;
-                return new NativeUpdateResumeState((bool)fields["allowFiles"], root, until);
+                string root = StrictJson.String(fields, "fileRootPath"), address = StrictJson.String(fields, "address");
+                if (until <= nowUtc.Ticks || until > nowUtc.AddMinutes(5).Ticks || !ExactLocalRoot(root) || !CanonicalPrivateAddress(address)) return null;
+                return new NativeUpdateResumeState((bool)fields["allowFiles"], root, address, until);
             }
             catch { return null; }
         }
@@ -65,11 +79,11 @@ namespace Knot.NativePreview
                 key.DeleteValue(ResumeValue, false); key.DeleteValue("UpdateResumeUntil", false);
             } } catch { }
         }
-        internal static void RequestUpdateResume(bool allowFiles, string fileRootPath)
+        internal static void RequestUpdateResume(bool allowFiles, string fileRootPath, string address)
         {
             ClearUpdateResume();
             try {
-                string value = EncodeUpdateResume(allowFiles, fileRootPath, DateTime.UtcNow);
+                string value = EncodeUpdateResume(allowFiles, fileRootPath, address, DateTime.UtcNow);
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(Path)) key.SetValue(ResumeValue, value, RegistryValueKind.String);
             } catch { ClearUpdateResume(); }
         }

@@ -279,7 +279,12 @@ namespace Knot.NativePreview
                 NativeUpdateResumeState updateResume = NativePreferences.ConsumeUpdateResume();
                 if (updateResume != null) Shown += delegate {
                     try {
-                        if (updateResume.UntilTicks <= DateTime.UtcNow.Ticks || NativeTrustedDevices.List().Count == 0) return;
+                        if (updateResume.UntilTicks <= DateTime.UtcNow.Ticks) return;
+                        List<AdapterChoice> currentAdapters = new List<AdapterChoice>();
+                        foreach (object item in addresses.Items) { AdapterChoice choice = item as AdapterChoice; if (choice != null) currentAdapters.Add(choice); }
+                        AdapterChoice restoredAdapter = NativePreferences.SelectResumeAdapter(updateResume.Address, currentAdapters);
+                        if (restoredAdapter == null || NativeTrustedDevices.List().Count == 0) return;
+                        addresses.SelectedItem = restoredAdapter;
                         // Restore the exact prior consent before any listener or
                         // file scope can be constructed; never use default scope.
                         FileSharingOptions scope = new FileSharingOptions(updateResume.FileRootPath);
@@ -866,9 +871,10 @@ namespace Knot.NativePreview
             if (updates == null) return;
             updates.Install(delegate {
                 NativePreferences.ClearUpdateResume();
+                AdapterChoice selected = addresses.SelectedItem as AdapterChoice;
                 if (NativePreferences.ShouldRequestUpdateResume(shareRequested, server != null,
-                    server != null && server.IsRegisteredSession, server != null && server.HasRegisteredDevices))
-                    NativePreferences.RequestUpdateResume(allowFiles.Checked, fileRootPath);
+                    server != null && server.IsRegisteredSession, server != null && server.HasRegisteredDevices, selected != null))
+                    NativePreferences.RequestUpdateResume(allowFiles.Checked, fileRootPath, selected.Address.ToString());
                 StopShare();
                 Close();
             });
