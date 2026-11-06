@@ -66,7 +66,8 @@ def inert_file_vectors():
              inert_tree_vector("nested", "개발 자료", [(0, "빈 폴더", "folder", b""), (0, "한글.txt", "file", "안녕\n".encode())]),
              inert_tree_vector("boundary", "boundary", [(0, "boundary.bin", "file", bytes(i % 251 for i in range(65541)))])]
     return dict(schema=1, status="passed", freshSyntheticOnly=True, actualCapture=False, actualInput=False,
-                vectors=vectors, files=files, transfers=transfers, trees=trees)
+                vectors=vectors, files=files, transfers=transfers, trees=trees,
+                rejectedFolderNames=["Rejected." + ext for ext in ["app", "bundle", "framework", "plugin", "kext", "xpc", "appex", "rtfd", "photoslibrary", "playground", "pkg"]] + ["HELPER.XPC", ".app"])
 
 
 def inert_tree_vector(name, folder_name, node_data):
@@ -188,7 +189,7 @@ class NativeRebuildTests(unittest.TestCase):
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
                                        actualCapture=False, actualSendInput=False,
                                        actualFreshExplorerInputFixtures=1, actualFreshExplorerOleFixtures=1,
-                                       actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=1)).encode()
+                                       actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28)).encode()
             elif label == "native-pairing-managed-checks":
                 return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,
                     networkInvoked=False, captureInvoked=False, actualInputInvoked=False)).encode()
@@ -717,6 +718,17 @@ class NativeFileVectorTests(unittest.TestCase):
         value = inert_file_vectors()
         value["trees"][1] = inert_tree_vector("nested", "폴더", [(0, "빈 폴더", "folder", b"data")])
         self.check_vectors(value, "Native tree folder bytes")
+
+    def test_rejects_package_roots_nodes_and_missing_rejection_cases(self):
+        value = inert_file_vectors(); value["rejectedFolderNames"].pop()
+        self.check_vectors(value, "portable package rejection")
+        for name in ["Helper.xpc", "Nested.app", ".app", "Doc.RTFD"]:
+            value = inert_file_vectors()
+            value["trees"][1] = inert_tree_vector("nested", name, [])
+            self.check_vectors(value, "package root")
+            value = inert_file_vectors()
+            value["trees"][1] = inert_tree_vector("nested", "普通 폴더", [(0, name, "folder", b"")])
+            self.check_vectors(value, "package node")
 
     def test_rejects_oversized_artifact_before_json_decode(self):
         with tempfile.TemporaryDirectory(prefix="knot-inert-file-vector-budget-") as directory:

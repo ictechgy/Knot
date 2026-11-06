@@ -130,6 +130,9 @@ def validate_native_file_vectors(path):
             raise ValueError("Native file Finish content/size/hash differs")
     if seen != set(cases) or seen_cases != {"empty", "unicode", "boundary"}:
         raise ValueError("Native file transfer cases differ")
+    rejected = ["Rejected." + ext for ext in ["app", "bundle", "framework", "plugin", "kext", "xpc", "appex", "rtfd", "photoslibrary", "playground", "pkg"]] + ["HELPER.XPC", ".app"]
+    if value.get("rejectedFolderNames") != rejected:
+        raise ValueError("Native tree portable package rejection coverage missing")
     validate_native_tree_vectors(value.get("trees"), binary, packets)
     return value
 
@@ -139,6 +142,7 @@ def validate_native_tree_vectors(trees, binary, packets):
     if not isinstance(trees, list) or len(trees) != 3:
         raise ValueError("Native tree boundary fixtures missing")
     seen = set()
+    package_suffixes = tuple("." + ext for ext in ["app", "bundle", "framework", "plugin", "kext", "xpc", "appex", "rtfd", "photoslibrary", "playground", "pkg"])
     def basename(name):
         if (not isinstance(name, str) or not name or name in [".", ".."] or len(name.encode()) > 255 or
                 name.endswith((".", " ")) or name.lower().startswith(".knot-") or
@@ -152,6 +156,8 @@ def validate_native_tree_vectors(trees, binary, packets):
         if not isinstance(tree, dict) or tree.get("name") not in {"empty", "nested", "boundary"} or tree["name"] in seen:
             raise ValueError("Native tree named coverage differs")
         seen.add(tree["name"]); basename(tree.get("folderName"))
+        if tree["folderName"].lower().endswith(package_suffixes):
+            raise ValueError("Native tree package root rejected")
         nodes, count, total = tree.get("nodes"), tree.get("count"), tree.get("size")
         if (not isinstance(nodes, list) or type(count) is not int or not 0 <= count <= 4096 or count != len(nodes) or
                 type(total) is not int or not 0 <= total <= 8589934592):
@@ -178,6 +184,8 @@ def validate_native_tree_vectors(trees, binary, packets):
                     not 0 <= node["size"] <= 8589934592):
                 raise ValueError("Native tree parent/id/kind differs")
             basename(node["name"])
+            if node["kind"] == "folder" and node["name"].lower().endswith(package_suffixes):
+                raise ValueError("Native tree package node rejected")
             key = (node["parent"], unicodedata.normalize("NFC", node["name"]).casefold())
             depth = parents[node["parent"]][1] + 1
             if key in siblings or depth > 16:
@@ -822,7 +830,7 @@ class Builder:
                 parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False):
             raise ValueError("Native host checks must prove their fresh/inert capture and input scope")
         for key, minimum in [("actualFreshExplorerInputFixtures", 1), ("actualFreshExplorerOleFixtures", 1),
-                             ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 1)]:
+                             ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28)]:
             if type(parsed.get(key)) is not int or parsed[key] < minimum:
                 raise ValueError("Native host folder/Explorer checks incomplete: " + key)
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")

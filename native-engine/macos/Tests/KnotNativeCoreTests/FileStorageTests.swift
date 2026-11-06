@@ -175,3 +175,33 @@ private func ownedFileDirectory() throws -> URL {
     #expect(throws: (any Error).self) { try NativeFileTreeDestination(url: alias.appendingPathComponent("folder"), size: 0) }
     #expect(try FileManager.default.contentsOfDirectory(atPath: original.path) == ["leaf"])
 }
+
+@Test func packageFolderSourcesAndExactReceiveDestinationsFailBeforeStaging() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    for name in ["helper.xpc", "program.APP", "document.rtfd", ".app", "installer.pkg"] {
+        let destination = root.appendingPathComponent(name)
+        #expect(throws: NativeFileError.unsupported) { try NativeFileTreeDestination(url: destination, size: 0) }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+    #expect(FileTreeFS.package("compiled.storyboardc"))
+    #expect(throws: NativeFileError.unsupported) { try NativeFileTreeDestination(url: root.appendingPathComponent("compiled.storyboardc"), size: 0) }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    for name in ["helper.xpc", "program.app", "document.rtfd", ".app"] {
+        let source = root.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+        #expect(throws: NativeFileError.unsupported) { try NativeFileTreeSource(url: source) }
+    }
+}
+
+@Test func localPackageTypedChildIsRejectedAndOnlyOwnedTreeIsCleanedUp() throws {
+    let root = try ownedFileDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let sentinel = root.appendingPathComponent("unrelated.txt"); try Data("untouched".utf8).write(to: sentinel)
+    var receiver: NativeFileTreeDestination? = try NativeFileTreeDestination(url: root.appendingPathComponent("ordinary"), size: 0)
+    try receiver?.create(NativeFileNode(id: 1, parent: 0, name: "owned empty folder", kind: .folder, size: 0))
+    let package = try NativeFileNode(id: 2, parent: 1, name: "nested.storyboardc", kind: .folder, size: 0)
+    #expect(!FileWire.isPackageFolderName(package.name) && FileTreeFS.package(package.name))
+    #expect(throws: NativeFileError.unsupported) { try receiver?.create(package) }
+    receiver = nil
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["unrelated.txt"])
+    #expect(try Data(contentsOf: sentinel) == Data("untouched".utf8))
+}

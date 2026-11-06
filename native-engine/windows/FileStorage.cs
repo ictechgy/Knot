@@ -373,7 +373,7 @@ namespace Knot.NativePreview
                 {
                     FileHandleInfo info;
                     using (SafeFileHandle file = FileNative.Relative(directory, name, FileNative.Read, FileShare.ReadWrite, false, null, false))
-                    { info = new FileHandleInfo(FileNative.InfoAny(file)); Contained(file, name); }
+                    { info = new FileHandleInfo(FileNative.InfoAny(file)); FileExportSource.RejectPackage(name, info.Directory); Contained(file, name); }
                     if (result.Count == FileProtocol.EntryLimit) { truncated = true; break; }
                     result.Add(new FileEntrySnapshot(Guid.NewGuid().ToString("N"), name, info));
                 }

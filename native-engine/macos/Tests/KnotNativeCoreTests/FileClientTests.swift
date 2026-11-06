@@ -489,3 +489,52 @@ private final class FileAdapterTestCount: @unchecked Sendable {
     for request in requests { if case .success = await request.result { Issue.record("Revoked exported promise reported success") } }
     #expect(await worker.downloadCount() == 1 && !model.isBusy)
 }
+
+@Test func maliciousWindowsPackageFolderMetadataAndNodesNeverPublishAnAppBundle() async throws {
+    let root = try ownedClientDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let sentinel = root.appendingPathComponent("unrelated.txt"); try Data("untouched".utf8).write(to: sentinel)
+    for name in ["helper.xpc", "program.app", "document.RTFD"] {
+        let entry = try NativeFileEntry(id: String(repeating: "a", count: 32), name: "ordinary", size: 0, kind: .folder)
+        let acceptedPackage = try FilePacket(kind: .accepted, payload: FileWire.json(["name": name, "size": 0, "kind": "folder", "count": 0]))
+        let acceptedOrdinary = try FilePacket(kind: .accepted, payload: FileWire.json(["name": entry.name, "size": 0, "kind": "folder", "count": 2]))
+        let first = try FilePacket(kind: .node, payload: NativeFileNode(id: 1, parent: 0, name: "owned", kind: .folder, size: 0).json)
+        let malicious = try FilePacket(kind: .node, payload: FileWire.json(["id": 2, "parent": 1, "name": name, "kind": "folder", "size": 0]))
+        for replies in [[try authorizedFilePacket(), acceptedPackage], [try authorizedFilePacket(), acceptedOrdinary, first, malicious]] {
+            let channel = ScriptedFileChannel(replies), gate = FileRunGate(), operation = try gate.begin()
+            let client = NativeFileClient(endpoint: try fileEndpoint(), gate: gate, makeChannel: { _ in channel })
+            do { _ = try await client.download(entry: entry, destination: root.appendingPathComponent("received"), operation: operation, progress: { _, _ in }); Issue.record("Package folder was published") }
+            catch { #expect(error as? NativeFileError == .protocolViolation) }
+            gate.end(operation)
+            #expect(!channel.snapshot().contains { $0.kind == .complete })
+            #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["unrelated.txt"])
+        }
+    }
+    #expect(try Data(contentsOf: sentinel) == Data("untouched".utf8))
+}
+
+@Test func exactFinderPromiseFolderURLCannotRenameAnOrdinaryTreeIntoAPackage() async throws {
+    let root = try ownedClientDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    let entry = try NativeFileEntry(id: String(repeating: "b", count: 32), name: "ordinary", size: 0, kind: .folder)
+    for name in ["finder-drop.xpc", "finder-drop.APP", "finder-drop.rtfd", "finder-drop.storyboardc"] {
+        let channel = ScriptedFileChannel(try treeDownloadPackets(name: entry.name, nodes: [])), gate = FileRunGate(), operation = try gate.begin()
+        let client = NativeFileClient(endpoint: try fileEndpoint(), gate: gate, makeChannel: { _ in channel })
+        do { _ = try await client.download(entry: entry, destination: root.appendingPathComponent(name), operation: operation, progress: { _, _ in }); Issue.record("Promise destination converted an ordinary tree into a package") }
+        catch { #expect(error as? NativeFileError == .unsupported) }
+        gate.end(operation)
+        #expect(!channel.snapshot().contains { $0.kind == .complete })
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+}
+
+@Test func regularInstallerAndExecutableNamedFilesStillReceiveQuarantine() async throws {
+    let root = try ownedClientDirectory(); defer { try? FileManager.default.removeItem(at: root) }
+    for name in ["installer.pkg", "program.exe"] {
+        let bytes = Data("fresh inert fixture".utf8), entry = try NativeFileEntry(id: String(repeating: "c", count: 32), name: name, size: Int64(bytes.count))
+        let channel = ScriptedFileChannel(try fileDownloadPackets(entry, bytes: bytes)), gate = FileRunGate(), operation = try gate.begin()
+        let client = NativeFileClient(endpoint: try fileEndpoint(), gate: gate, makeChannel: { _ in channel }), destination = root.appendingPathComponent(name)
+        #expect(try await client.download(entry: entry, destination: destination, operation: operation, progress: { _, _ in }) == destination)
+        gate.end(operation)
+        #expect(try Data(contentsOf: destination) == bytes)
+        #expect(getxattr(destination.path, "com.apple.quarantine", nil, 0, 0, 0) > 0)
+    }
+}

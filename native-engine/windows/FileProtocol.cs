@@ -38,6 +38,9 @@ namespace Knot.NativePreview
         internal const int Port = 48634, ChunkSize = 65536, EntryLimit = 256;
         internal const int TreeNodeLimit = 4096, TreeDepthLimit = 16, TreeMetadataLimit = 1048576, RunNodeLimit = 8192;
         internal const long MaximumSize = 8589934592L, RateBytesPerSecond = 2097152;
+        private static readonly string[] PackageFolderSuffixes = new string[] {
+            ".app", ".bundle", ".framework", ".plugin", ".kext", ".xpc", ".appex", ".rtfd", ".photoslibrary", ".playground", ".pkg"
+        };
         internal static bool IsError(string code)
         { return code == "auth" || code == "busy" || code == "protocol" || code == "timeout" || code == "denied" || code == "missing" || code == "changed" || code == "quota" || code == "io"; }
         internal static void ValidName(string name)
@@ -60,6 +63,15 @@ namespace Knot.NativePreview
                 stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) &&
                 (stem[3] >= '0' && stem[3] <= '9' || stem[3] == '\u00b9' || stem[3] == '\u00b2' || stem[3] == '\u00b3')) throw new FileTransferException("protocol");
         }
+        internal static bool IsPackageFolderName(string name)
+        {
+            if (name == null) return false;
+            foreach (string suffix in PackageFolderSuffixes)
+                if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+        internal static void ValidFolderName(string name)
+        { ValidName(name); if (IsPackageFolderName(name)) throw new FileTransferException("denied"); }
         internal static ulong U64(byte[] bytes, int offset)
         {
             if (bytes == null || offset < 0 || offset > bytes.Length - 8) throw new FileTransferException("protocol");
@@ -119,13 +131,14 @@ namespace Knot.NativePreview
             ValidName(name);
             if (size < 0 || size > MaximumSize || (kind != "file" && kind != "folder") || count < 0 || count > TreeNodeLimit || kind == "file" && count != 0)
                 throw new FileTransferException("protocol");
+            if (kind == "folder") ValidFolderName(name);
             return Json("{\"name\":" + StrictJson.Quote(name) + ",\"size\":" + size.ToString(CultureInfo.InvariantCulture) + ",\"kind\":" + StrictJson.Quote(kind) + ",\"count\":" + count.ToString(CultureInfo.InvariantCulture) + "}");
         }
         internal static byte[] Entry(FileEntrySnapshot value)
         { return Json("{\"entry\":" + StrictJson.Quote(value.Id) + ",\"name\":" + StrictJson.Quote(value.Name) + ",\"size\":" + value.Size.ToString(CultureInfo.InvariantCulture) + ",\"kind\":" + StrictJson.Quote(value.Kind) + "}"); }
         internal static byte[] TreeOffer(string name, long size, int count)
         {
-            ValidName(name); if (size < 0 || size > MaximumSize || count < 0 || count > TreeNodeLimit) throw new FileTransferException("protocol");
+            ValidFolderName(name); if (size < 0 || size > MaximumSize || count < 0 || count > TreeNodeLimit) throw new FileTransferException("protocol");
             return Json("{\"name\":" + StrictJson.Quote(name) + ",\"size\":" + size.ToString(CultureInfo.InvariantCulture) + ",\"count\":" + count.ToString(CultureInfo.InvariantCulture) + "}");
         }
         internal static byte[] TreeEnd(int count, long size, byte[] hash)

@@ -2,6 +2,8 @@
 
 This extends FILES.md. Both applications must update. Media Hello and Ready advertise filesVersion2; file Hello/Authorized use v2. The transport, exact certificate pin, source binding, per-operation TLS, active-run gate, deadlines and pacing remain unchanged. No peer supplies a Windows absolute path.
 
+Portable directory-package rejection is enforced on both send and receive for the case-insensitive suffixes `.app,.bundle,.framework,.plugin,.kext,.xpc,.appex,.rtfd,.photoslibrary,.playground,.pkg`, including hidden names such as `.app`. Mac additionally rejects locally declared package types before creating/publishing a destination. This policy is for directories; ordinary files such as a flat `.pkg` or `.exe` remain transferable with received-file security markers. Actual Windows-generated rejection-name fixtures are consumed by the Mac contract tests.
+
 ## File and tree grammar
 
 Entry0x43 is strict `{entry,name,size,kind}` with kind `file` or `folder`. Folder listing size is0 (unscanned); file size is actual. Accepted0x47 is strict `{name,size,kind,count}`; files have count0, folders declare descendant-node count and sum of regular-file byte lengths. Put0x45 remains `{name,size}` for files. Get0x46 remains `{entry}` and selects the captured entry's kind. Complete0x4a remains `{name,size,sha256}`.

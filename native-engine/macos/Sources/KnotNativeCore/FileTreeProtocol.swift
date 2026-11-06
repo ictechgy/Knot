@@ -7,7 +7,7 @@ public struct NativeFileNode: Sendable, Equatable {
     public let size: Int64
     public init(id: Int, parent: Int, name: String, kind: NativeFileEntryKind, size: Int64) throws {
         guard (1...FileWire.maximumTreeNodes).contains(id), parent >= 0, parent < id,
-              FileWire.validName(name), FileWire.validSize(size), kind != .folder || size == 0 else { throw NativeFileError.protocolViolation }
+              FileWire.validName(name), FileWire.validSize(size), kind != .folder || (size == 0 && FileWire.validFolderName(name)) else { throw NativeFileError.protocolViolation }
         self.id = id; self.parent = parent; self.name = name; self.kind = kind; self.size = size
     }
     public init(_ raw: Data) throws {

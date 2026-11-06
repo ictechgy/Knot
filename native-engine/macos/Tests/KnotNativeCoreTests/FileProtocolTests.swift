@@ -193,6 +193,9 @@ func actualWindowsTreeVectorsBindRawNodeJSONAndAllFileBytes() throws {
     let raw = try Data(contentsOf: path)
     try #require(raw.count <= 1_048_576)
     let object = try #require(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+    let rejected = try #require(object["rejectedFolderNames"] as? [String])
+    #expect(rejected.count == 13 && Set(rejected) == Set(rejectedPortablePackageFolderNames))
+    for name in rejected { try checkPackageFolderWireRejection(name) }
     let trees = try #require(object["trees"] as? [[String: Any]])
     #expect(trees.count >= 3)
     var empty = false, unicode = false, boundary = false
@@ -251,4 +254,35 @@ func actualWindowsTreeVectorsBindRawNodeJSONAndAllFileBytes() throws {
         catch { #expect(error as? NativeFileError == .quota); rejected = true; break }
     }
     #expect(rejected && admission.nodes.count < 4096 && admission.metadataBytes <= FileWire.maximumTreeMetadata)
+}
+
+private let rejectedPortablePackageFolderNames = ["Rejected.app", "Rejected.bundle", "Rejected.framework", "Rejected.plugin", "Rejected.kext", "Rejected.xpc", "Rejected.appex", "Rejected.rtfd", "Rejected.photoslibrary", "Rejected.playground", "Rejected.pkg", "HELPER.XPC", ".app"]
+
+private func checkPackageFolderWireRejection(_ name: String) throws {
+    let id = String(repeating: "a", count: 32)
+    #expect(FileWire.validName(name) && FileWire.isPackageFolderName(name) && !FileWire.validFolderName(name))
+    #expect(throws: NativeFileError.protocolViolation) { try NativeFileEntry(id: id, name: name, size: 0, kind: .folder) }
+    #expect(throws: NativeFileError.protocolViolation) {
+        try NativeFileEntry(FileWire.json(["entry": id, "name": name, "size": 0, "kind": "folder"]))
+    }
+    #expect(throws: NativeFileError.protocolViolation) {
+        try FileWire.accepted(FileWire.json(["name": name, "size": 0, "kind": "folder", "count": 0]))
+    }
+    #expect(throws: NativeFileError.protocolViolation) { try FileWire.treeMetadata(FileWire.json(["name": name, "size": 0, "count": 0])) }
+    let raw = try FileWire.json(["id": 1, "parent": 0, "name": name, "kind": "folder", "size": 0])
+    #expect(throws: NativeFileError.protocolViolation) { try NativeFileNode(raw) }
+    var admission = try NativeFileTreeAdmission(count: 1, size: 0)
+    #expect(throws: NativeFileError.protocolViolation) { try admission.append(raw) }
+    // A regular installer/executable-looking filename is still an ordinary file.
+    #expect(try NativeFileEntry(id: id, name: name, size: 0).kind == .file)
+    #expect(try NativeFileNode(id: 1, parent: 0, name: name, kind: .file, size: 0).kind == .file)
+    #expect(try FileWire.accepted(FileWire.json(["name": name, "size": 0, "kind": "file", "count": 0])).kind == .file)
+}
+
+@Test func portablePackageFolderPolicyCoversEveryTypedWireBoundaryAndPreservesRegularFiles() throws {
+    for name in rejectedPortablePackageFolderNames { try checkPackageFolderWireRejection(name) }
+    for name in ["ordinary", "app", "pkg", "archive.zip", "application.app.txt", "검증 폴더"] {
+        #expect(FileWire.validFolderName(name) && !FileWire.isPackageFolderName(name))
+    }
+    #expect(try NativeFileEntry(id: String(repeating: "a", count: 32), name: "installer.exe", size: 0).kind == .file)
 }

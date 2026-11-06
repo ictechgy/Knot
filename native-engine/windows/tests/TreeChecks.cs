@@ -64,6 +64,22 @@ namespace Knot.NativePreview
                 new TreeFixture("boundary", "boundary folder", new byte[][] { FileTreeNode.Encode(1, 0, "boundary.bin", "file", boundary.Length) }, new byte[][] { boundary })
             };
         }
+        private static string[] RejectedFolderNames()
+        {
+            return new string[] { "Rejected.app", "Rejected.bundle", "Rejected.framework", "Rejected.plugin", "Rejected.kext", "Rejected.xpc",
+                "Rejected.appex", "Rejected.rtfd", "Rejected.photoslibrary", "Rejected.playground", "Rejected.pkg", "HELPER.XPC", ".app" };
+        }
+        private static string RejectedFolderNameVectors()
+        {
+            List<string> names = new List<string>();
+            foreach (string name in RejectedFolderNames())
+            {
+                FileProtocol.ValidName(name);
+                Check(FileProtocol.IsPackageFolderName(name)); FileReject(delegate { FileProtocol.ValidFolderName(name); });
+                names.Add(StrictJson.Quote(name));
+            }
+            return string.Join(",", names);
+        }
         private static void TreeChecks()
         {
             int fixturesBefore = fileFixtures, tlsBefore = fileTlsFixtures;
@@ -123,6 +139,17 @@ namespace Knot.NativePreview
                 catch (FileTransferException error) { Check(error.Code == "quota"); bounded = true; break; }
             }
             Check(bounded);
+            foreach (string package in RejectedFolderNames())
+            {
+                Check(FileProtocol.IsPackageFolderName(package)); FileReject(delegate { FileProtocol.ValidFolderName(package); });
+                FileReject(delegate { new FileTreeManifest(1,0).Add(FileTreeNode.Encode(1,0,package,"folder",0)); });
+            }
+            foreach (string regular in new string[] { "ordinary.pkg", "ordinary.exe" })
+            {
+                FileProtocol.ValidName(regular); FileTreeManifest file = new FileTreeManifest(1,0); file.Add(FileTreeNode.Encode(1,0,regular,"file",0)); file.Complete();
+            }
+            foreach (string ordinary in new string[] { "ordinary", "folder.exe", "notes.app.txt", "app", "pkg" })
+            { Check(!FileProtocol.IsPackageFolderName(ordinary)); FileProtocol.ValidFolderName(ordinary); }
         }
         private static void TreeStorageChecks()
         {
@@ -193,6 +220,18 @@ namespace Knot.NativePreview
                 // deliberately retained the private directory rather than delete
                 // a replacement or recursively adopt an unknown child.
                 File.Delete(Path.Combine(staleStage,"leaf")); File.Delete(Path.Combine(staleStage,"owned-moved")); Directory.Delete(staleStage);
+                stage = "tree-storage-package-root-nested-cleanup";
+                foreach (string package in RejectedFolderNames())
+                {
+                    using (FileTreePartial partial = root.CreateTree(0,0))
+                    { partial.PreparePublication(); FileReject(delegate { partial.Publish(package); }); }
+                    using (FileTreePartial partial = root.CreateTree(0,2))
+                    {
+                        FileTreeNode parent; partial.Add(FileTreeNode.Encode(1,0,"owned","folder",0),out parent);
+                        FileReject(delegate { FileTreeNode denied; partial.Add(FileTreeNode.Encode(2,1,package,"folder",0),out denied); });
+                    }
+                    Check(!Directory.Exists(Path.Combine(temp.PathValue,package)) && Directory.GetDirectories(temp.PathValue,".knot-*.part").Length == 0);
+                }
             }
         }
         private static void TreeSourceChecks()
@@ -218,7 +257,19 @@ namespace Knot.NativePreview
                 string nested = Path.Combine(temp.PathValue,"deep"); Directory.CreateDirectory(nested); string cursor = nested;
                 for (int i = 0; i < 17; ++i) { cursor = Path.Combine(cursor,"d"); Directory.CreateDirectory(cursor); }
                 using (FileExportSource root = FileExportSource.Capture(nested)) FileReject(delegate { using (FileTreeSource source = new FileTreeSource(root)) { } });
-                string package = Path.Combine(temp.PathValue,"Synthetic.app"); Directory.CreateDirectory(package); FileReject(delegate { using (FileExportSource source = FileExportSource.Capture(package)) { } });
+                foreach (string name in RejectedFolderNames())
+                {
+                    string package = Path.Combine(temp.PathValue,name); Directory.CreateDirectory(package);
+                    FileReject(delegate { using (FileExportSource source = FileExportSource.Capture(package)) { } });
+                    string nestedPackage = Path.Combine(folder,name); Directory.CreateDirectory(nestedPackage);
+                    using (FileExportSource root = FileExportSource.Capture(folder)) FileReject(delegate { using (FileTreeSource source = new FileTreeSource(root)) { } });
+                    Directory.Delete(nestedPackage);
+                }
+                foreach (string name in new string[] { "ordinary.pkg", "ordinary.exe" })
+                {
+                    string file = Path.Combine(temp.PathValue,name); File.WriteAllText(file,"fresh ordinary file");
+                    using (FileExportSource source = FileExportSource.Capture(file)) Check(source.Entry.Kind == "file" && source.Entry.Name == name);
+                }
             }
         }
         private static string PutTree(FileServer server, string pin, TreeFixture fixture)
@@ -313,6 +364,20 @@ namespace Knot.NativePreview
                     client.Send(0x4d,FileProtocol.TreeEnd(0,0,new byte[32])); Check(client.Read().Kind == 0x7f);
                 }
                 WaitNoTrees(temp.PathValue); Check(Directory.GetFileSystemEntries(temp.PathValue).Length == 0 && server.ReservedNodes == 5);
+                long bytesBefore = server.Reserved; int nodesBefore = server.ReservedNodes;
+                using (FileTlsClient client = new FileTlsClient(server.Port,cert.Pin))
+                {
+                    client.Authorize(server.Token); client.Send(0x4b,FileProtocol.Json("{\"name\":\"HELPER.XPC\",\"size\":0,\"count\":0}"));
+                    FilePacket denied = client.Read(); Check(denied.Kind == 0x7f && FileProtocol.Text(FileProtocol.Object(denied.Payload,"code"),"code") == "denied");
+                }
+                Check(server.Reserved == bytesBefore && server.ReservedNodes == nodesBefore && Directory.GetFileSystemEntries(temp.PathValue).Length == 0);
+                using (FileTlsClient client = new FileTlsClient(server.Port,cert.Pin))
+                {
+                    client.Authorize(server.Token); client.Send(0x4b,FileProtocol.TreeOffer("nested-package",0,2)); Check(client.Read().Kind == 0x47);
+                    client.Send(0x4c,FileTreeNode.Encode(1,0,"owned","folder",0)); client.Send(0x4c,FileTreeNode.Encode(2,1,".app","folder",0));
+                    FilePacket denied = client.Read(); Check(denied.Kind == 0x7f && FileProtocol.Text(FileProtocol.Object(denied.Payload,"code"),"code") == "denied");
+                }
+                WaitNoTrees(temp.PathValue); Check(Directory.GetFileSystemEntries(temp.PathValue).Length == 0 && server.ReservedNodes == nodesBefore + 3);
             }
         }
         private static void TreeTlsLatePublication()
@@ -376,6 +441,11 @@ namespace Knot.NativePreview
                 FileReject(delegate { exports.Add(nonce,new string[] { chosen, Path.Combine(temp.PathValue,"missing") }); });
                 // Failure pins no earlier root and exposes no containing folder.
                 File.WriteAllText(chosen,"unlocked after failed admission"); Check(File.ReadAllText(sibling) == "private synthetic sibling");
+                foreach (string name in RejectedFolderNames())
+                {
+                    string package = Path.Combine(temp.PathValue,name); Directory.CreateDirectory(package);
+                    FileReject(delegate { exports.Add(nonce,new string[] { package }); });
+                }
             }
         }
         private static Dictionary<string,object> CaptureOne(FileServer server,string pin,string nonce)

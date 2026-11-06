@@ -57,7 +57,7 @@ public struct NativeFileEntry: Identifiable, Sendable, Equatable {
     public let kind: NativeFileEntryKind
     public var isFolder: Bool { kind == .folder }
     public init(id: String, name: String, size: Int64, kind: NativeFileEntryKind = .file) throws {
-        guard FileWire.isHex(id, count: 32), FileWire.validName(name), FileWire.validSize(size), kind != .folder || size == 0 else {
+        guard FileWire.isHex(id, count: 32), FileWire.validName(name), FileWire.validSize(size), kind != .folder || (size == 0 && FileWire.validFolderName(name)) else {
             throw NativeFileError.protocolViolation
         }
         self.id = id; self.name = name; self.size = size; self.kind = kind
@@ -134,6 +134,16 @@ public enum FileWire {
            "0123456789¹²³".contains(last) { return false }
         return true
     }
+    // Portable folder-package policy shared with the Windows tree receiver.
+    // These suffixes remain valid for ordinary files, which receive quarantine.
+    public static func isPackageFolderName(_ name: String) -> Bool {
+        guard let dot = name.lastIndex(of: ".") else { return false }
+        let suffix = name[name.index(after: dot)...].lowercased()
+        return ["app", "bundle", "framework", "plugin", "kext", "xpc", "appex", "rtfd", "photoslibrary", "playground", "pkg"].contains(suffix)
+    }
+    public static func validFolderName(_ name: String) -> Bool {
+        validName(name) && !isPackageFolderName(name)
+    }
     public static func object(_ data: Data, keys: Set<String>) throws -> [String: JSONValue] {
         do { return try StrictJSON.object(data, keys: keys, limit: 4096) }
         catch { throw NativeFileError.protocolViolation }
@@ -151,13 +161,13 @@ public enum FileWire {
         let object = try object(data, keys: ["name", "size", "kind", "count"])
         let name = try object.string("name"), size = Int64(try object.integer("size")), count = try object.integer("count")
         guard let kind = NativeFileEntryKind(rawValue: try object.string("kind")), validName(name), validSize(size),
-              (0...maximumTreeNodes).contains(count), kind != .file || count == 0, kind != .folder || count != 0 || size == 0 else { throw NativeFileError.protocolViolation }
+              (0...maximumTreeNodes).contains(count), kind != .file || count == 0, kind != .folder || validFolderName(name), kind != .folder || count != 0 || size == 0 else { throw NativeFileError.protocolViolation }
         return (name, size, kind, count)
     }
     public static func treeMetadata(_ data: Data) throws -> (name: String, size: Int64, count: Int) {
         let object = try object(data, keys: ["name", "size", "count"])
         let name = try object.string("name"), size = Int64(try object.integer("size")), count = try object.integer("count")
-        guard validName(name), validSize(size), (0...maximumTreeNodes).contains(count), count != 0 || size == 0 else { throw NativeFileError.protocolViolation }
+        guard validFolderName(name), validSize(size), (0...maximumTreeNodes).contains(count), count != 0 || size == 0 else { throw NativeFileError.protocolViolation }
         return (name, size, count)
     }
     public static func treeEnd(_ data: Data) throws -> (count: Int, size: Int64, hash: String) {

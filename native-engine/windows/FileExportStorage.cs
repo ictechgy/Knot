@@ -52,9 +52,7 @@ namespace Knot.NativePreview
         }
         internal static void RejectPackage(string name, bool directory)
         {
-            if (!directory) return;
-            foreach (string suffix in new string[] { ".app", ".bundle", ".framework", ".plugin", ".kext", ".appex" })
-                if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) throw new FileTransferException("denied");
+            if (directory) FileProtocol.ValidFolderName(name);
         }
         internal void Validate()
         { if (!Entry.Info.Same(new FileHandleInfo(FileNative.Info(Handle, Entry.Info.Directory)))) throw new FileTransferException("changed"); }

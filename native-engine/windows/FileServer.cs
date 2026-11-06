@@ -258,8 +258,7 @@ namespace Knot.NativePreview
         private void PutTree(SslStream tls, TcpClient client, byte[] bytes)
         {
             Dictionary<string, object> request = FileProtocol.Object(bytes, "name", "size", "count");
-            string name = FileProtocol.Text(request, "name"); FileProtocol.ValidName(name);
-            FileExportSource.RejectPackage(name, true);
+            string name = FileProtocol.Text(request, "name"); FileProtocol.ValidFolderName(name);
             long size = FileProtocol.Size(request, "size"); int count = FileProtocol.Count(request, "count", FileProtocol.TreeNodeLimit);
             Reserve(size, count + 1);
             using (FileTreePartial partial = root.CreateTree(size, count))

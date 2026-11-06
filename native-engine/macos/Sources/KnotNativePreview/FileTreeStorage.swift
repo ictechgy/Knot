@@ -26,7 +26,7 @@ enum FileTreeFS {
     }
     static func package(_ name: String) -> Bool {
         let ext = (name as NSString).pathExtension.lowercased()
-        return ["app", "bundle", "framework", "plugin", "kext", "xpc", "appex", "rtfd", "photoslibrary", "playground", "pkg"].contains(ext) || UTType(filenameExtension: ext)?.conforms(to: .package) == true
+        return FileWire.isPackageFolderName(name) || UTType(filenameExtension: ext)?.conforms(to: .package) == true
     }
     static func quarantine(_ fd: Int32) throws {
         let marker = Data("0081;\(String(Int(Date().timeIntervalSince1970), radix: 16));Knot;".utf8)
@@ -54,7 +54,7 @@ final class NativeFileTreeSource {
     private let initial: stat
     private var admission = try! NativeFileTreeAdmission(count: FileWire.maximumTreeNodes, size: FileWire.maximumSize)
     init(url: URL) throws {
-        guard url.isFileURL, FileWire.validName(url.lastPathComponent), !FileTreeFS.package(url.lastPathComponent) else { throw NativeFileError.unsupported }
+        guard url.isFileURL, FileWire.validFolderName(url.lastPathComponent), !FileTreeFS.package(url.lastPathComponent) else { throw NativeFileError.unsupported }
         name = url.lastPathComponent
         parent = try FileTreeFS.openDirectory(url.deletingLastPathComponent())
         root = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -156,7 +156,7 @@ final class NativeFileTreeDestination {
     private var file: Int32 = -1, fileSize: Int64 = 0, fileWritten: Int64 = 0
     private var published = false
     init(url: URL, size: Int64) throws {
-        guard url.isFileURL, FileWire.validName(url.lastPathComponent), FileWire.validSize(size) else { throw NativeFileError.unsupported }
+        guard url.isFileURL, FileWire.validFolderName(url.lastPathComponent), !FileTreeFS.package(url.lastPathComponent), FileWire.validSize(size) else { throw NativeFileError.unsupported }
         self.url = url; name = url.lastPathComponent; stagingName = ".knot-\(UUID().uuidString).part"
         directory = try FileTreeFS.openDirectory(url.deletingLastPathComponent())
         mayRemoveStage = NativeFileDestination.privateParent(directory)
@@ -225,6 +225,7 @@ final class NativeFileTreeDestination {
     }
     func create(_ node: NativeFileNode) throws {
         guard file < 0, node.id == owned.count + 1 else { throw NativeFileError.protocolViolation }
+        guard node.kind != .folder || !FileTreeFS.package(node.name) else { throw NativeFileError.unsupported }
         let parent = try openParent(node.parent); defer { Darwin.close(parent) }
         let fd: Int32
         if node.kind == .folder {

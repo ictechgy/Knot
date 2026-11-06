@@ -44,8 +44,8 @@ namespace Knot.NativePreview
                 throw new FileTransferException("quota");
             Dictionary<string, object> value = FileProtocol.Object(bytes, "id", "parent", "name", "kind", "size");
             int id = FileProtocol.Count(value, "id", FileProtocol.TreeNodeLimit), parent = FileProtocol.Count(value, "parent", FileProtocol.TreeNodeLimit);
-            string name = FileProtocol.Text(value, "name"), kind = FileProtocol.Kind(value); FileProtocol.ValidName(name);
-            FileExportSource.RejectPackage(name, kind == "folder");
+            string name = FileProtocol.Text(value, "name"), kind = FileProtocol.Kind(value);
+            if (kind == "folder") FileProtocol.ValidFolderName(name); else FileProtocol.ValidName(name);
             long length = FileProtocol.Size(value, "size");
             if (id != nodes.Count + 1 || parent >= id || parent > nodes.Count || parent > 0 && nodes[parent - 1].Kind != "folder" || kind == "folder" && length != 0)
                 throw new FileTransferException("protocol");
@@ -128,7 +128,7 @@ namespace Knot.NativePreview
         }
         internal string Publish(string name)
         {
-            FileProtocol.ValidName(name);
+            FileProtocol.ValidFolderName(name);
             if (!prepared || published || disposed) throw new FileTransferException("changed"); root.Contained(directory, temporaryName);
             for (int i = 0; i < 32; ++i)
             {

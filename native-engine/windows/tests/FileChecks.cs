@@ -580,7 +580,7 @@ namespace Knot.NativePreview
                 transfers.Add(prefix + ",\"encodedBase64\":" + StrictJson.Quote(encoded) + "}");
             }
             TreeWireVectors(vector);
-            string json = "{\"schema\":1,\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualInput\":false,\"vectors\":[" + string.Join(",", vectors) + "],\"files\":[" + string.Join(",", files) + "],\"transfers\":[" + string.Join(",", transfers) + "],\"trees\":[" + TreeVectors() + "]}";
+            string json = "{\"schema\":1,\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualInput\":false,\"rejectedFolderNames\":[" + RejectedFolderNameVectors() + "],\"vectors\":[" + string.Join(",", vectors) + "],\"files\":[" + string.Join(",", files) + "],\"transfers\":[" + string.Join(",", transfers) + "],\"trees\":[" + TreeVectors() + "]}";
             string path = Path.Combine(Path.GetDirectoryName(certificateExportPath), "native-file-vectors.json");
             using (FileStream output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             { byte[] bytes = Bytes(json); output.Write(bytes, 0, bytes.Length); output.Flush(true); }
