@@ -2,6 +2,8 @@ import Foundation
 
 @MainActor
 enum NativeCopy {
+    static let certificatePinMismatchGuidance = "Windows PC의 인증서가 연결 정보와 달라 연결을 중단했어요. Windows를 확인하고 새 8자리 번호로 다시 등록하세요."
+    static let certificatePolicyGuidance = "macOS가 Windows 인증서를 허용하지 않았어요. Windows Knot native.12 이상에서 ‘호환 인증서로 전환하고 공유’를 선택한 뒤 새 8자리 번호로 다시 연결하세요."
     static func phase(_ phase: SessionModel.Phase) -> String {
         switch phase {
         case .idle: "연결 전"
@@ -31,6 +33,7 @@ enum NativeCopy {
         "The native decoder stopped. Create a new invitation to reconnect.": "영상 처리가 중단됐어요.",
         "The native display stopped. Create a new invitation to reconnect.": "화면 표시가 중단됐어요.",
         "Connection ended or validation failed. Ask the host for a new invitation.": "연결이 끝났거나 확인에 실패했어요.",
+        "The network connection stopped. Check Windows sharing and the network before reconnecting.": "네트워크 연결이 중단됐어요. Windows의 공유 상태, 같은 네트워크와 방화벽을 확인하세요.",
         "Invitation was rejected or expired. Create a new invitation.": "연결 번호가 만료됐거나 연결을 확인하지 못했어요.",
         "The host declined the request. Create a new invitation to try again.": "Windows에서 연결을 종료했어요.",
         "The host stopped accepting input. Create a new invitation.": "입력을 안전하게 처리할 수 없어 연결을 중단했어요.",
@@ -46,7 +49,9 @@ enum NativeCopy {
         "Review the private address and exact certificate pin below. Trust lasts for this connection only.": "Windows에 표시된 인증서 지문과 같은지 확인한 뒤 연결하세요.",
         "Invalid invitation. Ask the host to create a fresh native invitation.": "연결 코드를 확인할 수 없어요. Windows에서 새 코드를 만들어 다시 입력해 주세요.",
         "Choose a viewer label of 1–64 UTF-8 bytes without control characters.": "Mac 이름을 짧게 입력해 주세요. 제어 문자 없이 64바이트까지 사용할 수 있어요.",
-        "Verifying the host certificate…": "선택한 Windows PC의 인증서를 확인하고 있어요.",
+        "Checking the secure connection…": "보안 연결을 확인하고 있어요.",
+        "Sending the connection request…": "Windows에 연결 요청을 보내고 있어요.",
+        "The network connection stopped. Check Windows sharing and the network before reconnecting.": "네트워크 연결이 중단됐어요. Windows의 공유 상태, 같은 네트워크와 방화벽을 확인한 뒤 새 연결 코드로 다시 연결하세요.",
         "Certificate verified. Waiting for host approval and native encoder startup…": "Windows에서 연결 요청을 허용해 주세요. 승인 후 화면을 준비해요.",
         "Number verified. Preparing the host desktop…": "번호를 확인했어요. Windows 화면과 인코더를 준비해요.",
         "Host approved and encoder ready. Waiting for the first decoded image…": "Windows가 연결을 허용했어요. 첫 화면이 도착하기를 기다려요.",

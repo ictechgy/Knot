@@ -24,6 +24,7 @@ namespace Knot.NativePreview
     {
         private NativeUpdates updates;
         private bool shareRequested;
+        private bool certificateCompatibilityRequired;
         private Label updateNotice;
         private PreviewButton updateAction;
         private readonly float scale;
@@ -273,6 +274,8 @@ namespace Knot.NativePreview
             };
             if (!fixtureMode) {
                 BindActions(); qualityProfiles.SelectedIndex = NativePreferences.Quality;
+                try { certificateCompatibilityRequired = RunCertificate.RequiresCompatibilityMigration(); }
+                catch { /* StartShare reports a stored-identity failure without replacing it. */ }
                 qualityProfiles.SelectedIndexChanged += delegate { NativePreferences.Quality = qualityProfiles.SelectedIndex; };
                 updates = new NativeUpdates(); updates.Changed += delegate { OnUi(UpdateUpdaterPresentation); };
                 updates.StartAutomaticChecks(); UpdateUpdaterPresentation();
@@ -597,6 +600,12 @@ namespace Knot.NativePreview
             hostIdentity.Text = advertisedName + "\r\n" + (selected == null ? "연결 주소 없음" : selected.Address.ToString());
             SetViewVisible(hostIdentity, numberReady); SetViewVisible(numberLifetime, numberReady);
             SetViewVisible(share, idle); share.Enabled = idle && view.HasAddress && !view.RunPresent;
+            bool certificateConversion = idle && !view.RunPresent && !legacyMode.Checked && certificateCompatibilityRequired;
+            share.Text = certificateConversion ? "호환 인증서로 전환하고 공유" : "화면 공유 시작";
+            if (certificateConversion) {
+                stateTitle.Text = "Mac 연결용 인증서를 전환해주세요";
+                stateDescription.Text = "이전 5년짜리 인증서는 Mac 보안 규칙에서 거절돼요. 아래 버튼을 누르면 호환 인증서로 교체하고 공유를 시작해요.\r\n등록한 Mac은 초기화되므로 새 8자리 번호로 다시 등록해야 해요.";
+            }
             SetViewVisible(copy, !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation); copy.Enabled = !view.EnrollmentMode && view.Phase == HostViewPhase.Invitation && view.CanCopy && view.RunPresent;
             SetViewVisible(approve, !view.EnrollmentMode && view.Phase == HostViewPhase.Request); SetViewVisible(decline, !view.EnrollmentMode && view.Phase == HostViewPhase.Request);
             approve.Enabled = decline.Enabled = !view.EnrollmentMode && view.Phase == HostViewPhase.Request && view.RunPresent;
@@ -625,6 +634,11 @@ namespace Knot.NativePreview
             fixture = snapshot; ShowHelp(showHelp); ApplyCurrentPresentation();
         }
         internal bool FixtureMode { get { return fixtureMode; } }
+        internal void SetFixtureCertificateCompatibility(bool required)
+        {
+            if (!fixtureMode) throw new InvalidOperationException("Synthetic compatibility state requires the inert fixture.");
+            certificateCompatibilityRequired = required; ApplyCurrentPresentation();
+        }
         internal void SetFixtureEnrollmentCode(string code)
         {
             if (!fixtureMode || code == null || code.Length != 8) throw new InvalidOperationException("Synthetic code requires the inert fixture.");
@@ -699,7 +713,7 @@ namespace Knot.NativePreview
 
         private void BindActions()
         {
-            share.Click += delegate { StartShare(); };
+            share.Click += delegate { StartShareFromButton(); };
             copy.Click += delegate
             {
                 try
@@ -761,6 +775,23 @@ namespace Knot.NativePreview
         {
             if (closing || IsDisposed || !IsHandleCreated) return;
             try { BeginInvoke(new MethodInvoker(delegate { if (!closing && !IsDisposed) action(); })); } catch (InvalidOperationException) { }
+        }
+        // The direct primary button is the only migration authorization path.
+        // Resume/retry call StartShare directly and can never rotate identity.
+        private void StartShareFromButton()
+        {
+            if (closing || server != null) return;
+            if (certificateCompatibilityRequired && !legacyMode.Checked) {
+                try {
+                    RunCertificate.ConvertPersistentForCompatibility();
+                    certificateCompatibilityRequired = false;
+                }
+                catch {
+                    FailShareStart("인증서 전환을 완료하지 못해 공유를 시작하지 않았어요. 등록 초기화가 진행됐을 수 있으므로, 전환 후 새 번호로 다시 등록해주세요.");
+                    return;
+                }
+            }
+            StartShare();
         }
         private void StartShare()
         {
@@ -826,6 +857,15 @@ namespace Knot.NativePreview
                 };
                 rawStatus = run.UsesEnrollment ? EnrollmentGuidance.Ready : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";
                 ShowHelp(false); ApplyCurrentPresentation(); lifecycleTimer.Start(); run.Start();
+            }
+            catch (CertificateCompatibilityException)
+            {
+                certificateCompatibilityRequired = true;
+                FailShareStart("기존 인증서가 Mac의 허용 기간을 초과해요. ‘호환 인증서로 전환하고 공유’를 눌러 새 번호로 연결하세요.");
+            }
+            catch (System.Security.Cryptography.CryptographicException)
+            {
+                FailShareStart("저장된 공유 인증서를 확인하지 못했어요. 인증서를 자동으로 교체하지 않습니다. Windows 사용자 계정과 인증서 저장소 접근을 확인해주세요.");
             }
             catch (PairingSetupException)
             {

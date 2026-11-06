@@ -3,6 +3,14 @@ import CryptoKit
 import Testing
 @testable import KnotNativeCore
 
+@Test func fileTLSCertificateFailuresKeepAuthenticationGuidance() {
+    for failure in [NativeFailure.certificatePinMismatch, .certificatePolicy] {
+        #expect(NativeFileError.authored(failure) == .trust)
+        #expect(NativeFileError.authored(failure).message.contains("인증"))
+    }
+    #expect(NativeFileError.authored(NativeFailure.transport) == .timeout)
+}
+
 private func fileVectorData(_ object: [String: Any], _ key: String) throws -> Data {
     let text = try #require(object[key] as? String)
     return try #require(Data(base64Encoded: text))

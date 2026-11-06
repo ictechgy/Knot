@@ -1,5 +1,13 @@
 # Design
 
+## Native certificate compatibility correction (2026-11-07)
+
+Native.11's five-year persistent TLS leaf is rejected by the Mac SSL policy. Fresh synthetic reproduction accepts one-year leaves and rejects the five-year leaf without changing pinning. Native.12 must issue a 365-day total lifetime, including backdating, and test the same production PFX-generation/import path across Windows and Mac.
+
+Never disable SSL policy or adopt a replacement pin automatically. An existing overlong stored identity requires an explicit Windows primary action, **호환 인증서로 전환하고 공유**. Explain before that action that the old identity is replaced and registered Macs need a new eight-digit pairing. Conversion happens only while idle after the direct button click; automatic restart/resume cannot authorize conversion. Corrupt/expired/keyless state fails closed. New installations need no migration action.
+
+Mac errors distinguish an exact-pin mismatch, OS certificate-policy rejection and network failure; provide authored recovery guidance without showing tokens, raw OS logs or private keys. Fresh synthetic UI fixtures render both migration and certificate-error states without opening a user store or adapter.
+
 ## Native convenience extension (2026-11-06)
 
 The user authorized remembered devices, reconnection, explicit text copy/paste, Mac shortcut compatibility, quick activation, file convenience, adaptive quality and automatic updates. This supersedes the native slice's earlier prohibition on persistent trust and its clipboard/reconnect/update exclusions only as implemented and validated below. Keep the Quiet Sidebar and the primary PC-list/connect flow; place secondary actions inside connected controls or a single settings disclosure.

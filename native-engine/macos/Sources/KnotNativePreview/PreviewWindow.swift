@@ -533,7 +533,7 @@ struct PreviewWindow: View {
                     } else {
                         VStack(alignment: .leading, spacing: 16) {
                             Label("파일 공유를 사용할 수 없어요", systemImage: "folder.badge.questionmark").font(.headline)
-                            Text("Windows에서 파일·폴더 송수신과 공유 폴더를 확인한 뒤 다시 공유해주세요. 폴더를 준비하지 못했거나 파일 공유가 꺼져 있을 수 있어요. 두 앱 모두 native.11로 업데이트해주세요.")
+                            Text("Windows에서 파일·폴더 송수신과 공유 폴더를 확인한 뒤 다시 공유해주세요. 폴더를 준비하지 못했거나 파일 공유가 꺼져 있을 수 있어요. 두 앱 모두 최신 버전으로 업데이트해주세요.")
                                 .font(.system(size: 13)).foregroundStyle(.secondary)
                             Button("닫기") { setFilesVisible(false) }
                         }.padding(24).frame(maxWidth: 440).nativePanel().padding(24)

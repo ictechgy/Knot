@@ -27,7 +27,7 @@ public enum NativeFileError: String, Error, Sendable, Equatable {
         if let error = error as? NativeFailure {
             switch error {
             case .transport: return .timeout
-            case .trust: return .trust
+            case .trust, .certificatePinMismatch, .certificatePolicy: return .trust
             case .malformed, .oversized, .unsupported, .state: return .protocolViolation
             default: return .io
             }

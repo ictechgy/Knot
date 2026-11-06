@@ -16,6 +16,14 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 
 ## Daily use (native.11)
 
+### Certificate compatibility correction (native.12)
+
+Native.11 accidentally issued persistent server leaves with a five-year lifetime. macOS SSL policy rejects those certificates even with the correct explicit pin. Native.12 issues a365-day total lifetime, including backdating, without weakening hostname, server-purpose, date or exact-pin verification.
+
+For a Native.11 identity, update Windows, open the app and explicitly click **호환 인증서로 전환하고 공유**. The button discloses identity replacement and removal of registered Windows-side credentials before it runs. Connect from Mac using the new eight-digit number; previously registered Macs require explicit pairing again. Missing, corrupt or expired identities never trigger this compatibility conversion automatically, and automatic update/reconnect cannot authorize it. Conversion failure stops sharing; credentials may already have been revoked, so use a fresh pairing after a successful conversion.
+
+CI now generates and PFX-reimports the same certificate used by production, completes fresh Windows TLS handshakes, exports its public DER and checks that exact Windows-produced365-day certificate against the Mac SSL policy. A fresh five-year negative fixture proves the original rejection remains enforced. This closes the earlier coverage gap where synthetic hosts only exercised the legacy48-hour certificate.
+
 - Choose **내 PC로 등록** before the authenticated eight-digit connection to store a device credential in Mac Keychain; Windows protects its persistent host identity and registered credentials with CurrentUser DPAPI. Subsequent connections use a pinned TLS challenge service on TCP48635 and fresh session grants. IP/name changes never silently replace a certificate. Either device can revoke registration; local Mac removal works offline, but remote revocation requires the host to be reachable. Windows **연결 안내 → 등록한 Mac 관리** independently revokes credentials and stops sharing.
 - Transient failures of a registered session retry at most six times. Manual disconnect/stop cancels retries. Windows must remain logged in/unlocked and sharing. This does not provide unattended login, a Windows service or UAC control.
 - **Command+C/V** explicitly copies Windows text or pastes Mac text; no background clipboard monitoring occurs. Text is bounded to1MiB and the session lifetime. The optional Mac shortcut profile maps ordinary Command shortcuts to Control; physical mode and Mac IME remain available.

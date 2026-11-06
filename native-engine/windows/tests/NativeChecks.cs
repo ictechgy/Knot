@@ -21,6 +21,7 @@ namespace Knot.NativePreview
         private static int assertions, tlsFixtures;
         private static string stage = "protocol";
         private static string certificateExportPath;
+        private static string persistentCertificateExportPath;
         private static void Check(bool result) { ++assertions; if (!result) throw new InvalidOperationException("Synthetic assertion failed."); }
         private static void Reject(Action action)
         {
@@ -32,8 +33,13 @@ namespace Knot.NativePreview
         {
             try
             {
-                if (args.Length == 2 && args[0] == "--export-certificate") certificateExportPath = args[1];
-                else if (args.Length != 0) throw new ArgumentException("Unsupported synthetic check arguments.");
+                for (int i = 0; i < args.Length; i += 2)
+                {
+                    if (i + 1 >= args.Length) throw new ArgumentException("Unsupported synthetic check arguments.");
+                    if (args[i] == "--export-certificate" && certificateExportPath == null) certificateExportPath = args[i + 1];
+                    else if (args[i] == "--export-persistent-certificate" && persistentCertificateExportPath == null) persistentCertificateExportPath = args[i + 1];
+                    else throw new ArgumentException("Unsupported synthetic check arguments.");
+                }
                 stage = "connection-deadline"; DeadlineChecks();
                 stage = "protocol"; ProtocolChecks(); stage = "invitation"; InvitationChecks(); stage = "input"; InputChecks();
                 stage = "explorer-input-barrier"; ExplorerInputChecks();
@@ -48,6 +54,7 @@ namespace Knot.NativePreview
                 stage = "host-construction-rollback"; HostRollbackChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();
                 stage = "fresh-certificate"; FreshCertificateChecks();
+                stage = "persistent-certificate-compatibility"; CertificateCompatibilityChecks();
                 stage = "tls-pin-mismatch"; TlsPinMismatch(); stage = "tls-approval-stop"; TlsApprovalStop();
                 stage = "tls-decline"; TlsDecline(); stage = "tls-expired"; TlsExpired(); stage = "tls-single-use"; TlsSingleUse();
                 stage = "tls-wrong-token"; TlsWrongToken(); stage = "tls-disconnect"; TlsDisconnect(false); stage = "tls-malformed-input"; TlsDisconnect(true);
@@ -57,7 +64,7 @@ namespace Knot.NativePreview
                 stage = "tls-release-failure-stop"; TlsReleaseFailureStopsInput();
                 stage = "short-code-enrollment"; EnrollmentChecks();
                 stage = "native-file-transfer"; FileChecks();
-                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures + ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshFileEnrollmentFixtures\":" + fileEnrollmentFixtures + ",\"actualFreshFileDiscoveryFixtures\":" + fileDiscoveryFixtures + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + ",\"ownedTemporaryCspContainersOnly\":true}");
+                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualPersistentCertificateFixtures\":" + actualPersistentCertificateFixtures + ",\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures + ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshFileEnrollmentFixtures\":" + fileEnrollmentFixtures + ",\"actualFreshFileDiscoveryFixtures\":" + fileDiscoveryFixtures + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + ",\"freshGeneratedCertificateKeysOnly\":true}");
                 return 0;
             }
             catch (Exception failure)

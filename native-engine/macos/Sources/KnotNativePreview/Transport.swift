@@ -21,6 +21,7 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
     private let queue = DispatchQueue(label: "KnotNativePreview.tls")
     private let helloDeadline = ContinuousClock.now + .seconds(10)
     private let lifetime = ChannelLifetime()
+    private let verification: VerificationFailureCapture
 
     convenience init(invitation: Invitation) throws {
         guard let port = NWEndpoint.Port(rawValue: invitation.port) else { throw NativeFailure.malformed }
@@ -34,9 +35,14 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
         sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
         sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, "knot-native")
         let expected = pin
+        let verification = VerificationFailureCapture()
+        self.verification = verification
         sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, trust, complete in
             let peer = sec_trust_copy_ref(trust).takeRetainedValue()
-            complete(Self.evaluate(peer, expectedPin: expected))
+            let failure = Self.verificationFailure(peer, expectedPin: expected)
+            verification.record(failure)
+            complete(failure == nil)
+            verification.finishIfRejected()
         }, queue)
         let tcp = NWProtocolTCP.Options()
         // Input envelopes are small and time-sensitive; do not wait for a
@@ -50,31 +56,46 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
     /// Exact leaf DER pin plus OS validity, server purpose and DNS verification.
     /// No ambient trust anchors, revocation/network fetch or persisted trust.
     static func evaluate(_ trust: SecTrust, expectedPin: String) -> Bool {
+        verificationFailure(trust, expectedPin: expectedPin) == nil
+    }
+
+    /// A matching pin does not override macOS's certificate policy. Keep that
+    /// rejection distinct from an identity change; no private trust-result keys
+    /// or raw OS diagnostics are used to decide the user-facing recovery path.
+    static func verificationFailure(_ trust: SecTrust, expectedPin: String) -> NativeFailure? {
         // Policy replacement must precede the offline option: the latter lives
         // in those policy options. Copying the chain can itself evaluate trust.
         guard SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, "knot-native" as CFString)) == errSecSuccess,
-              SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess else { return false }
-        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = chain.first else { return false }
+              SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess else { return .certificatePolicy }
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = chain.first else { return .certificatePolicy }
         let digest = SHA256.hash(data: SecCertificateCopyData(leaf) as Data).map { String(format: "%02x", $0) }.joined()
-        guard digest == expectedPin,
-              SecTrustSetAnchorCertificates(trust, [leaf] as CFArray) == errSecSuccess,
-              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess else { return false }
-        return SecTrustEvaluateWithError(trust, nil)
+        guard digest == expectedPin else { return .certificatePinMismatch }
+        guard SecTrustSetAnchorCertificates(trust, [leaf] as CFArray) == errSecSuccess,
+              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess else { return .certificatePolicy }
+        return SecTrustEvaluateWithError(trust, nil) ? nil : .certificatePolicy
     }
 
-    static func startFailure(_ error: NWError) -> NativeFailure {
-        if case .tls = error { return .trust }
-        return .transport
+    static func startFailure(_ error: NWError, verificationFailure: NativeFailure? = nil) -> NativeFailure {
+        // A TLS alert alone can also mean a protocol/peer/network failure. Only
+        // our verification callback can establish a local certificate failure.
+        verificationFailure ?? .transport
     }
     func start() async throws {
         try await withCheckedThrowingContinuation { continuation in
             let id = UUID()
-            let gate = CompletionGate<Void>(continuation) { [lifetime] in lifetime.remove(id) }
+            let gate = CompletionGate<Void>(continuation) { [lifetime, verification] in
+                lifetime.remove(id); verification.clearObserver()
+            }
             guard lifetime.perform(id: id, cancel: { gate.finish(.failure(NativeFailure.transport)) }, operation: {
-                connection.stateUpdateHandler = { state in
+                verification.observe { [weak self] failure in
+                    // Network can remain in .waiting after local verification
+                    // rejects a peer. Do not let its deadline erase the cause.
+                    if gate.finish(.failure(failure)) { self?.close() }
+                }
+                connection.stateUpdateHandler = { [verification] state in
                     switch state {
                     case .ready: _ = gate.finish(.success(()))
-                    case .failed(let error): _ = gate.finish(.failure(Self.startFailure(error)))
+                    case .failed(let error): _ = gate.finish(.failure(Self.startFailure(error, verificationFailure: verification.failure)))
                     case .cancelled: _ = gate.finish(.failure(NativeFailure.transport))
                     default: break
                     }
@@ -153,6 +174,28 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
         }
     }
     func close() { lifetime.revoke { connection.cancel() } }
+}
+
+private final class VerificationFailureCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: NativeFailure?
+    private var observer: (@Sendable (NativeFailure) -> Void)?
+    var failure: NativeFailure? { lock.withLock { recorded } }
+    func record(_ failure: NativeFailure?) {
+        lock.withLock { if recorded == nil { recorded = failure } }
+    }
+    func observe(_ observer: @escaping @Sendable (NativeFailure) -> Void) {
+        lock.withLock { self.observer = observer }
+        finishIfRejected()
+    }
+    func finishIfRejected() {
+        lock.lock()
+        let failure = recorded, callback = failure == nil ? nil : observer
+        if failure != nil { observer = nil }
+        lock.unlock()
+        if let failure { callback?(failure) }
+    }
+    func clearObserver() { lock.withLock { observer = nil } }
 }
 
 /// Serializes submission against permanent revocation. At most a handshake,

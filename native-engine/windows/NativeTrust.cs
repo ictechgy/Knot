@@ -14,36 +14,74 @@ namespace Knot.NativePreview
         internal X509Certificate2 Certificate { get; private set; }
         private RSACryptoServiceProvider key;
         internal RunCertificate() : this("1.3.6.1.5.5.7.3.1") { }
-        internal static RunCertificate Persistent()
+        private static readonly object persistentGate = new object();
+        internal static RunCertificate Persistent() { return Persistent(ProtectedCertificateStorage.Production()); }
+        internal static RunCertificate Persistent(IPersistentCertificateStorage storage)
         {
-            NativeTrustedDevices.PrepareDirectory();
-            string path = System.IO.Path.Combine(NativeTrustedDevices.DirectoryPath, "identity.dpapi");
-            byte[] pfx;
-            if (System.IO.File.Exists(path)) pfx = NativeTrustedDevices.ReadProtected(path);
-            else
+            lock (persistentGate)
             {
-                using (RSA rsa = RSA.Create())
+                bool existing = storage.Exists;
+                byte[] pfx = existing ? storage.Read() : PersistentCertificateFactory.CreatePfx(DateTimeOffset.UtcNow);
+                try
                 {
-                    rsa.KeySize = 2048;
-                    CertificateRequest request = new CertificateRequest("CN=knot-native", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-                    request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
-                    request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
-                    OidCollection purposes = new OidCollection(); purposes.Add(new Oid("1.3.6.1.5.5.7.3.1"));
-                    request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(purposes, false));
-                    request.CertificateExtensions.Add(new X509Extension("2.5.29.17", new byte[] { 0x30,13,0x82,11,107,110,111,116,45,110,97,116,105,118,101 }, false));
-                    using (X509Certificate2 fresh = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5)))
-                        pfx = fresh.Export(X509ContentType.Pfx);
+                    X509Certificate2 saved = PersistentCertificateFactory.Import(pfx);
+                    try
+                    {
+                        PersistentCertificateFactory.Validate(saved);
+                        if (PersistentCertificateFactory.RequiresMigration(saved)) throw new CertificateCompatibilityException();
+                        if (!existing) storage.Write(pfx);
+                        RunCertificate result = new RunCertificate(saved); saved = null; return result;
+                    }
+                    finally { if (saved != null) saved.Dispose(); }
                 }
-                try { NativeTrustedDevices.WriteProtected(path, pfx); } catch { Array.Clear(pfx, 0, pfx.Length); throw; }
+                finally { Array.Clear(pfx, 0, pfx.Length); }
             }
-            try
+        }
+        // Inspect only the existing identity. A missing identity is never generated
+        // while deciding which explicit action to show in the host window.
+        internal static bool RequiresCompatibilityMigration() { return RequiresCompatibilityMigration(ProtectedCertificateStorage.Production()); }
+        internal static bool RequiresCompatibilityMigration(IPersistentCertificateStorage storage)
+        {
+            lock (persistentGate)
             {
-                X509Certificate2 saved = new X509Certificate2(pfx, (string)null, X509KeyStorageFlags.UserKeySet);
-                if (!saved.HasPrivateKey || DateTime.UtcNow < saved.NotBefore.ToUniversalTime() || DateTime.UtcNow >= saved.NotAfter.ToUniversalTime())
-                { saved.Dispose(); throw new CryptographicException("Registered host identity must be explicitly renewed."); }
-                return new RunCertificate(saved);
+                if (!storage.Exists) return false;
+                byte[] pfx = storage.Read();
+                try
+                {
+                    using (X509Certificate2 saved = PersistentCertificateFactory.Inspect(pfx))
+                    { PersistentCertificateFactory.Validate(saved); return PersistentCertificateFactory.RequiresMigration(saved); }
+                }
+                finally { Array.Clear(pfx, 0, pfx.Length); }
             }
-            finally { Array.Clear(pfx, 0, pfx.Length); }
+        }
+        internal static void ConvertPersistentForCompatibility() { ConvertPersistentForCompatibility(ProtectedCertificateStorage.Production()); }
+        internal static void ConvertPersistentForCompatibility(IPersistentCertificateStorage storage)
+        {
+            lock (persistentGate)
+            {
+                if (!storage.Exists) throw new CryptographicException("No registered host identity is available to convert.");
+                byte[] previous = storage.Read(), replacement = null;
+                try
+                {
+                    using (X509Certificate2 old = PersistentCertificateFactory.Inspect(previous))
+                    {
+                        PersistentCertificateFactory.Validate(old);
+                        if (!PersistentCertificateFactory.RequiresMigration(old)) throw new CryptographicException("The registered host identity does not require compatibility conversion.");
+                    }
+                    replacement = PersistentCertificateFactory.CreatePfx(DateTimeOffset.UtcNow);
+                    using (X509Certificate2 fresh = PersistentCertificateFactory.Import(replacement))
+                    { PersistentCertificateFactory.Validate(fresh); if (PersistentCertificateFactory.RequiresMigration(fresh)) throw new CryptographicException("Incompatible replacement identity."); }
+                    byte[] current = storage.Read();
+                    try { if (!NativeProtocol.Equal(previous, current)) throw new CryptographicException("The registered host identity changed before conversion."); }
+                    finally { Array.Clear(current, 0, current.Length); }
+                    // A failed publication leaves the old, blocked identity in place
+                    // with credentials already revoked. Retrying still requires the
+                    // operator action; no old device can resume with a new pin.
+                    storage.RevokeCredentials();
+                    storage.Write(replacement);
+                }
+                finally { Array.Clear(previous, 0, previous.Length); if (replacement != null) Array.Clear(replacement, 0, replacement.Length); }
+            }
         }
         private RunCertificate(X509Certificate2 saved) { Certificate = saved; OwnedKeyContainerName = ""; }
         internal static RunCertificate CreateSyntheticClientPurpose() { return new RunCertificate("1.3.6.1.5.5.7.3.2"); }

@@ -184,12 +184,17 @@ class NativeRebuildTests(unittest.TestCase):
                 pin = "0" * 64 if corrupt_public_pin else native.digest(Path(argv[2]))
                 with Path(argv[2]).with_suffix(".sha256").open("x") as fixture:
                     fixture.write(pin + "\n")
+                self.assertEqual(argv[3], "--export-persistent-certificate")
+                with Path(argv[4]).open("xb") as fixture:
+                    fixture.write(b"INERT production-path public certificate fixture")
+                with Path(argv[4]).with_suffix(".sha256").open("x") as fixture:
+                    fixture.write(native.digest(Path(argv[4])) + "\n")
                 with (self.output / "native-file-vectors.json").open("x") as fixture:
                     json.dump(inert_file_vectors(), fixture)
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
                                        actualCapture=False, actualSendInput=False,
                                        actualFreshExplorerInputFixtures=1, actualFreshExplorerOleFixtures=1,
-                                       actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28)).encode()
+                                       actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28, actualPersistentCertificateFixtures=2)).encode()
             elif label == "native-pairing-managed-checks":
                 return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,
                     networkInvoked=False, captureInvoked=False, actualInputInvoked=False)).encode()
@@ -215,7 +220,7 @@ class NativeRebuildTests(unittest.TestCase):
                 rows = []
                 for state in ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
                               "short-idle", "short-code", "short-code-compact", "short-help-compact",
-                              "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable"]:
+                              "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable", "certificate-migration", "certificate-migration-compact"]:
                     image = visual_output / ("windows-" + state + ".png")
                     image.write_bytes(data)
                     rows.append(dict(name=image.name, sha256=native.digest(image), bytes=len(data), width=640, height=480))
@@ -295,7 +300,7 @@ class NativeRebuildTests(unittest.TestCase):
         visual = json.loads((self.output / "native-ui-visual-checks.json").read_text())
         self.assertEqual(visual["visualAcceptance"], "manual-review-required")
         self.assertIn("INERT", visual["rendererReport"]["renderMethod"])
-        self.assertEqual(len(visual["rendererReport"]["images"]), 16)
+        self.assertEqual(len(visual["rendererReport"]["images"]), 18)
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
@@ -412,7 +417,7 @@ class NativeRebuildTests(unittest.TestCase):
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
                       "nearby-compact", "number-compact", "number-dark", "help-compact",
                       "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
-                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry"]:
+                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
             report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,

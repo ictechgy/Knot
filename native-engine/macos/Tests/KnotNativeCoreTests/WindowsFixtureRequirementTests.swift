@@ -26,8 +26,50 @@ enum WindowsFixtureRequirement {
     }
 }
 
+enum WindowsPersistentCertificateRequirement {
+    enum Failure: Error, Equatable { case missingPath, invalidArtifact }
+    static func validate(environment: [String: String],
+                         attributes: (String) throws -> [FileAttributeKey: Any] = {
+                             try FileManager.default.attributesOfItem(atPath: $0)
+                         }) throws -> String? {
+        guard let path = environment["KNOT_NATIVE_WINDOWS_PERSISTENT_CERTIFICATE"], !path.isEmpty else {
+            if environment["KNOT_NATIVE_REQUIRE_WINDOWS_FIXTURES"] == "1" { throw Failure.missingPath }
+            return nil
+        }
+        guard let value = try? attributes(path), value[.type] as? FileAttributeType == .typeRegular,
+              let size = value[.size] as? NSNumber, size.int64Value > 0, size.int64Value <= 65_536 else {
+            throw Failure.invalidArtifact
+        }
+        return path
+    }
+}
+
 @Test func requiredWindowsFixtureInputsArePresent() throws {
     try WindowsFixtureRequirement.validate(environment: ProcessInfo.processInfo.environment)
+    _ = try WindowsPersistentCertificateRequirement.validate(environment: ProcessInfo.processInfo.environment)
+}
+
+@Test func persistentCertificateFixtureCannotSilentlySkipRequiredCI() throws {
+    var queries = 0
+    let attributes: (String) throws -> [FileAttributeKey: Any] = { _ in
+        queries += 1
+        return [.type: FileAttributeType.typeRegular, .size: NSNumber(value: 1024)]
+    }
+    #expect(try WindowsPersistentCertificateRequirement.validate(environment: [:], attributes: attributes) == nil)
+    #expect(throws: WindowsPersistentCertificateRequirement.Failure.missingPath) {
+        try WindowsPersistentCertificateRequirement.validate(environment: ["KNOT_NATIVE_REQUIRE_WINDOWS_FIXTURES": "1"], attributes: attributes)
+    }
+    #expect(queries == 0)
+    let environment = ["KNOT_NATIVE_REQUIRE_WINDOWS_FIXTURES": "1", "KNOT_NATIVE_WINDOWS_PERSISTENT_CERTIFICATE": "/synthetic/persistent-certificate.cer"]
+    #expect(try WindowsPersistentCertificateRequirement.validate(environment: environment, attributes: attributes) == environment["KNOT_NATIVE_WINDOWS_PERSISTENT_CERTIFICATE"])
+    for value: [FileAttributeKey: Any] in [[.type: FileAttributeType.typeDirectory, .size: NSNumber(value: 1024)],
+                                         [.type: FileAttributeType.typeSymbolicLink, .size: NSNumber(value: 1024)],
+                                         [.type: FileAttributeType.typeRegular, .size: NSNumber(value: 0)],
+                                         [.type: FileAttributeType.typeRegular, .size: NSNumber(value: 65_537)]] {
+        #expect(throws: WindowsPersistentCertificateRequirement.Failure.invalidArtifact) {
+            try WindowsPersistentCertificateRequirement.validate(environment: environment, attributes: { _ in value })
+        }
+    }
 }
 
 @Test func requiredFixtureFlagFailsWithoutAPathAndOptionalLocalRunDoesNotInspectOne() throws {

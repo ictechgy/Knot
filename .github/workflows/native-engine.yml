@@ -47,6 +47,7 @@ jobs:
         env:
           KNOT_NATIVE_WINDOWS_FIXTURES: ${{ github.workspace }}/build/native-engine/windows-fixtures
           KNOT_NATIVE_REQUIRE_WINDOWS_FIXTURES: '1'
+          KNOT_NATIVE_WINDOWS_PERSISTENT_CERTIFICATE: ${{ github.workspace }}/build/native-engine/windows-fixtures/persistent-certificate.cer
       - name: Upload only fresh synthetic Mac UI fixtures
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f

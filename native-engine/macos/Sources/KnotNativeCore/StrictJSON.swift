@@ -2,6 +2,7 @@ import Foundation
 
 public enum NativeFailure: Error, Equatable, Sendable {
     case malformed, oversized, unsupported, state, saturated, transport, trust, decoder
+    case certificatePinMismatch, certificatePolicy
 }
 
 public enum JSONValue: Equatable, Sendable {

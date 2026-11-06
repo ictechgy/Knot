@@ -109,7 +109,7 @@ final class SessionModel: ObservableObject {
     private func beginTrustedConnection(_ device: SavedNativeDevice) {
         guard !active else { return }
         let id = UUID(); identity = id; phase = .connecting
-        status = "등록된 PC의 인증서를 확인하고 있어요…"
+        status = "등록된 PC와 보안 연결을 확인하고 있어요…"
         do {
             let client = try makeTrustedClient(device, viewerLabel); trustedClient = client
             trustedTask = Task { [weak self] in
@@ -121,15 +121,10 @@ final class SessionModel: ObservableObject {
                     self.startConnection()
                 } catch {
                     guard let self, self.identity == id, !Task.isCancelled else { return }
-                    if (error as? NativeFailure) == .transport {
-                        self.close(message: "등록된 PC에 연결하지 못했어요. Windows에서 공유 중인지 확인하세요.", failed: true)
-                        self.scheduleReconnect(device)
-                    } else {
-                        self.close(message: "등록된 PC의 인증서나 연결 권한을 확인하지 못했어요. Windows의 등록 기기를 확인하고 새 번호로 다시 등록하세요.", failed: true)
-                    }
+                    self.connectionFailed(error)
                 }
             }
-        } catch { close(message: "등록된 PC 정보를 확인하지 못했어요. 다시 등록해주세요.", failed: true) }
+        } catch { connectionFailed(error) }
     }
     func forgetSaved(_ id: String) {
         guard let device = savedDevices.first(where: { $0.id == id }) else { return }
@@ -186,8 +181,22 @@ final class SessionModel: ObservableObject {
     }
     private func transportFailed() {
         let device = selectedTrustedDevice
-        close(message: device == nil ? "Connection ended or validation failed. Ask the host for a new invitation." : "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인하세요.", failed: true)
+        close(message: device == nil ? "The network connection stopped. Check Windows sharing and the network before reconnecting." : "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인하세요.", failed: true)
         if let device { scheduleReconnect(device) }
+    }
+    private func connectionFailed(_ error: any Error) {
+        switch error as? NativeFailure {
+        case .transport:
+            transportFailed()
+        case .certificatePinMismatch:
+            selectedTrustedDevice = nil
+            fail(NativeCopy.certificatePinMismatchGuidance)
+        case .certificatePolicy:
+            fail(NativeCopy.certificatePolicyGuidance)
+        default:
+            fail(selectedTrustedDevice == nil ? "Connection ended or validation failed. Ask the host for a new invitation." :
+                "등록된 PC의 연결 권한을 확인하지 못했어요. Windows의 등록 기기를 확인하고 새 번호로 다시 등록하세요.")
+        }
     }
     func review(_ secret: String) {
         guard !active else { return }
@@ -221,7 +230,7 @@ final class SessionModel: ObservableObject {
         guard !active, let invitation else { return }
         let label = viewerLabel
         guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
-        let id = UUID(); identity = id; phase = .connecting; status = "Verifying the host certificate…"
+        let id = UUID(); identity = id; phase = .connecting; status = "Checking the secure connection…"
         input = InputBuffer(); inputRecovery = false
         presentationBackpressureSince = nil; displayBehind = false
         connectedAt = .now; lastIncoming = .now; lastHeartbeat = .now
@@ -231,6 +240,7 @@ final class SessionModel: ObservableObject {
                 let transport = try self.makeChannel(invitation); self.channel = transport
                 try await transport.start()
                 guard self.identity == id, !Task.isCancelled else { transport.close(); return }
+                self.status = "Sending the connection request…"
                 // This write completes before the sole post-Hello writer starts.
                 try await transport.send(invitation.hello(name: label))
                 guard self.identity == id, !Task.isCancelled else { transport.close(); return }
@@ -281,8 +291,7 @@ final class SessionModel: ObservableObject {
                 }
             } catch {
                 if self.identity == id {
-                    if (error as? NativeFailure) == .transport { self.transportFailed() }
-                    else { self.fail(self.selectedTrustedDevice == nil ? "Connection ended or validation failed. Ask the host for a new invitation." : "Connection validation failed. Check the registered PC or create a new invitation.") }
+                    self.connectionFailed(error)
                 }
             }
         }

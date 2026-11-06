@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: GPL-3.0-only
+using System;
+using System.IO;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
+
+namespace Knot.NativePreview
+{
+    internal sealed class CertificateCompatibilityException : CryptographicException
+    {
+        internal CertificateCompatibilityException() : base("The registered host certificate requires explicit compatibility conversion. Previously registered Macs must remove this host and pair again.") { }
+    }
+
+    internal static class PersistentCertificateFactory
+    {
+        internal const int MaximumValidityDays = 397;
+        internal static byte[] CreatePfx(DateTimeOffset now) { return CreatePfx(now.AddDays(-1), now.AddDays(364)); }
+        // Both the production identity and fresh test identities take this exact
+        // request -> PFX export -> UserKeySet import path. The date overload lets
+        // synthetic checks exercise old/expired identities without reading stores.
+        internal static byte[] CreatePfx(DateTimeOffset notBefore, DateTimeOffset notAfter)
+        {
+            using (RSA rsa = RSA.Create())
+            {
+                rsa.KeySize = 2048;
+                CertificateRequest request = new CertificateRequest("CN=knot-native", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+                request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
+                OidCollection purposes = new OidCollection(); purposes.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+                request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(purposes, false));
+                request.CertificateExtensions.Add(new X509Extension("2.5.29.17", new byte[] { 0x30,13,0x82,11,107,110,111,116,45,110,97,116,105,118,101 }, false));
+                using (X509Certificate2 fresh = request.CreateSelfSigned(notBefore, notAfter)) return fresh.Export(X509ContentType.Pfx);
+            }
+        }
+        internal static X509Certificate2 Import(byte[] pfx) { return new X509Certificate2(pfx, (string)null, X509KeyStorageFlags.UserKeySet); }
+        // Inspection must not persist or attach an imported key container. This
+        // certificate is never passed to Schannel; production TLS uses Import.
+        internal static X509Certificate2 Inspect(byte[] pfx) { return new X509Certificate2(pfx, (string)null, X509KeyStorageFlags.EphemeralKeySet); }
+        internal static bool RequiresMigration(X509Certificate2 certificate)
+        { return certificate.NotAfter.ToUniversalTime() - certificate.NotBefore.ToUniversalTime() > TimeSpan.FromDays(MaximumValidityDays); }
+        internal static void Validate(X509Certificate2 certificate)
+        {
+            DateTime now = DateTime.UtcNow;
+            if (!certificate.HasPrivateKey || now < certificate.NotBefore.ToUniversalTime() || now >= certificate.NotAfter.ToUniversalTime())
+                throw new CryptographicException("Registered host identity must be explicitly renewed.");
+            string pin;
+            using (SHA256 sha = SHA256.Create()) pin = BitConverter.ToString(sha.ComputeHash(certificate.RawData)).Replace("-", "").ToLowerInvariant();
+            if (!RunCertificate.VerifyPinned(certificate, System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors, pin, now))
+                throw new CryptographicException("Invalid registered host identity.");
+        }
+    }
+
+    internal interface IPersistentCertificateStorage
+    {
+        bool Exists { get; }
+        byte[] Read();
+        void Write(byte[] pfx);
+        void RevokeCredentials();
+    }
+
+    // The directory is injected only by fresh fixtures; production resolves the
+    // existing DPAPI identity location without opening it in the constructor.
+    internal sealed class ProtectedCertificateStorage : IPersistentCertificateStorage
+    {
+        private readonly string directory, path;
+        private readonly Action revokeCredentials;
+        internal ProtectedCertificateStorage(string directory, Action revokeCredentials)
+        {
+            if (String.IsNullOrEmpty(directory) || revokeCredentials == null) throw new ArgumentException("Invalid certificate storage.");
+            this.directory = directory; path = Path.Combine(directory, "identity.dpapi"); this.revokeCredentials = revokeCredentials;
+        }
+        internal static ProtectedCertificateStorage Production() { return new ProtectedCertificateStorage(NativeTrustedDevices.DirectoryPath, NativeTrustedDevices.RevokeAll); }
+        public bool Exists { get { return File.Exists(path); } }
+        public byte[] Read() { return NativeTrustedDevices.ReadProtected(path); }
+        public void RevokeCredentials() { revokeCredentials(); }
+        public void Write(byte[] pfx)
+        {
+            Directory.CreateDirectory(directory);
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) throw new IOException("Trust storage cannot be linked.");
+            DirectorySecurity security = new DirectorySecurity(); security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+            new DirectoryInfo(directory).SetAccessControl(security);
+            byte[] encrypted = ProtectedData.Protect(pfx, null, DataProtectionScope.CurrentUser);
+            string temporary = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                using (FileStream file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                { file.Write(encrypted, 0, encrypted.Length); file.Flush(true); }
+                if (File.Exists(path))
+                { if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("Invalid trust storage."); File.Replace(temporary, path, null); }
+                else File.Move(temporary, path);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); Array.Clear(encrypted, 0, encrypted.Length); }
+        }
+    }
+}

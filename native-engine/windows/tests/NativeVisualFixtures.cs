@@ -27,6 +27,7 @@ namespace Knot.NativePreview
             internal int Width, Height;
             internal float Scale;
             internal bool EnrollmentMode;
+            internal bool CertificateCompatibility;
             internal string StatusOverride, ViewerLabelOverride, FileStatusOverride;
             internal Frame(string name, HostViewPhase phase, bool help, int width, int height, float scale)
             { Name = name; Phase = phase; Help = help; Width = width; Height = height; Scale = scale; }
@@ -225,6 +226,8 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-files-sharing.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-files-sharing-compact.png", HostViewPhase.Sharing, false, 800, 620, 1) { EnrollmentMode = true });
                 frames.Add(new Frame("windows-files-unavailable.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true, FileStatusOverride = "파일 공유 폴더를 준비하지 못했어요. 화면 연결은 계속 사용할 수 있어요." });
+                frames.Add(new Frame("windows-certificate-migration.png", HostViewPhase.Idle, false, 1040, 740, 1) { EnrollmentMode = true, CertificateCompatibility = true });
+                frames.Add(new Frame("windows-certificate-migration-compact.png", HostViewPhase.Idle, false, 800, 620, 1) { EnrollmentMode = true, CertificateCompatibility = true });
                 List<string> records = new List<string>();
                 using (Icon icon = new Icon(iconPath, 256, 256))
                 {
@@ -248,6 +251,7 @@ namespace Knot.NativePreview
                                 state = new HostViewSnapshot(state.Phase, state.HasAddress, state.RunPresent, state.Pin, frame.ViewerLabelOverride ?? state.ViewerLabel, state.ObservedAddress, frame.StatusOverride ?? state.Status, state.CanCopy, state.EnrollmentMode);
                             Progress(frame, "before-presentation"); form.SetFixturePresentation(state, frame.Help); Progress(frame, "after-presentation");
                             if (frame.FileStatusOverride != null) form.SetFixtureFileStatus(frame.FileStatusOverride);
+                            form.SetFixtureCertificateCompatibility(frame.CertificateCompatibility);
                             AssertFontsUsable(form); Progress(frame, "fonts-usable-before-show");
                             Progress(frame, "before-show"); form.Show(); Progress(frame, "after-show");
                             form.PerformLayout(); Progress(frame, "after-initial-layout"); Pump(); Progress(frame, "after-initial-pump");

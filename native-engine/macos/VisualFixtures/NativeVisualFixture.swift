@@ -66,6 +66,8 @@ struct NativeVisualFixture {
             ("saved-devices-compact", "saved-devices", 880, 620, false),
             ("number-remembered", "number-remembered", 1200, 760, false),
             ("work-tools", "work-tools", 880, 620, false),
+            ("certificate-policy", "certificate-policy", 1200, 760, false),
+            ("certificate-pin-mismatch", "certificate-pin-mismatch", 880, 620, false),
             ("help-compact", "help", 880, 620, false),
             ("files", "files", 1200, 760, false),
             ("files-compact", "files", 880, 620, false),
@@ -316,6 +318,10 @@ struct NativeVisualFixture {
                 model.viewerLabel = ""
                 model.status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."
             }
+        case "certificate-policy":
+            model.phase = .failed; model.status = NativeCopy.certificatePolicyGuidance
+        case "certificate-pin-mismatch":
+            model.phase = .failed; model.status = NativeCopy.certificatePinMismatchGuidance
         case "connecting":
             model.phase = .connecting; model.status = "Verifying the host certificate…"
         case "approval":

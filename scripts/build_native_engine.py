@@ -23,7 +23,7 @@ from build_snapshot import source_snapshot, validate_corresponding_source
 from native_updates import build_resource as native_update_resource
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.11"
+VERSION = "0.1.0-native.12"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -507,12 +507,12 @@ class Builder:
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
                       "nearby-compact", "number-compact", "number-dark", "help-compact",
                       "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
-                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry"]}
+                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
                      ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
                       "short-idle", "short-code", "short-code-compact", "short-help-compact",
-                      "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable"]})
+                      "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable", "certificate-migration", "certificate-migration-compact"]})
         if not required.issubset(names):
             raise ValueError("UI fixture omitted a required task state")
         bound_sources = {self.input(path).relative_to(ROOT).as_posix(): digest(path) for path in source_inputs}
@@ -828,24 +828,31 @@ class Builder:
                              "Knot.NativePreview.NativeChecks", "exe")
         public_certificate = self.output / "native-test-public.cer"
         public_pin = self.output / "native-test-public.sha256"
+        persistent_certificate = self.output / "persistent-certificate.cer"
+        persistent_pin = self.output / "persistent-certificate.sha256"
         # NativeChecks deliberately creates only a new, owned fixture file.
         public_certificate.unlink(missing_ok=True)
         public_pin.unlink(missing_ok=True)
+        persistent_certificate.unlink(missing_ok=True)
+        persistent_pin.unlink(missing_ok=True)
         file_vectors = self.output / "native-file-vectors.json"
         file_vectors.unlink(missing_ok=True)
-        result = self.run("native-host-checks", [checks, "--export-certificate", public_certificate],
+        result = self.run("native-host-checks", [checks, "--export-certificate", public_certificate,
+                          "--export-persistent-certificate", persistent_certificate],
                           timeout=300).decode("utf-8-sig").strip()
         parsed = json.loads(result)
         if (parsed.get("status") != "passed" or parsed.get("freshSyntheticOnly") is not True or
                 parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False):
             raise ValueError("Native host checks must prove their fresh/inert capture and input scope")
         for key, minimum in [("actualFreshExplorerInputFixtures", 1), ("actualFreshExplorerOleFixtures", 1),
-                             ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28)]:
+                             ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28), ("actualPersistentCertificateFixtures", 1)]:
             if type(parsed.get(key)) is not int or parsed[key] < minimum:
                 raise ValueError("Native host folder/Explorer checks incomplete: " + key)
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")
         if public_pin.read_text().strip() != digest(public_certificate):
             raise ValueError("Fresh Windows certificate pin differs from exported public DER")
+        if persistent_pin.read_text().strip() != digest(persistent_certificate):
+            raise ValueError("Fresh production-path persistent certificate pin differs from public DER")
         validate_native_file_vectors(file_vectors)
         visuals = self.visual_directory()
         visual_fixture = ROOT / "native-engine/windows/tests/NativeVisualFixtures.cs"
@@ -886,7 +893,7 @@ class Builder:
         installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
         return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record, fixture_4k, fixture_record_4k,
                 fixture_4k60, fixture_record_4k60, wait_record,
-                self.output / "native-host-checks.json", public_certificate, public_pin, file_vectors, cpp_record, installer_metadata,
+                self.output / "native-host-checks.json", public_certificate, public_pin, persistent_certificate, persistent_pin, file_vectors, cpp_record, installer_metadata,
                 visual_record, managed_record, *crypto_products]
 
     def finish(self, files):
