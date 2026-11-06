@@ -14,6 +14,38 @@ namespace Knot.NativePreview
         internal X509Certificate2 Certificate { get; private set; }
         private RSACryptoServiceProvider key;
         internal RunCertificate() : this("1.3.6.1.5.5.7.3.1") { }
+        internal static RunCertificate Persistent()
+        {
+            NativeTrustedDevices.PrepareDirectory();
+            string path = System.IO.Path.Combine(NativeTrustedDevices.DirectoryPath, "identity.dpapi");
+            byte[] pfx;
+            if (System.IO.File.Exists(path)) pfx = NativeTrustedDevices.ReadProtected(path);
+            else
+            {
+                using (RSA rsa = RSA.Create())
+                {
+                    rsa.KeySize = 2048;
+                    CertificateRequest request = new CertificateRequest("CN=knot-native", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                    request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+                    request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
+                    OidCollection purposes = new OidCollection(); purposes.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+                    request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(purposes, false));
+                    request.CertificateExtensions.Add(new X509Extension("2.5.29.17", new byte[] { 0x30,13,0x82,11,107,110,111,116,45,110,97,116,105,118,101 }, false));
+                    using (X509Certificate2 fresh = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5)))
+                        pfx = fresh.Export(X509ContentType.Pfx);
+                }
+                try { NativeTrustedDevices.WriteProtected(path, pfx); } catch { Array.Clear(pfx, 0, pfx.Length); throw; }
+            }
+            try
+            {
+                X509Certificate2 saved = new X509Certificate2(pfx, (string)null, X509KeyStorageFlags.UserKeySet);
+                if (!saved.HasPrivateKey || DateTime.UtcNow < saved.NotBefore.ToUniversalTime() || DateTime.UtcNow >= saved.NotAfter.ToUniversalTime())
+                { saved.Dispose(); throw new CryptographicException("Registered host identity must be explicitly renewed."); }
+                return new RunCertificate(saved);
+            }
+            finally { Array.Clear(pfx, 0, pfx.Length); }
+        }
+        private RunCertificate(X509Certificate2 saved) { Certificate = saved; OwnedKeyContainerName = ""; }
         internal static RunCertificate CreateSyntheticClientPurpose() { return new RunCertificate("1.3.6.1.5.5.7.3.2"); }
         private RunCertificate(string purpose)
         {
@@ -136,6 +168,8 @@ namespace Knot.NativePreview
                 return result;
             }
         }
+        internal byte[] RegistrationHash
+        { get { lock (gate) { using (SHA256 sha = SHA256.Create()) return sha.ComputeHash(token); } } }
         internal void Claim(byte[] candidate)
         {
             lock (gate)

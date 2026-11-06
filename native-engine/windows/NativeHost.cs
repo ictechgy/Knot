@@ -25,6 +25,15 @@ namespace Knot.NativePreview
         private readonly EnrollmentServer enrollment;
         private readonly FileSharingOptions fileOptions;
         private FileServer files;
+        private TrustedDeviceServer trustedServer;
+        private byte[] registrationHash;
+        private long registrationDeadline;
+        private bool registrationUsed, registeredSession, registeredAvailable;
+        private ClipboardBridge clipboard;
+        private NativeQualityController quality;
+        internal bool IsRegisteredSession { get { lock (gate) return registeredSession; } }
+        internal bool HasRegisteredDevices { get { lock (gate) return registeredAvailable; } }
+        internal bool MayResumeRegisteredConnection { get; private set; }
         private bool enrollmentAllowsFiles, claimedFiles;
         private IPAddress claimedPeer;
         private Invitation enrollmentInvitation;
@@ -75,8 +84,9 @@ namespace Knot.NativePreview
             fileOptions = files;
             this.mediaFactory = mediaFactory; this.inputSink = inputSink;
             this.invitation = invitation ?? new Invitation(this.clock);
-            certificate = new RunCertificate();
+            certificate = enrollmentMode && !syntheticLoopback ? RunCertificate.Persistent() : new RunCertificate();
             Identity = new RunIdentity(certificate.Pin);
+            registeredAvailable = enrollmentMode && !syntheticLoopback && NativeTrustedDevices.List().Count != 0;
             listener = new TcpListener(address, port);
             try
             {
@@ -87,21 +97,53 @@ namespace Knot.NativePreview
                     string name = deviceName ?? Environment.MachineName;
                     try { EnrollmentProtocol.ValidName(name); } catch (ProtocolException) { name = "Windows PC"; }
                     enrollment = new EnrollmentServer(address, name, syntheticLoopback, this.clock,
-                        IssueEnrollmentGrant, delegate(EnrollmentFailure failure) { Notify(EnrollmentGuidance.For(failure)); Stop(); }, Notify,
+                        IssueEnrollmentGrant, delegate(EnrollmentFailure failure) {
+                            Notify(EnrollmentGuidance.For(failure));
+                            if (syntheticLoopback || !HasRegisteredDevices) Stop();
+                        }, Notify,
                         issueWithFiles: IssueEnrollmentGrantWithFiles);
+                    if (!syntheticLoopback)
+                        trustedServer = new TrustedDeviceServer(address, certificate.Certificate, Pin, RegisterDevice, IssueTrustedGrant, delegate { return !Stopping; });
                 }
             }
             catch { try { listener.Stop(); } catch { } certificate.Dispose(); throw; }
             worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot native media writer";
             worker.SetApartmentState(ApartmentState.MTA);
         }
-        internal void Start() { if (enrollment != null) enrollment.Start(); worker.Start(); }
+        internal void Start() { if (enrollment != null) enrollment.Start(); if (trustedServer != null) trustedServer.Start(); worker.Start(); }
         internal string GetInvitation()
         {
             lock (gate)
             {
                 if (enrollmentMode || isStopped || isClaimed) throw new ProtocolException("expired");
                 return invitation.Encode(address, Port, Pin);
+            }
+        }
+        private bool RegisterDevice(IPAddress peer, string token, string id, string name, string key)
+        {
+            byte[] candidate = NativeProtocol.DecodeToken(token), digest;
+            try { using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create()) digest = sha.ComputeHash(candidate); }
+            finally { Array.Clear(candidate, 0, candidate.Length); }
+            lock (gate)
+            {
+                if (isStopped || !active || !enrollmentMode || registrationUsed || registrationHash == null ||
+                    !peer.Equals(claimedPeer) || clock() > registrationDeadline || !NativeProtocol.Equal(digest, registrationHash) || registeredSession) return false;
+                NativeTrustedDevices.Add(id, name, key); registrationUsed = true; registeredAvailable = true;
+                Array.Clear(registrationHash, 0, registrationHash.Length); registrationHash = null;
+                return true;
+            }
+        }
+        private string IssueTrustedGrant(IPAddress peer, string name)
+        {
+            lock (gate)
+            {
+                if (isStopped || isClaimed || !enrollmentMode || !NativeProtocol.IsPrivate(peer)) throw new ProtocolException("busy");
+                EnrollmentProtocol.ValidName(name);
+                if (enrollmentInvitation != null && !enrollmentInvitation.IsExpired) throw new ProtocolException("busy");
+                if (enrollmentInvitation != null) enrollmentInvitation.Revoke();
+                enrollmentInvitation = new Invitation(clock, 30000); enrollmentName = name; enrollmentPeer = peer;
+                enrollmentAllowsFiles = fileOptions != null; registeredSession = true; invitation.Revoke();
+                return enrollmentInvitation.Encode(address, Port, Pin);
             }
         }
         private EnrollmentGrant IssueEnrollmentGrant(byte[] slot, string name, IPAddress peer)
@@ -129,6 +171,7 @@ namespace Knot.NativePreview
                     result = new EnrollmentGrant(slot, grantId, encoded, remaining);
                     // A new capability, never the fallback T1, owns this one pregrant.
                     invitation.Revoke(); enrollmentInvitation = grant; enrollmentName = name; enrollmentPeer = peer;
+                    registrationHash = grant.RegistrationHash; registrationUsed = false; registeredSession = false;
                     enrollmentAllowsFiles = wantsFiles && fileOptions != null;
                     ++enrollmentGrantsIssued;
                 }
@@ -146,6 +189,11 @@ namespace Knot.NativePreview
                 lock (gate)
                 {
                     if (!enrollmentMode) return invitation.IsExpired;
+                    if (!syntheticLoopback && trustedServer != null && HasRegisteredDevices && !isClaimed)
+                    {
+                        if (enrollmentInvitation != null && enrollmentInvitation.IsExpired) { enrollmentInvitation.Revoke(); enrollmentInvitation = null; }
+                        return false;
+                    }
                     return enrollmentInvitation == null ? enrollment.Slot.LifetimeRemainingMilliseconds <= 0 : enrollmentInvitation.IsExpired;
                 }
             }
@@ -194,6 +242,9 @@ namespace Knot.NativePreview
                     Notify("Approved. Initializing the primary SDR display and hardware encoder.");
                     media = mediaFactory.Open(); // create/read/close all stay on this MTA writer.
                     byte[] ready = media.Info.Ready();
+                    if (media is WindowsMediaSource) {
+                        quality = new NativeQualityController(media.Info); ready = NativeQualityController.WithOffer(ready);
+                    }
                     FileServer preparedFiles = null;
                     if (claimedFiles)
                     {
@@ -210,6 +261,13 @@ namespace Knot.NativePreview
                         if (isStopped) { if (preparedFiles != null) preparedFiles.Dispose(); return; }
                         input = new InputSession(inputSink, media.Info.Rectangle);
                         input.ExplorerReleaseFailed = Stop;
+                        if (inputSink is WindowsInputSink)
+                        {
+                            clipboard = new ClipboardBridge(delegate(byte operation) {
+                                lock (gate) { if (!active || isStopped || input == null) throw new ProtocolException("closed"); input.ClipboardShortcut(operation); }
+                            }, delegate { lock (gate) return active && !isStopped; });
+                            ready = ClipboardProtocol.WithOffer(ready);
+                        }
                         files = preparedFiles;
                         // File authorization cannot race delivery of its offer.
                         // A failed Ready write reaches Stop and revokes both.
@@ -224,7 +282,7 @@ namespace Knot.NativePreview
                     {
                         if (inputClock() - Interlocked.Read(ref lastRead) >= 10L * Stopwatch.Frequency)
                         {
-                            if (!Stopping) Notify(Guidance("timeout"));
+                            if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(Guidance("timeout")); }
                             Stop();
                         }
                     }, null, 250, 250);
@@ -237,6 +295,14 @@ namespace Knot.NativePreview
                     long lastHeartbeat = Stopwatch.GetTimestamp();
                     while (!Stopping)
                     {
+                        if (quality != null)
+                        {
+                            quality.Apply(media);
+                            byte[] changed = quality.TakeStatus();
+                            if (changed != null) NativeProtocol.Write(tls, 0x34, changed);
+                        }
+                        byte[] clipboardResponse;
+                        if (clipboard != null && clipboard.TryTake(out clipboardResponse)) NativeProtocol.Write(tls, 0x31, clipboardResponse);
                         uint written, flags;
                         ulong timestamp;
                         int status = media.Read(encoded, out written, out flags, out timestamp);
@@ -248,7 +314,9 @@ namespace Knot.NativePreview
                             AnnexB.Validate(encoded, (int)written, flags);
                             NativeProtocol.Put64(payload, 0, ++sequence); NativeProtocol.Put64(payload, 8, timestamp); payload[16] = (byte)flags;
                             Buffer.BlockCopy(encoded, 0, payload, 17, (int)written);
+                            long writeStart = Stopwatch.GetTimestamp();
                             NativeProtocol.Write(tls, 3, payload, (int)written + 17);
+                            if (quality != null) quality.ObserveWrite((Stopwatch.GetTimestamp() - writeStart) * 1000.0 / Stopwatch.Frequency);
                         }
                         else if (status != 1) throw new ProtocolException("capture");
                         if (Stopwatch.GetTimestamp() - lastHeartbeat >= 2L * Stopwatch.Frequency)
@@ -260,8 +328,8 @@ namespace Knot.NativePreview
             }
             catch (ProtocolException error) { if (!Stopping) { SendError(error.Code); Notify(Guidance(error.GuidanceCategory)); } }
             catch (AuthenticationException) { if (!Stopping) Notify("TLS authentication failed. Create a new invitation."); }
-            catch (IOException) { if (!Stopping) Notify("Connection ended. Create a new invitation."); }
-            catch (SocketException) { if (!Stopping) Notify("Connection ended. Create a new invitation."); }
+            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } }
+            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } }
             catch (ObjectDisposedException) { }
             catch (Exception) { if (!Stopping) { SendError("capture"); Notify("Native preview could not start. Check the bundled media engine and supported SDR display."); } }
             finally
@@ -277,6 +345,8 @@ namespace Knot.NativePreview
                     finally
                     {
                         if (files != null) files.Dispose();
+                        if (clipboard != null) clipboard.Dispose();
+                        if (trustedServer != null) trustedServer.Dispose();
                         certificate.Dispose();
                         workerDone.Set();
                         Action finished = Finished; if (finished != null) finished();
@@ -357,7 +427,7 @@ namespace Knot.NativePreview
                     lock (gate)
                     {
                         if (isStopped) return false;
-                        isClaimed = true; peerName = name; claimed = true;
+                        isClaimed = true; peerName = name; claimed = true; registrationDeadline = clock() + 30L * Stopwatch.Frequency;
                         claimedPeer = observedRemote;
                         claimedFiles = fileOptions != null && wantsFiles && (!enrollmentMode || enrollmentAllowsFiles);
                         approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
@@ -398,11 +468,15 @@ namespace Knot.NativePreview
                     long now = inputClock();
                     if (!rate.TryConsume()) throw new ProtocolException("input", "input-rate");
                     Interlocked.Exchange(ref lastRead, now);
-                    input.Accept(packet);
+                    if (packet.Kind == 0x30) { if (clipboard == null) throw new ProtocolException("protocol"); clipboard.Handle(packet.Payload); }
+                    else if (packet.Kind == 0x32 || packet.Kind == 0x33) { if (quality == null) throw new ProtocolException("protocol"); quality.Handle(packet); }
+                    else { if (packet.Kind == 0x24 && clipboard != null) clipboard.Cancel(); input.Accept(packet); }
                 }
             }
             catch (ProtocolException error) { if (!Stopping) Notify(Guidance(error.GuidanceCategory)); Stop(); }
-            catch (Exception) { if (!Stopping) Notify("Connection ended. Create a new invitation."); Stop(); }
+            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } Stop(); }
+            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } Stop(); }
+            catch (Exception) { if (!Stopping) Notify("Session stopped. Check the host before reconnecting."); Stop(); }
         }
         private string[] CaptureExplorerDrag(string nonce)
         {
@@ -459,10 +533,12 @@ namespace Knot.NativePreview
                 isStopped = true; active = false;
                 invitation.Revoke(); stopped.Set(); approval.Set();
                 if (enrollmentInvitation != null) enrollmentInvitation.Revoke();
+                if (registrationHash != null) { Array.Clear(registrationHash, 0, registrationHash.Length); registrationHash = null; }
                 ownedInput = input; ownedClient = client; ownedFiles = files;
             }
             try { listener.Stop(); } catch { }
             if (enrollment != null) enrollment.Stop();
+            if (trustedServer != null) trustedServer.Stop();
             if (ownedFiles != null) ownedFiles.Stop();
             // Closing the socket interrupts TLS reads/writes and their bounded budgets.
             try { if (ownedClient != null) ownedClient.Close(); } catch { }
@@ -474,7 +550,7 @@ namespace Knot.NativePreview
             Stop();
             bool ended;
             if (worker.ThreadState == System.Threading.ThreadState.Unstarted || (worker.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
-            { if (enrollment != null) enrollment.Dispose(); certificate.Dispose(); workerDone.Set(); ended = true; }
+            { if (enrollment != null) enrollment.Dispose(); if (trustedServer != null) trustedServer.Dispose(); certificate.Dispose(); workerDone.Set(); ended = true; }
             else ended = worker != Thread.CurrentThread && worker.Join(2000);
             if (ended)
             {

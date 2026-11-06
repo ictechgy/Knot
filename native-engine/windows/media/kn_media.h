@@ -51,6 +51,9 @@ KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* session, uint8_t* buffer,
     uint32_t capacity, uint32_t* written, uint32_t* flags, uint64_t* timestampMicros);
 // null is allowed. Wrong-thread close is rejected (caller must close correctly).
 KN_MEDIA_API void KN_MEDIA_CALL kn_media_close(void* session);
+// Same owning MTA. Fixed dimensions; unsupported live bitrate changes fail
+// without changing the configured pacing or silently recreating the encoder.
+KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_set_quality(void* session, uint32_t fps, uint32_t bitrate);
 
 #ifdef __cplusplus
 }

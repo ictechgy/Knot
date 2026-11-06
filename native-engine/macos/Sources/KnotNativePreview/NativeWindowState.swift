@@ -15,6 +15,7 @@ final class NativeWindowState: ObservableObject {
     private var onClose: (@MainActor @Sendable () -> Void)?
     private weak var window: NSWindow?
     private var notifications: NativeWindowNotifications?
+    var onFullscreenChanged: ((Bool) -> Void)?
     func bindSession(_ model: SessionModel, enrollment: EnrollmentModel) {
         onClose = { [weak model, weak enrollment] in
             model?.disconnect()
@@ -41,12 +42,15 @@ final class NativeWindowState: ObservableObject {
                         self.notifications = nil; self.window = nil; self.isFullscreen = false
                     } else {
                         self.isFullscreen = name == NSWindow.didEnterFullScreenNotification
+                        self.onFullscreenChanged?(self.isFullscreen)
                     }
                 }
             }
         })
     }
     func toggleFullscreen() { window?.toggleFullScreen(nil) }
+    func activate() { NSApp.activate(ignoringOtherApps: true); window?.makeKeyAndOrderFront(nil) }
+    func restoreFullscreen(_ preferred: Bool) { if preferred, let window, !window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) } }
     func canToggleFullscreenControls(for model: SessionModel) -> Bool { isFullscreen && model.active }
     func toggleFullscreenControls(for model: SessionModel) {
         guard canToggleFullscreenControls(for: model) else { return }

@@ -15,10 +15,72 @@ namespace Knot.NativePreview
         private static int discoveryFixtures;
         private static void EnrollmentChecks()
         {
-            EnrollmentPolicyChecks(); EnrollmentWireChecks(); EnrollmentPreflightChecks();
+            EnrollmentPolicyChecks(); EnrollmentWireChecks(); EnrollmentPreflightChecks(); TrustedProofChecks(); TrustedChallengeChecks();
             EnrollmentOfferDeliveryFailure();
             EnrollmentWrongCodeThenClaim(); EnrollmentWrongName(); EnrollmentExpiredGrant();
             EnrollmentStopBeforeConfirm(); EnrollmentExpiredSlotBeforeConfirm(); EnrollmentAttemptLimit(); EnrollmentLegacyCrossClaim(); EnrollmentWrongSourceBeforeTls(); EnrollmentStopAfterOffer();
+        }
+        private static void TrustedChallengeChecks()
+        {
+            byte[] key = new byte[32]; for (int i = 0; i < key.Length; ++i) key[i] = 9;
+            string id = NativeProtocol.Base64Url(new byte[32]), previousProof = null, previousNonce = null;
+            int issued = 0, registered = 0, revoked = 0;
+            using (RunCertificate certificate = new RunCertificate())
+            using (TrustedDeviceServer server = new TrustedDeviceServer(IPAddress.Loopback, certificate.Certificate, certificate.Pin,
+                delegate(IPAddress peer, string token, string registrationId, string name, string secret) { ++registered; return token == "owned-synthetic-proof"; },
+                delegate(IPAddress peer, string name) { ++issued; return "owned-fresh-invitation-" + issued; }, delegate { return true; },
+                syntheticLoopback: true, port: 0, lookupKey: delegate(string candidate) { if (candidate != id) throw new ProtocolException("auth"); return (byte[])key.Clone(); },
+                revoke: delegate(string candidate) { ++revoked; }))
+            {
+                server.Start();
+                for (int attempt = 0; attempt < 3; ++attempt)
+                {
+                    using (TcpClient client = new TcpClient())
+                    {
+                        client.Connect(IPAddress.Loopback, server.ListeningPort); client.ReceiveTimeout = 3000; client.SendTimeout = 3000;
+                        using (System.Net.Security.SslStream tls = new System.Net.Security.SslStream(client.GetStream(), false,
+                            delegate(object sender, System.Security.Cryptography.X509Certificates.X509Certificate peer,
+                                System.Security.Cryptography.X509Certificates.X509Chain chain, System.Net.Security.SslPolicyErrors errors) {
+                                return RunCertificate.VerifyPinned(peer, errors, certificate.Pin);
+                            }))
+                        {
+                            tls.AuthenticateAsClient("knot-native", null, System.Security.Authentication.SslProtocols.Tls12, false);
+                            TrustedWrite(tls, "{\"op\":\"connect\",\"id\":" + StrictJson.Quote(id) + ",\"name\":\"Synthetic Mac\",\"value\":\"\",\"key\":\"\"}");
+                            Packet challenge = NativeProtocol.ReadClient(tls, true);
+                            string nonce = StrictJson.String(StrictJson.Parse(challenge.Payload, "nonce"), "nonce");
+                            Check(nonce != previousNonce && NativeProtocol.DecodeToken(nonce).Length == 32);
+                            string proof = NativeProtocol.Base64Url(NativeTrustedDevices.Proof(key, id, nonce, "Synthetic Mac", certificate.Pin));
+                            TrustedWrite(tls, "{\"proof\":" + StrictJson.Quote(attempt == 1 ? previousProof : proof) + "}");
+                            if (attempt == 1)
+                            {
+                                bool failed = false; try { NativeProtocol.ReadClient(tls, true); } catch (IOException) { failed = true; }
+                                Check(failed && issued == 1);
+                            }
+                            else {
+                                string invitation = StrictJson.String(StrictJson.Parse(NativeProtocol.ReadClient(tls, true).Payload, "invitation"), "invitation");
+                                Check(invitation == "owned-fresh-invitation-" + issued);
+                            }
+                            previousProof = proof; previousNonce = nonce;
+                        }
+                    }
+                }
+                Check(issued == 2 && registered == 0 && revoked == 0);
+            }
+        }
+        private static void TrustedWrite(Stream stream, string json)
+        {
+            byte[] bytes = StrictJson.Utf8.GetBytes(json), header = new byte[5]; header[0] = 1; NativeProtocol.Put32(header, 1, (uint)bytes.Length);
+            stream.Write(header, 0, 5); stream.Write(bytes, 0, bytes.Length);
+        }
+        private static void TrustedProofChecks()
+        {
+            byte[] key = new byte[32]; for (int i = 0; i < key.Length; ++i) key[i] = 7;
+            byte[] proof = NativeTrustedDevices.Proof(key, "synthetic-id", "synthetic-nonce", "Synthetic Mac", "synthetic-pin");
+            Check(NativeProtocol.Base64Url(proof) == "5mVsd7kvPLtyBsDnCN5Kq4B1Q9wv7v3xbtcTzu8dOd8");
+            Check(!NativeProtocol.Equal(proof, NativeTrustedDevices.Proof(key, "synthetic-id", "changed-nonce", "Synthetic Mac", "synthetic-pin")));
+            Check(!NativeProtocol.Equal(proof, NativeTrustedDevices.Proof(key, "changed-id", "synthetic-nonce", "Synthetic Mac", "synthetic-pin")));
+            Check(!NativeProtocol.Equal(proof, NativeTrustedDevices.Proof(key, "synthetic-id", "synthetic-nonce", "Other Mac", "synthetic-pin")));
+            Check(!NativeProtocol.Equal(proof, NativeTrustedDevices.Proof(key, "synthetic-id", "synthetic-nonce", "Synthetic Mac", "changed-pin")));
         }
         private static void EnrollmentPreflightChecks()
         {

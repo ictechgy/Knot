@@ -53,13 +53,15 @@ public struct KeyboardModifierState: Sendable {
         } else if local.contains(keyCode) { local.remove(keyCode) }
         else { local.insert(keyCode) }
     }
-    public func desired(flags: KeyboardModifiers, textMode: Bool, physicalCommand: Bool = false) -> Set<UInt16> {
+    public func desired(flags: KeyboardModifiers, textMode: Bool, physicalCommand: Bool = false, macShortcuts: Bool = false) -> Set<UInt16> {
         var result: Set<UInt16> = []
         for (family, fallback): (KeyboardModifiers, UInt16) in [(.shift, 56), (.control, 59), (.option, 58), (.command, 55)] {
             guard flags.contains(family) else { continue }
             if textMode && !flags.hasShortcut && !physicalCommand { continue }
             let sides = local.filter { MacKeyboardRouting.modifierKeys[$0] == family }
-            if sides.isEmpty { result.insert(fallback) } else { result.formUnion(sides) }
+            if family == .command && macShortcuts {
+                result.insert(sides.contains(54) ? 62 : 59)
+            } else if sides.isEmpty { result.insert(fallback) } else { result.formUnion(sides) }
         }
         return result
     }

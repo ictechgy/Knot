@@ -11,8 +11,9 @@ namespace Knot.NativePreview
     internal static class Program
     {
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
+            if (NativeUpdateHandoff.TryRun(args)) return;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new PreviewForm());
@@ -21,6 +22,10 @@ namespace Knot.NativePreview
 
     internal sealed class PreviewForm : Form
     {
+        private NativeUpdates updates;
+        private bool shareRequested;
+        private Label updateNotice;
+        private PreviewButton updateAction;
         private readonly float scale;
         private readonly bool fixtureMode;
         private readonly string advertisedName;
@@ -266,10 +271,17 @@ namespace Knot.NativePreview
                 else if (phase == HostViewPhase.Sharing) phase = HostViewPhase.Stopping;
                 if (before != phase) ApplyCurrentPresentation();
             };
-            if (!fixtureMode) BindActions();
+            if (!fixtureMode) {
+                BindActions(); qualityProfiles.SelectedIndex = NativePreferences.Quality;
+                qualityProfiles.SelectedIndexChanged += delegate { NativePreferences.Quality = qualityProfiles.SelectedIndex; };
+                updates = new NativeUpdates(); updates.Changed += delegate { OnUi(UpdateUpdaterPresentation); };
+                updates.StartAutomaticChecks(); UpdateUpdaterPresentation();
+                if (NativePreferences.ConsumeUpdateResume()) Shown += delegate { try { if (NativeTrustedDevices.List().Count > 0) StartShare(); } catch { } };
+            }
             FormClosing += delegate
             {
-                closing = true; lifecycleTimer.Stop();
+                closing = true; shareRequested = false; lifecycleTimer.Stop();
+                if (updates != null) updates.Dispose();
                 enrollmentCode.Text = ""; enrollmentCode.AccessibleName = "8자리 일회용 연결번호";
                 if (server != null) { presentation.Clear(server.Identity); pin.Clear(); server.Dispose(); server = null; }
             };
@@ -353,7 +365,7 @@ namespace Knot.NativePreview
             AddHelpStep(steps.Content, "01  Windows에서 공유 시작", "이 Windows와 Mac에서 Knot Native Preview를 여세요. 이 PC의 ‘화면 공유 시작’을 누르면 8자리 번호가 표시돼요. 같은 Wi-Fi나 Tailscale에 연결되어 있어야 해요.");
             AddHelpStep(steps.Content, "02  Mac에서 PC 찾기 → 이 PC 선택", "Mac의 ‘주변 PC 찾기’를 누르고 Windows 공유 화면의 이름·주소와 비교해 이 PC를 선택하세요. PC를 선택해야 다음 번호 입력 화면이 나와요. Tailscale이나 검색이 안 되는 환경에서는 Mac의 ‘다른 연결 방법’에서 이 Windows의 연결 네트워크 주소로 찾으세요.");
             AddHelpStep(steps.Content, "03  Mac에서 8자리 번호 입력", "선택한 이 PC의 Knot 번호를 Mac에 입력하고 ‘이 PC에 연결’을 누르세요. 화면·입력과, 파일 공유를 켰다면 공유 폴더 및 직접 끌어온 탐색기 항목을 허용해요. Windows에서 추가 승인은 없어요. 번호는 2분·1회용이며 만료되면 다시 공유하세요.");
-            AddHelpStep(steps.Content, "연결 중 파일·폴더 주고받기", "Mac의 ‘파일’에서 파일·폴더를 보내거나 받으세요. Finder 항목을 원격 화면에 놓으면 표시한 공유 폴더로 복사돼요. 탐색기 항목은 버튼을 누른 채 화면 밖 Finder로 끌어오고, Mac 쪽 아이콘이 나타난 뒤 놓으세요. 목록의 ‘받기’도 사용할 수 있어요. 최대 8GiB이며 원본과 기존 파일은 유지해요. 앱 패키지·링크·클립보드 동기화는 지원하지 않아요.");
+            AddHelpStep(steps.Content, "연결 중 파일·폴더 주고받기", "Mac의 ‘파일’에서 파일·폴더를 보내거나 받으세요. Finder 항목을 원격 화면에 놓으면 표시한 공유 폴더로 복사돼요. 탐색기 항목은 버튼을 누른 채 화면 밖 Finder로 끌어오고, Mac 쪽 아이콘이 나타난 뒤 놓으세요. 목록의 ‘받기’도 사용할 수 있어요. 최대 8GiB이며 원본과 기존 파일은 유지해요. 앱 패키지·링크·백그라운드 클립보드 동기화는 지원하지 않아요. 텍스트는 Mac의 ⌘C/V로 직접 옮겨요.");
             Label legacyHelp = MakeLabel("고급의 긴 연결코드 방식을 선택했다면 Mac에 코드를 붙여 넣은 뒤, Windows에서 연결 요청을 허용해주세요.", 9, FontStyle.Regular);
             legacyHelp.ForeColor = PreviewStyle.Muted; legacyHelp.Margin = Padding.Empty; steps.Content.Controls.Add(legacyHelp);
             PreviewButton returnToSharing = ActionButton("이 PC 공유로 돌아가기", PreviewButtonKind.Secondary);
@@ -362,7 +374,13 @@ namespace Knot.NativePreview
             help.Controls.Add(steps);
             PreviewCard scope = new PreviewCard(scale); scope.Dock = DockStyle.Top;
             Label scopeTitle = MakeLabel("이번 미리보기에서 알아둘 점", 12, FontStyle.Bold); scopeTitle.Margin = new Padding(0, 0, 0, P(10)); scope.Content.Controls.Add(scopeTitle);
-            scope.Content.Controls.Add(MakeLabel("연결 코드는 2분 동안 한 번만 사용할 수 있어요. 다시 연결할 때는 새 코드가 필요해요.\r\n\r\n로그인된 Windows 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요.\r\n\r\n오디오·무모니터·HDR·잠금/UAC 화면·자동 업데이트는 아직 지원하지 않아요.\r\n\r\n긴 연결코드 복사는 현재 클립보드를 바꾸고 Windows 기록·클라우드 제외를 요청해요. 다른 프로그램의 현재 클립보드 접근까지 막지는 않아요.\r\n\r\n중지는 입력 해제를 요청해요. Windows가 거부하면 제한된 재시도로 해제 성공을 보장할 수는 없어요.", 10, FontStyle.Regular));
+            scope.Content.Controls.Add(MakeLabel("번호는 2분 동안 한 번만 사용할 수 있어요. Mac에서 내 PC로 등록하면 다음에는 번호 없이 연결할 수 있어요.\r\n\r\n로그인된 Windows 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요.\r\n\r\n오디오·무모니터·HDR·잠금/UAC 화면은 아직 지원하지 않아요. 자동 업데이트는 서명된 공개 배포 피드 구성 후 사용할 수 있어요.\r\n\r\n긴 연결코드 복사는 현재 클립보드를 바꾸고 Windows 기록·클라우드 제외를 요청해요. 다른 프로그램의 현재 클립보드 접근까지 막지는 않아요.\r\n\r\n중지는 입력 해제를 요청해요. Windows가 거부하면 제한된 재시도로 해제 성공을 보장할 수는 없어요.", 10, FontStyle.Regular));
+            updateNotice = MakeLabel("서명된 업데이트 배포를 준비하고 있어요.", 10, FontStyle.Regular); scope.Content.Controls.Add(updateNotice);
+            updateAction = ActionButton("업데이트 확인", PreviewButtonKind.Secondary);
+            updateAction.Click += async delegate { if (updates == null) return; if (updates.Available) InstallUpdate(); else await updates.CheckAsync(); };
+            scope.Content.Controls.Add(updateAction);
+            PreviewButton manageDevices = ActionButton("등록한 Mac 관리", PreviewButtonKind.Secondary);
+            manageDevices.Click += delegate { ManageRegisteredDevices(); }; scope.Content.Controls.Add(manageDevices);
             help.Controls.Add(scope); return help;
         }
         private void AddHelpStep(TableLayoutPanel parent, string title, string description)
@@ -527,13 +545,13 @@ namespace Knot.NativePreview
         private void ApplyPresentation(HostViewSnapshot view)
         {
             bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
-            privacy.Text = allowFiles.Checked ? "화면·입력, 표시한 공유 폴더와 탐색기에서 직접 끌어온 항목을 허용해요. 연결이 끝나면 권한도 끝나요." :
-                view.EnrollmentMode ? "공유를 시작하면 번호를 아는 Mac 한 대에 이번 화면·입력을 허용해요. 연결이 끝나면 권한도 끝나요." : "허용한 연결에서만 화면과 입력을 공유해요. 연결 권한은 이번 세션에만 유지돼요.";
+            privacy.Text = allowFiles.Checked ? "화면·입력, 표시한 공유 폴더와 직접 끈 탐색기 항목을 허용해요. Mac에서 ‘내 PC로 등록’을 선택하면 이후 번호 없이 접속할 수 있어요. 연결 안내에서 등록을 해제할 수 있어요." :
+                view.EnrollmentMode ? "번호를 아는 Mac과 등록된 Mac의 화면·입력을 허용해요. Mac에서 ‘내 PC로 등록’을 선택하면 이후 번호 없이 접속해요. 연결 안내에서 등록을 해제할 수 있어요." : "허용한 연결에서만 화면과 입력을 공유해요. 중지하면 이번 연결 권한을 종료해요.";
             badge.Text = "●  " + PreviewCopy.Phase(view.Phase);
             badge.ForeColor = view.Phase == HostViewPhase.Failed ? PreviewStyle.Warning : PreviewStyle.Muted;
             stateStep.Text = view.Phase == HostViewPhase.Failed ? "공유 준비 확인" : idle ? "01  화면 공유" : view.Phase == HostViewPhase.Invitation ? "02  Mac에 코드 보내기" : "03  연결 확인";
             stateTitle.Text = view.Phase == HostViewPhase.Failed ? "공유 준비를 확인해주세요" : view.Phase == HostViewPhase.Stopped ? "새 코드로 다시 연결하세요" : idle ? "Mac에서 이 화면을 사용하세요" : view.Phase == HostViewPhase.Invitation ? "연결 코드를 Mac에 보내세요" : view.Phase == HostViewPhase.Request ? "이 Mac의 연결을 허용할까요?" : view.Phase == HostViewPhase.Sharing ? "Windows 화면을 전송하고 있어요" : view.Phase == HostViewPhase.Stopping ? "화면 공유를 마치고 있어요" : "Windows 화면을 준비하고 있어요";
-            stateDescription.Text = view.Phase == HostViewPhase.Failed ? view.Status : view.Phase == HostViewPhase.Stopped ? "이전 연결의 권한은 끝났어요.\r\n공유를 시작하면 새 연결 코드가 만들어져요." : idle ? "공유를 시작하면 연결 코드가 만들어져요.\r\nMac에서 코드를 확인한 뒤 이 PC에서 연결을 허용해주세요." : view.Phase == HostViewPhase.Invitation ? "Mac의 Knot Native Preview에 붙여 넣으세요.\r\n연결 코드는 2분 동안 한 번만 사용할 수 있어요." : view.Phase == HostViewPhase.Request ? "직접 연결을 요청한 Mac인지 이름과 주소를 확인해주세요." : view.Phase == HostViewPhase.Sharing ? "이 PC의 화면과 입력이 공유 중이에요.\r\n다시 연결하려면 새 연결 코드가 필요해요." : view.Phase == HostViewPhase.Stopping ? "이번 연결의 권한을 종료하고 있어요. 정리가 끝나면 새 코드를 만들 수 있어요." : "연결은 허용됐어요. 인코더와 전송 준비가 끝날 때까지 잠시 기다려주세요.";
+            stateDescription.Text = view.Phase == HostViewPhase.Failed ? view.Status : view.Phase == HostViewPhase.Stopped ? "이전 연결의 권한은 끝났어요.\r\n공유를 시작하면 새 연결 코드가 만들어져요." : idle ? "공유를 시작하면 연결 코드가 만들어져요.\r\nMac에서 코드를 확인한 뒤 이 PC에서 연결을 허용해주세요." : view.Phase == HostViewPhase.Invitation ? "Mac의 Knot Native Preview에 붙여 넣으세요.\r\n연결 코드는 2분 동안 한 번만 사용할 수 있어요." : view.Phase == HostViewPhase.Request ? "직접 연결을 요청한 Mac인지 이름과 주소를 확인해주세요." : view.Phase == HostViewPhase.Sharing ? "이 PC의 화면과 입력이 공유 중이에요.\r\n등록한 Mac은 저장한 PC로 다시 연결할 수 있어요." : view.Phase == HostViewPhase.Stopping ? "이번 연결의 권한을 종료하고 있어요. 정리가 끝나면 새 코드를 만들 수 있어요." : "연결은 허용됐어요. 인코더와 전송 준비가 끝날 때까지 잠시 기다려주세요.";
             if (view.EnrollmentMode)
             {
                 if (idle)
@@ -732,6 +750,7 @@ namespace Knot.NativePreview
         {
             AdapterChoice selected = addresses.SelectedItem as AdapterChoice;
             if (server != null || selected == null) return;
+            shareRequested = true;
             try
             {
                 HostServer run = new HostServer(selected.Address, 48631, new WindowsMediaFactory(SelectedQuality), new WindowsInputSink(), false, null,
@@ -782,9 +801,11 @@ namespace Knot.NativePreview
                     OnUi(delegate
                     {
                         if (server != run) return;
+                        bool resume = !closing && shareRequested && run.MayResumeRegisteredConnection;
                         presentation.Clear(run.Identity); run.Dispose(); server = null; lifecycleTimer.Stop();
                         phase = HostViewPhase.Stopped; invitationAvailable = false;
                         ApplyCurrentPresentation();
+                        if (resume) StartShare();
                     });
                 };
                 rawStatus = run.UsesEnrollment ? EnrollmentGuidance.Ready : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";
@@ -816,10 +837,42 @@ namespace Knot.NativePreview
         }
         private void StopShare()
         {
+            shareRequested = false;
             if (server != null) { presentation.Clear(server.Identity); server.Stop(); phase = HostViewPhase.Stopping; }
             invitationAvailable = false;
             rawStatus = "화면 공유를 중지했어요. 이번 연결의 입력 해제를 요청했어요.";
             ApplyCurrentPresentation();
+        }
+        private void UpdateUpdaterPresentation()
+        {
+            if (updates == null || closing) return;
+            updateNotice.Text = updates.Status;
+            updateAction.Text = updates.Available ? "업데이트하고 다시 열기" : "업데이트 확인";
+            updateAction.Enabled = updates.Configured && !updates.Busy;
+        }
+        private void InstallUpdate()
+        {
+            if (updates == null) return;
+            updates.Install(delegate {
+                if (server != null && (server.IsRegisteredSession || server.HasRegisteredDevices)) NativePreferences.RequestUpdateResume();
+                StopShare();
+                Close();
+            });
+        }
+        private void ManageRegisteredDevices()
+        {
+            if (fixtureMode) return;
+            try {
+                var devices = NativeTrustedDevices.List();
+                if (devices.Count == 0) { MessageBox.Show(this, "등록한 Mac이 없어요. Mac에서 ‘내 PC로 등록’을 선택하고 번호로 연결하세요.", "내 기기"); return; }
+                using (Form dialog = new Form { Text = "등록한 Mac", Width = P(460), Height = P(330), StartPosition = FormStartPosition.CenterParent }) {
+                    ListBox list = new ListBox { Dock = DockStyle.Fill }; List<string> ids = new List<string>();
+                    foreach (var item in devices) { ids.Add(item.Key); list.Items.Add(item.Value); }
+                    Button remove = new Button { Text = "선택한 Mac 등록 해제", Dock = DockStyle.Bottom, Height = P(40) };
+                    remove.Click += delegate { int selected = list.SelectedIndex; if (selected < 0) return; NativeTrustedDevices.Revoke(ids[selected]); StopShare(); ids.RemoveAt(selected); list.Items.RemoveAt(selected); };
+                    dialog.Controls.Add(list); dialog.Controls.Add(remove); dialog.ShowDialog(this);
+                }
+            } catch { MessageBox.Show(this, "등록 기기를 읽거나 변경하지 못했어요.", "내 기기"); }
         }
     }
 }

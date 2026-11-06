@@ -132,7 +132,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
         window?.isKeyWindow == true && window?.firstResponder === self && NSApp.isActive
     }
     private var acceptsInput: Bool {
-        !inputSuspended && !fileDragInProgress && focusedForInput && model?.phase == .streaming && model?.inputRecovery == false
+        !inputSuspended && !fileDragInProgress && model?.clipboard?.busy != true && focusedForInput && model?.phase == .streaming && model?.inputRecovery == false
     }
     override func resignFirstResponder() -> Bool { model?.releaseInput(); return super.resignFirstResponder() }
     private func pointer(_ event: NSEvent, action: UInt8) {
@@ -237,7 +237,28 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
     override func scrollWheel(with event: NSEvent) {
         if let packet = Input.scroll(vertical: event.scrollingDeltaY, horizontal: event.scrollingDeltaX, precise: event.hasPreciseScrollingDeltas) { model?.send(packet) }
     }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Intercept only a focused remote presenter's Command edits. App-wide
+        // shortcuts and macOS Spaces remain owned by their normal responders.
+        let flags = Self.modifiers(event.modifierFlags)
+        guard acceptsInput, model?.macShortcuts == true, flags.contains(.command),
+              !flags.contains(.control), !flags.contains(.option),
+              [UInt16(0), 6, 7, 8, 9, 1, 3, 5, 45, 13, 15].contains(event.keyCode) else {
+            return super.performKeyEquivalent(with: event)
+        }
+        keyDown(with: event); return true
+    }
     override func keyDown(with event: NSEvent) {
+        let flags = Self.modifiers(event.modifierFlags)
+        if acceptsInput, model?.macShortcuts == true, flags == .command,
+           heldButtons.isEmpty, let clipboard = model?.clipboard,
+           event.keyCode == 8 || event.keyCode == 9 {
+            // The host performs an owned release + temporary Ctrl+C/V. Local
+            // modifiers are forgotten so later flags/keys cannot retain them.
+            forgetHeldKeys()
+            if event.keyCode == 8 { clipboard.copyFromRemote() } else { clipboard.pasteToRemote() }
+            return
+        }
         let route = MacKeyboardRouting.route(keyCode: event.keyCode, modifiers: Self.modifiers(event.modifierFlags),
             textMode: model?.textMode == true, hasMarkedText: hasMarkedText(), ownsPhysicalDown: physicalKeys.owns(event.keyCode))
         switch route {
@@ -306,7 +327,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
         return value
     }
     private func synchronizeModifiers(_ flags: NSEvent.ModifierFlags, physicalCommand: Bool) {
-        let desired = localModifiers.desired(flags: Self.modifiers(flags), textMode: model?.textMode == true, physicalCommand: physicalCommand)
+        let desired = localModifiers.desired(flags: Self.modifiers(flags), textMode: model?.textMode == true, physicalCommand: physicalCommand, macShortcuts: model?.macShortcuts == true)
         for code in heldModifiers.subtracting(desired).sorted() {
             guard let mapping = WindowsScanCodes.map[code] else { continue }
             _ = physicalKeys.release(code); heldModifiers.remove(code)

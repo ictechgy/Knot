@@ -123,3 +123,14 @@ extern "C" KN_MEDIA_API void KN_MEDIA_CALL kn_media_close(void* opaque) {
     auto* session = static_cast<Session*>(opaque);
     if (session && session->owner == GetCurrentThreadId()) delete session;
 }
+
+extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_set_quality(void* opaque, uint32_t fps, uint32_t bitrate) {
+    auto* session = static_cast<Session*>(opaque);
+    if (!session || session->owner != GetCurrentThreadId() || fps < 1 || fps > session->config.fps ||
+        bitrate < 1000000U || bitrate > session->config.bitrate) return KN_MEDIA_INVALID_ARGUMENT;
+    try {
+        if (FAILED(session->encoder.SetBitrate(bitrate))) return KN_MEDIA_ERROR;
+        session->pacer.SetFps(fps);
+        return KN_MEDIA_SAMPLE;
+    } catch (...) { return KN_MEDIA_ERROR; }
+}

@@ -53,8 +53,19 @@ public struct InputBuffer: Sendable {
     public var count: Int { queue.count }
     public init() {}
     public mutating func append(_ packet: Packet) throws {
-        guard !needsRecovery else { throw NativeFailure.saturated }
-        guard [.key, .text, .pointer, .wheel, .explorerDrag].contains(packet.kind) else { throw NativeFailure.malformed }
+        guard !needsRecovery || [.clipboardRequest, .qualityPreference, .qualityFeedback].contains(packet.kind) else { throw NativeFailure.saturated }
+        guard [.key, .text, .pointer, .wheel, .explorerDrag, .clipboardRequest, .qualityPreference, .qualityFeedback].contains(packet.kind) else { throw NativeFailure.malformed }
+        if packet.kind == .clipboardRequest {
+            try ClipboardProtocol.validateRequest(packet.payload)
+            guard !queue.contains(where: { $0.kind == .clipboardRequest }), queue.count < 256,
+                  byteCount + packet.wireByteCount <= ClipboardProtocol.maximumTextBytes + 17 + 5 + 16_384 else {
+                throw NativeFailure.saturated
+            }
+            queue.append(packet); byteCount += packet.wireByteCount; return
+        }
+        if packet.kind == .qualityPreference || packet.kind == .qualityFeedback {
+            guard packet.payload.count == 1, packet.payload.first! <= (packet.kind == .qualityPreference ? 2 : 1) else { throw NativeFailure.malformed }
+        }
         if packet.kind == .explorerDrag, packet.payload.count != 16 { throw NativeFailure.malformed }
         if packet.kind == .wheel {
             guard packet.payload.count == 8 else { throw NativeFailure.malformed }
@@ -69,10 +80,10 @@ public struct InputBuffer: Sendable {
                 func sameDirection(_ a: Int32, _ b: Int32) -> Bool { a == 0 || b == 0 || a.signum() == b.signum() }
                 if sameDirection(previousVertical, vertical), sameDirection(previousHorizontal, horizontal),
                    (-1200...1200).contains(combinedVertical), (-1200...1200).contains(combinedHorizontal) {
-                    byteCount -= last.encoded.count; queue.removeLast()
+                    byteCount -= last.wireByteCount; queue.removeLast()
                     if combinedVertical != 0 || combinedHorizontal != 0 {
                         let combined = try Input.wheel(vertical: combinedVertical, horizontal: combinedHorizontal)
-                        queue.append(combined); byteCount += combined.encoded.count
+                        queue.append(combined); byteCount += combined.wireByteCount
                     }
                     return
                 }
@@ -80,13 +91,14 @@ public struct InputBuffer: Sendable {
         }
         if packet.kind == .pointer, packet.payload.first == 0,
            let last = queue.last, last.kind == .pointer, last.payload.first == 0 {
-            byteCount -= last.encoded.count; queue.removeLast()
+            byteCount -= last.wireByteCount; queue.removeLast()
         }
-        guard queue.count < 256, byteCount + packet.encoded.count <= 16_384 else { revoke(); throw NativeFailure.saturated }
-        queue.append(packet); byteCount += packet.encoded.count
+        let ordinaryBytes = byteCount - queue.filter { $0.kind == .clipboardRequest }.reduce(0) { $0 + $1.wireByteCount }
+        guard queue.count < 256, ordinaryBytes + packet.wireByteCount <= 16_384 else { revoke(); throw NativeFailure.saturated }
+        queue.append(packet); byteCount += packet.wireByteCount
     }
     public mutating func pop() -> Packet? {
-        guard !queue.isEmpty else { return nil }; let packet = queue.removeFirst(); byteCount -= packet.encoded.count; return packet
+        guard !queue.isEmpty else { return nil }; let packet = queue.removeFirst(); byteCount -= packet.wireByteCount; return packet
     }
     public mutating func revoke() { queue = [Packet(kind: .releaseAll)]; byteCount = 5; needsRecovery = true }
     /// Only an explicit focus/click recovery may re-admit input; release remains first in line.

@@ -11,6 +11,7 @@ struct NativeTarget: Equatable {
 
 struct PreviewWindow: View {
     @ObservedObject var model: SessionModel
+    var updates: NativeUpdateModel?
     // Only the separately compiled synthetic renderer supplies these values.
     var simulatedDesktop: AnyView? = nil
     var simulatedFullscreen: Bool? = nil
@@ -27,8 +28,9 @@ struct PreviewWindow: View {
     @FocusState private var codeFocused: Bool
     @State private var activeTarget: NativeTarget?
 
-    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false) {
+    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false, updates: NativeUpdateModel? = nil) {
         self.model = model
+        self.updates = updates
         _windowState = StateObject(wrappedValue: windowState ?? NativeWindowState())
         _enrollment = StateObject(wrappedValue: enrollment ?? EnrollmentModel())
         _showingAlternatives = State(initialValue: initialManualAddress)
@@ -98,8 +100,8 @@ struct PreviewWindow: View {
             sidebarButton("연결 안내", symbol: "questionmark.circle", selected: showingHelp) { showingHelp = true }
             Spacer()
             VStack(alignment: .leading, spacing: 10) {
-                Label("이번 연결만 허용", systemImage: "clock").font(.system(size: 12, weight: .medium))
-                Text("연결 기록과 페어링을\n이 Mac에 저장하지 않아요.")
+                Label("내 기기는 한 번 등록", systemImage: "lock.shield").font(.system(size: 12, weight: .medium))
+                Text("등록은 직접 선택해요.\n저장한 기기는 언제든 해제해요.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
                 Divider().padding(.vertical, 5)
                 Text("컴퓨터를 잇다.\n작업을 이어가다.")
@@ -135,6 +137,7 @@ struct PreviewWindow: View {
                     tint: model.phase == .failed || enrollment.phase == .failed ? .orange : .secondary)
             }
             if model.phase == .failed || model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters." { failurePanel }
+            if !model.savedDevices.isEmpty { savedDevicesCard }
             if let target = reviewedTarget { targetCard(target) }
             else {
                 connectionProgress
@@ -150,12 +153,29 @@ struct PreviewWindow: View {
                         .accessibilityLabel("Windows에 표시할 Mac 이름")
                     Text("이 이름은 연결 요청의 참고 정보예요. 확인된 기기 신원을 뜻하지 않아요.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Toggle("등록 기기의 일시적인 끊김 자동 복구", isOn: $model.autoReconnect)
+                    Text("빠른 화면 전환 · Control+Option+Command+B").font(.system(size: 12)).foregroundStyle(.secondary)
+                    if let updates { NativeUpdatesView(updates: updates, beforeExit: { model.prepareForUpdate() }) }
                 }.padding(.top, 12)
             } label: { Label("연결 설정 · 내 Mac 이름", systemImage: "laptopcomputer").font(.system(size: 13)) }
                 .disabled(enrollment.busy).padding(16).nativePanel()
             Text("미리보기 · Windows 11 SDR 기본 화면 → Apple Silicon Mac")
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
+    }
+
+    private var savedDevicesCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("내 PC", systemImage: "desktopcomputer").font(.headline)
+            ForEach(model.savedDevices) { device in
+                HStack {
+                    VStack(alignment: .leading) { Text(device.name); Text(device.address).font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                    Button("연결") { enrollment.cancel(); model.connectSaved(device.id) }.buttonStyle(.borderedProminent)
+                    Button("등록 해제") { model.forgetSaved(device.id) }
+                }
+            }
+        }.padding(20).nativePanel()
     }
 
     private var connectionStep: Int {
@@ -279,6 +299,7 @@ struct PreviewWindow: View {
                     .accessibilityLabel("선택한 Windows에 표시된 8자리 연결 번호")
                     .focused($codeFocused).disabled(enrollment.busy).onSubmit { connectNumber() }
             }
+            Toggle("내 PC로 등록 · 다음에는 번호 없이 연결", isOn: $model.rememberThisPC).disabled(enrollment.busy)
             HStack(alignment: .center, spacing: 12) {
                 if enrollment.busy { ProgressView().controlSize(.small) }
                 Text(enrollment.phase == .failed || enrollment.busy ? enrollment.status : "번호는 2분 동안 한 번만 사용할 수 있어요.")
@@ -336,6 +357,7 @@ struct PreviewWindow: View {
         enrollment.connect(name: model.viewerLabel) { result in
             guard !model.active else { return }
             let value = result.offer.invitation
+            model.savedDeviceLabel = enrollment.selected?.name ?? "Windows PC"
             activeTarget = NativeTarget(address: value.address, port: value.port, pin: value.certificateSHA256)
             model.connectAuthenticated(result)
         }
@@ -436,8 +458,8 @@ struct PreviewWindow: View {
                 Label("이번 미리보기에서", systemImage: "info.circle").font(.system(size: 15, weight: .semibold))
                 Text("로그인된 Windows 11의 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요. Mac은 Apple Silicon · macOS 26 이상을 지원해요.")
                 Text("연결 중 ‘파일’에서 파일·폴더를 주고받으세요. Finder 항목을 원격 화면에 놓으면 Windows 공유 폴더로 복사돼요. Windows 탐색기 항목은 버튼을 누른 채 화면 밖 Finder로 끌어오세요. Mac 쪽 아이콘이 나타난 뒤 놓으면 돼요. 목록의 ‘받기’도 사용할 수 있어요. 원본과 기존 파일은 유지하며 앱 패키지·링크·클립보드 동기화는 지원하지 않아요.")
-                Text("오디오·무모니터·잠금/UAC 화면·HDR·다중 모니터·자동 재연결/업데이트는 아직 지원하지 않아요.")
-                Text("8자리 번호는 2분·1회용이며 실패 횟수가 제한돼요. 종료 후에는 Windows에서 공유를 다시 시작해주세요. 번호와 페어링은 저장하지 않아요. 긴 연결 코드는 호환 모드로 남아 있고, 그 경로는 지문 확인과 Windows의 별도 승인이 필요해요.")
+                Text("오디오·무모니터·잠금/UAC 화면·HDR·다중 모니터는 아직 지원하지 않아요. 자동 업데이트는 서명된 공개 배포 피드 구성 후 사용할 수 있어요.")
+                Text("8자리 번호는 2분·1회용이며 실패 횟수가 제한돼요. 내 PC로 등록하면 키체인에 기기 자격 증명을 저장하고 다음에는 새 인증으로 접속해요. 등록하지 않은 기기는 새 번호가 필요해요. 긴 코드는 지문 확인과 Windows의 별도 승인이 필요한 호환 모드예요.")
                 Text("기본 Mac 입력기로 한글·영문을 입력해요. 한/영 전환은 Caps Lock 등 이 Mac에 설정된 키를 그대로 사용하세요. 일반적인 Windows 복사·붙여넣기는 Control+C/V를 사용해요. 물리 키 입력에서 Command는 Windows 키에 해당해요.")
             }.font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(22).nativePanel()
@@ -511,7 +533,7 @@ struct PreviewWindow: View {
                     } else {
                         VStack(alignment: .leading, spacing: 16) {
                             Label("파일 공유를 사용할 수 없어요", systemImage: "folder.badge.questionmark").font(.headline)
-                            Text("Windows에서 파일·폴더 송수신과 공유 폴더를 확인한 뒤 다시 공유해주세요. 폴더를 준비하지 못했거나 파일 공유가 꺼져 있을 수 있어요. 두 앱 모두 native.10으로 업데이트해주세요.")
+                            Text("Windows에서 파일·폴더 송수신과 공유 폴더를 확인한 뒤 다시 공유해주세요. 폴더를 준비하지 못했거나 파일 공유가 꺼져 있을 수 있어요. 두 앱 모두 native.11로 업데이트해주세요.")
                                 .font(.system(size: 13)).foregroundStyle(.secondary)
                             Button("닫기") { setFilesVisible(false) }
                         }.padding(24).frame(maxWidth: 440).nativePanel().padding(24)
@@ -555,6 +577,11 @@ struct PreviewWindow: View {
                 Label(model.textMode ? "Mac 입력기 · Caps Lock 한/영" : "물리 키보드", systemImage: "keyboard")
             }.menuStyle(.borderlessButton).fixedSize()
                 .onChange(of: model.textMode) { _, _ in model.releaseInput() }
+            Menu {
+                Toggle("Mac 단축키 · ⌘를 Ctrl로", isOn: $model.macShortcuts)
+                if let clipboard = model.clipboard { NativeClipboardActions(clipboard: clipboard) }
+                if let quality = model.quality { NativeQualityActions(quality: quality) }
+            } label: { Label("작업 도구", systemImage: "slider.horizontal.3") }.menuStyle(.borderlessButton).fixedSize()
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
                 Text(NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod)).font(.system(size: 12)).foregroundStyle(.secondary)

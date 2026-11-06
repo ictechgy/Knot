@@ -70,6 +70,7 @@ public:
     HRESULT Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros, uint64_t presentationMicros);
     HRESULT Receive(AccessUnit& output); // S_FALSE = no output yet
     HRESULT Drain();
+    HRESULT SetBitrate(uint32_t bitrate);
     bool Hardware() const { return hardware_; }
     uint32_t InFlight() const { return inFlight_; }
     uint32_t PeakOutputScratch() const { return peakOutputScratch_; }

@@ -20,6 +20,7 @@ inline bool DesktopImageNeedsCopy(bool havePixels, int64_t lastPresentTime,
 class CapturePacer {
 public:
     explicit CapturePacer(uint32_t fps) : periodMicros_(1000000U / fps) {}
+    void SetFps(uint32_t fps) { if (fps >= 1 && fps <= 60) periodMicros_ = 1000000U / fps; }
     void OutputObserved() { outputObserved_ = true; }
     bool PendingTimedOut(uint64_t nowMicros) const {
         return pending_ && nowMicros >= pendingSinceMicros_ && nowMicros - pendingSinceMicros_ >= 2000000U;

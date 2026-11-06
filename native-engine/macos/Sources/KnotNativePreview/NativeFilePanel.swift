@@ -173,6 +173,14 @@ struct NativeFilePanelContent: View {
                 Button(action: chooseFiles) { Label("보내기", systemImage: "square.and.arrow.up") }.buttonStyle(.borderedProminent)
             }.disabled(files.isBusy)
             Divider()
+            if files.completedItems > 0 || files.canRetryUploads || files.lastReceivedURL != nil {
+                HStack {
+                    Label("완료 \(files.completedItems)개", systemImage: "checkmark.circle").foregroundStyle(.secondary)
+                    Spacer()
+                    if files.canRetryUploads { Button("미완료 항목 재시도") { beforeAction(); files.retryUnfinishedUploads() } }
+                    if files.lastReceivedURL != nil { Button("Finder에서 보기") { beforeAction(); files.revealLastReceived() } }
+                }.font(.system(size: 12))
+            }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if files.entries.isEmpty {

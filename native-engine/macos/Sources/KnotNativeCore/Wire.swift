@@ -2,12 +2,13 @@ import Foundation
 
 public enum Kind: UInt8, Sendable {
     case hello = 1, ready = 2, video = 3, hostHeartbeat = 4
-    case key = 0x20, text = 0x21, pointer = 0x22, wheel = 0x23, releaseAll = 0x24, heartbeat = 0x25, explorerDrag = 0x26, error = 0x7f
+    case key = 0x20, text = 0x21, pointer = 0x22, wheel = 0x23, releaseAll = 0x24, heartbeat = 0x25, explorerDrag = 0x26, clipboardRequest = 0x30, clipboardResponse = 0x31, qualityPreference = 0x32, qualityFeedback = 0x33, qualityStatus = 0x34, error = 0x7f
 }
 public struct Packet: Sendable, Equatable {
     public let kind: Kind
     public let payload: Data
     public init(kind: Kind, payload: Data = Data()) { self.kind = kind; self.payload = payload }
+    public var wireByteCount: Int { payload.count + 5 }
     public var encoded: Data {
         var bytes = Data([kind.rawValue]); bytes.appendBE(UInt32(payload.count)); bytes.append(payload); return bytes
     }
@@ -18,6 +19,8 @@ public struct Packet: Sendable, Equatable {
         case .ready: guard (1...4096).contains(size) else { throw NativeFailure.oversized }
         case .video: guard (18...4_194_304).contains(size) else { throw NativeFailure.oversized }
         case .hostHeartbeat: guard size == 0 else { throw NativeFailure.malformed }
+        case .qualityStatus: guard size == 9 else { throw NativeFailure.malformed }
+        case .clipboardResponse: guard (18...ClipboardProtocol.maximumTextBytes + 18).contains(size) else { throw NativeFailure.oversized }
         case .error: guard (1...128).contains(size) else { throw NativeFailure.oversized }
         default: throw NativeFailure.malformed
         }
@@ -38,15 +41,34 @@ public enum VideoLimits {
 public struct Ready: Sendable, Equatable {
     public let width: Int, height: Int, fps: Int, bitrate: Int
     public let files: NativeFileOffer?
+    public let clipboardVersion: Int
+    public let qualityVersion: Int
+    public let trustedVersion: Int
     public init(_ bytes: Data) throws {
         let base: Set<String> = ["v", "codec", "width", "height", "fps", "bitrate", "hardwareEncoder"]
-        let json: [String: JSONValue]
-        if let old = try? StrictJSON.object(bytes, keys: base, limit: 4096) { json = old; files = nil }
-        else {
-            json = try StrictJSON.object(bytes, keys: base.union(["filesVersion", "filePort", "fileToken", "fileRootName"]), limit: 4096)
+        let fileKeys: Set<String> = ["filesVersion", "filePort", "fileToken", "fileRootName"]
+        let extensions: [String] = ["clipboardVersion", "qualityVersion", "trustedVersion"]
+        var parsed: [String: JSONValue]?
+        // Only these complete schemas are accepted; unknown/partial features fail closed.
+        for mask in 0..<8 {
+            let featureKeys = Set(extensions.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil })
+            for files in [false, true] {
+                let keys = base.union(featureKeys).union(files ? fileKeys : [])
+                if let candidate = try? StrictJSON.object(bytes, keys: keys, limit: 4096) { parsed = candidate }
+            }
+        }
+        guard let json = parsed else { throw NativeFailure.malformed }
+        if json["filesVersion"] != nil {
             guard try json.integer("filesVersion") == 2 else { throw NativeFailure.unsupported }
             files = try NativeFileOffer(port: json.integer("filePort"), token: json.string("fileToken"), rootName: json.string("fileRootName"))
+        } else { files = nil }
+        func version(_ key: String) throws -> Int {
+            guard json[key] != nil else { return 0 }
+            guard try json.integer(key) == 1 else { throw NativeFailure.unsupported }; return 1
         }
+        clipboardVersion = try version("clipboardVersion")
+        qualityVersion = try version("qualityVersion")
+        trustedVersion = try version("trustedVersion")
         let width = try json.integer("width"), height = try json.integer("height")
         let fps = try json.integer("fps"), bitrate = try json.integer("bitrate")
         guard try json.integer("v") == 1, try json.string("codec") == "h264-annexb", try json.boolean("hardwareEncoder"),
@@ -78,6 +100,14 @@ public struct ReceiveState: Sendable {
         case .ready: guard ready == nil else { throw NativeFailure.state }; ready = try Ready(packet.payload)
         case .video: guard ready != nil else { throw NativeFailure.state }; let video = try VideoPacket(packet.payload, after: sequence); sequence = video.sequence; return video
         case .hostHeartbeat: guard packet.payload.isEmpty else { throw NativeFailure.malformed }
+        case .qualityStatus:
+            guard ready?.qualityVersion == 1, packet.payload.count == 9,
+                  (1...60).contains(packet.payload.readBE(UInt32.self, at: 0)),
+                  (1_000_000...40_000_000).contains(packet.payload.readBE(UInt32.self, at: 4)),
+                  packet.payload.last! <= 1 else { throw NativeFailure.malformed }
+        case .clipboardResponse:
+            guard ready?.clipboardVersion == 1 else { throw NativeFailure.state }
+            _ = try ClipboardResponse(packet.payload)
         case .error:
             let value = try StrictJSON.object(packet.payload, keys: ["code"], limit: 128).string("code")
             guard ["auth", "expired", "declined", "busy", "capture", "encoder", "input", "protocol", "timeout", "closed"].contains(value) else { throw NativeFailure.malformed }

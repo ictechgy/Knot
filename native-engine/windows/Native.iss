@@ -38,6 +38,8 @@ SolidCompression=yes
 DisableProgramGroupPage=yes
 CloseApplications=yes
 RestartApplications=no
+; Update handoff waits for the old process and launches the installed version.
+; It stores trust/preferences outside {app}; this installer never deletes those.
 [Files]
 Source: "{#NativeOutput}\Knot-Native-Preview.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#NativeOutput}\KnotNativeMedia.dll"; DestDir: "{app}"; Flags: ignoreversion

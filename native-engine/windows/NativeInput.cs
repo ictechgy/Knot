@@ -93,6 +93,25 @@ namespace Knot.NativePreview
                 }
             }
         }
+        // Explicit clipboard gestures own a short atomic shortcut. No queued
+        // worker may retain keys after cancellation or a partial SendInput.
+        internal void ClipboardShortcut(byte operation)
+        {
+            lock (gate)
+            {
+                if (closed || operation < 1 || operation > 2) throw new ProtocolException("input");
+                if (!CancelExplorerGesture() || !Release()) throw new ProtocolException("input");
+                ushort scan = operation == 1 ? (ushort)0x2e : (ushort)0x2f;
+                try
+                {
+                    Accept(new Packet(0x20, new byte[] { 1, 0, 0x1d, 0 }));
+                    Accept(new Packet(0x20, new byte[] { 1, 0, (byte)scan, 0 }));
+                    Accept(new Packet(0x20, new byte[] { 0, 0, (byte)scan, 0 }));
+                    Accept(new Packet(0x20, new byte[] { 0, 0, 0x1d, 0 }));
+                }
+                finally { if (!Release()) throw new ProtocolException("input"); }
+            }
+        }
         private bool Release()
         {
             // Failed releases remain owned and are retried on session teardown.

@@ -1,6 +1,12 @@
 #include "media_internal.h"
 
 namespace knot {
+HRESULT Encoder::SetBitrate(uint32_t bitrate) {
+    if (bitrate < 1000000U || bitrate > 40000000U || !codec_) return E_INVALIDARG;
+    const HRESULT result = SetUInt(CODECAPI_AVEncCommonMeanBitRate, bitrate, true);
+    if (SUCCEEDED(result)) config_.bitrate = bitrate;
+    return result;
+}
 namespace {
 struct Activations {
     IMFActivate** values = nullptr;

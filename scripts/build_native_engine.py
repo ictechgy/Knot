@@ -20,9 +20,10 @@ from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True
 from build_snapshot import source_snapshot, validate_corresponding_source
+from native_updates import build_resource as native_update_resource
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.10"
+VERSION = "0.1.0-native.11"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -666,6 +667,9 @@ class Builder:
         shutil.copy2(self.input(ROOT / "Assets/Brand/AppIcon.icns"), resources / "AppIcon.icns")
         shutil.copy2(self.input(ROOT / "LICENSE"), resources / "LICENSE")
         shutil.copy2(self.output / "KnotNativePairing-LICENSE.txt", resources / "KnotNativePairing-LICENSE.txt")
+        self.input(ROOT / "scripts/native_updates.py")
+        self.input(ROOT / "packaging/updates/native-publisher.json")
+        (resources / "NativeUpdateConfig.txt").write_text(native_update_resource(ROOT, VERSION), encoding="utf-8")
         info = {"CFBundleExecutable": "KnotNativePreview", "CFBundleIdentifier": "org.knot.native-preview",
                 "CFBundleName": "Knot Native Preview", "CFBundleDisplayName": "Knot Native Preview",
                 "CFBundlePackageType": "APPL", "CFBundleVersion": PREVIEW_BUILD, "CFBundleShortVersionString": VERSION_BASE,
@@ -737,6 +741,11 @@ class Builder:
             raise ValueError(".NET Framework 4.8 x64 compiler/reference assemblies required")
         argv = [compiler, "/nologo", "/noconfig", "/nostdlib+", "/langversion:5", "/platform:x64",
                 "/optimize+", "/target:" + target, "/main:" + main, "/out:" + str(self.output / (label + ".exe"))]
+        self.input(ROOT / "scripts/native_updates.py")
+        self.input(ROOT / "packaging/updates/native-publisher.json")
+        update_config = self.output / "native-update-config.txt"
+        update_config.write_text(native_update_resource(ROOT, VERSION), encoding="utf-8")
+        argv.append("/resource:" + str(update_config) + ",KnotNativeUpdateConfig")
         for name in ["mscorlib", "System", "System.Core", "System.Security", "System.Drawing", "System.Windows.Forms"]:
             argv.append("/reference:" + str(refs / (name + ".dll")))
         if target == "winexe":

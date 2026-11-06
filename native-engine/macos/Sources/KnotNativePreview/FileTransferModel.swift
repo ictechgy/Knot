@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import KnotNativeCore
+import AppKit
 
 @MainActor
 final class FileTransferModel: ObservableObject {
@@ -11,6 +12,12 @@ final class FileTransferModel: ObservableObject {
     @Published private(set) var progress: Double?
     @Published private(set) var currentName: String?
     @Published private(set) var truncated: Bool
+    @Published private(set) var unfinishedUploads: [URL] = []
+    @Published private(set) var lastReceivedURL: URL?
+    @Published private(set) var completedItems = 0
+    var canRetryUploads: Bool { !isBusy && client != nil && !unfinishedUploads.isEmpty }
+    func retryUnfinishedUploads() { guard canRetryUploads else { return }; send(urls: unfinishedUploads) }
+    func revealLastReceived() { if let lastReceivedURL { NSWorkspace.shared.activateFileViewerSelecting([lastReceivedURL]) } }
     private var client: (any NativeFileWorking)?
     private let gate: FileRunGate
     private var work: Task<Void, Never>?
@@ -93,6 +100,7 @@ final class FileTransferModel: ObservableObject {
         do {
             let (id, operation, client) = try begin()
             status = "Windows의 ‘\(rootName)’ 폴더로 보내고 있어요…"
+            unfinishedUploads = urls
             work = Task { [weak self, gate] in
                 defer { gate.end(operation) }
                 var sent = 0
@@ -104,6 +112,8 @@ final class FileTransferModel: ObservableObject {
                             await self?.record(bytes: bytes, total: total, id: id)
                         }
                         sent += 1
+                        guard self.generation == id, !Task.isCancelled else { return }
+                        self.unfinishedUploads = Array(urls.dropFirst(sent)); self.completedItems += 1
                     }
                     guard let self, self.generation == id, !Task.isCancelled else { return }
                     // This is the explicit send action's final list refresh,
@@ -234,6 +244,7 @@ final class FileTransferModel: ObservableObject {
             let saved = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel(); self.gate.cancel(operation) }
             guard generation == id, !Task.isCancelled else { throw NativeFileError.closed }
             finish(id, status: "‘\(saved.lastPathComponent)’ 항목을 Mac에 받았어요. 원본은 유지돼요.")
+            lastReceivedURL = saved; completedItems += 1
             return saved
         } catch { failed(id, error); throw error }
     }
@@ -262,6 +273,7 @@ final class FileTransferModel: ObservableObject {
         isBusy = false; progress = nil; currentName = nil; status = NativeFileError.cancelled.message
     }
     func close() {
+        unfinishedUploads = []; lastReceivedURL = nil
         lifetime = UUID(); exports = [:]; exportNonces = [:]
         for task in queuedReceives.values { task.cancel() }
         queuedReceives = [:]; receiveTail = nil

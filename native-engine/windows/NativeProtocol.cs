@@ -201,7 +201,7 @@ namespace Knot.NativePreview
             bool valid = hello ? kind == 1 && length >= 1 && length <= 4096 :
                 kind == 0x20 && length == 4 || kind == 0x21 && length >= 1 && length <= 1024 ||
                 kind == 0x22 && length == 5 || kind == 0x23 && length == 8 || (kind == 0x24 || kind == 0x25) && length == 0 ||
-                kind == 0x26 && length == 16;
+                kind == 0x26 && length == 16 || (kind == 0x32 || kind == 0x33) && length == 1 || kind == 0x30 && length >= 17 && length <= ClipboardProtocol.MaximumTextBytes + 17;
             if (!valid) throw new ProtocolException("protocol");
             return new Packet(kind, ReadExactly(stream, (int)length));
         }
@@ -223,7 +223,7 @@ namespace Knot.NativePreview
         }
         internal static void Write(Stream stream, byte kind, byte[] bytes, int count)
         {
-            int cap = kind == 2 ? 4096 : kind == 3 ? VideoLimit : kind == 4 ? 0 : kind == 127 ? 128 : -1;
+            int cap = kind == 2 ? 4096 : kind == 3 ? VideoLimit : kind == 4 ? 0 : kind == 0x34 ? 9 : kind == 0x31 ? ClipboardProtocol.MaximumTextBytes + 18 : kind == 127 ? 128 : -1;
             if (cap < 0 || bytes == null || count < 0 || count > bytes.Length || count > cap || (kind != 4 && count == 0))
                 throw new ProtocolException("protocol");
             byte[] header = new byte[5]; header[0] = kind; Put32(header, 1, (uint)count);

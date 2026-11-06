@@ -13,6 +13,20 @@ final class SessionModel: ObservableObject {
     @Published var videoSize = CGSize(width: 1920, height: 1080)
     @Published var inputRecovery = false
     @Published var textMode = true
+    @Published var macShortcuts = true
+    @Published var rememberThisPC = false
+    @Published var savedDeviceLabel = "Windows PC"
+    @Published var autoReconnect = true
+    @Published private(set) var savedDevices: [SavedNativeDevice] = []
+    @Published private(set) var clipboard: ClipboardModel?
+    @Published private(set) var quality: QualityModel?
+    private var selectedTrustedDevice: SavedNativeDevice?
+    private var pendingRegistration: Invitation?
+    private var trustedClient: NativeTrustedClient?
+    private var trustedTask: Task<Void, Never>?
+    private var registrationTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
     @Published var showFullscreenControls = false
     @Published private(set) var numberAuthorized = false
     @Published private(set) var files: FileTransferModel?
@@ -53,8 +67,115 @@ final class SessionModel: ObservableObject {
         self.waitForInputDeadline = waitForInputDeadline
     }
 
+    func prepareForUpdate() {
+        if autoReconnect, let device = selectedTrustedDevice {
+            let preferences = UserDefaults(suiteName: "io.knot.native-preview")
+            preferences?.set(device.id, forKey: "updateResumeDevice")
+            preferences?.set(Date().addingTimeInterval(300).timeIntervalSince1970, forKey: "updateResumeExpiry")
+        }
+        disconnect()
+    }
+    func resumeAfterUpdateIfRequested() {
+        let preferences = UserDefaults(suiteName: "io.knot.native-preview")
+        let id = preferences?.string(forKey: "updateResumeDevice")
+        let expiry = preferences?.double(forKey: "updateResumeExpiry") ?? 0
+        preferences?.removeObject(forKey: "updateResumeDevice")
+        preferences?.removeObject(forKey: "updateResumeExpiry")
+        guard autoReconnect, let id, expiry > Date().timeIntervalSince1970,
+              expiry <= Date().addingTimeInterval(300).timeIntervalSince1970 else { return }
+        connectSaved(id)
+    }
+    func refreshSavedDevices() {
+        do { savedDevices = try NativeDeviceKeychain.load() }
+        catch { status = "등록된 PC를 읽지 못했어요. 키체인 접근을 확인하세요." }
+    }
+    func connectSaved(_ id: String) {
+        guard !active, let device = savedDevices.first(where: { $0.id == id }) else { return }
+        reconnectTask?.cancel(); reconnectTask = nil; reconnectAttempt = 0
+        selectedTrustedDevice = device; pendingRegistration = nil
+        beginTrustedConnection(device)
+    }
+    private func beginTrustedConnection(_ device: SavedNativeDevice) {
+        guard !active else { return }
+        let id = UUID(); identity = id; phase = .connecting
+        status = "등록된 PC의 인증서를 확인하고 있어요…"
+        do {
+            let client = try NativeTrustedClient(device: device, viewerName: viewerLabel); trustedClient = client
+            trustedTask = Task { [weak self] in
+                do {
+                    guard let invitation = try await client.connect() else { throw NativeFailure.trust }
+                    guard let self, self.identity == id, !Task.isCancelled else { return }
+                    self.trustedClient = nil; self.trustedTask = nil
+                    self.invitation = invitation; self.numberAuthorized = true; self.phase = .idle
+                    self.startConnection()
+                } catch {
+                    guard let self, self.identity == id, !Task.isCancelled else { return }
+                    self.close(message: "등록된 PC에 연결하지 못했어요. Windows에서 공유 중인지 확인하세요.", failed: true)
+                    self.scheduleReconnect(device)
+                }
+            }
+        } catch { close(message: "등록된 PC 정보를 확인하지 못했어요. 다시 등록해주세요.", failed: true) }
+    }
+    func forgetSaved(_ id: String) {
+        guard let device = savedDevices.first(where: { $0.id == id }) else { return }
+        // The local credential is removed even when the host is offline. The
+        // Windows device list offers independent, immediate server revocation.
+        do { try NativeDeviceKeychain.remove(id); savedDevices.removeAll { $0.id == id } }
+        catch { status = "키체인에서 PC 등록을 해제하지 못했어요."; return }
+        if selectedTrustedDevice?.id == id { disconnect() }
+        Task { [weak self, viewerLabel] in
+            if let client = try? NativeTrustedClient(device: device, viewerName: viewerLabel) {
+                _ = try? await client.connect(revoke: true)
+            }
+            if self?.selectedTrustedDevice?.id == id { self?.disconnect() }
+        }
+    }
+    private func registerConnectedDevice(_ invitation: Invitation) {
+        guard rememberThisPC, numberAuthorized, selectedTrustedDevice == nil else { return }
+        pendingRegistration = nil
+        do {
+            let existing = try NativeDeviceKeychain.load().first { $0.certificateSHA256 == invitation.certificateSHA256 && $0.address == invitation.address }
+            let device = try existing ?? NativeTrustedClient.newDevice(invitation: invitation, name: savedDeviceLabel)
+            let client = try NativeTrustedClient(device: device, viewerName: viewerLabel)
+            let run = identity
+            registrationTask = Task { [weak self] in
+                do {
+                    try await client.register(invitation: invitation)
+                    guard let self, self.identity == run, !Task.isCancelled else { return }
+                    var devices = try NativeDeviceKeychain.load()
+                    devices.removeAll { $0.id == device.id }
+                    guard devices.count < 16 else { throw NativeFailure.state }
+                    devices.append(device); try NativeDeviceKeychain.save(devices)
+                    self.savedDevices = devices; self.selectedTrustedDevice = device; self.registrationTask = nil
+                    self.updateStreamingStatus()
+                } catch {
+                    guard let self, self.identity == run, !Task.isCancelled else { return }
+                    self.status = "화면은 연결됐지만 PC 등록을 저장하지 못했어요. Windows의 등록 기기를 확인해주세요."
+                    self.registrationTask = nil
+                }
+            }
+        } catch { status = "PC 등록을 준비하지 못했어요. 화면 연결은 계속돼요." }
+    }
+    private func scheduleReconnect(_ device: SavedNativeDevice) {
+        guard autoReconnect, !active, selectedTrustedDevice?.id == device.id, reconnectAttempt < 6 else { return }
+        let delays: [Int64] = [1, 2, 4, 8, 16, 30]
+        let delay = delays[reconnectAttempt]; reconnectAttempt += 1
+        status = "연결이 끊겼어요. \(delay)초 후 등록된 PC에 다시 연결해요 (\(reconnectAttempt)/6)."
+        let run = identity
+        reconnectTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, self.identity == run, !Task.isCancelled, !self.active, self.autoReconnect else { return }
+            self.reconnectTask = nil; self.beginTrustedConnection(device)
+        }
+    }
+    private func transportFailed() {
+        let device = selectedTrustedDevice
+        close(message: device == nil ? "Connection ended or validation failed. Ask the host for a new invitation." : "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인하세요.", failed: true)
+        if let device { scheduleReconnect(device) }
+    }
     func review(_ secret: String) {
         guard !active else { return }
+        selectedTrustedDevice = nil; pendingRegistration = nil
         reconnectMethod = .invitation
         numberAuthorized = false
         do { invitation = try Invitation(secret); phase = .idle; status = "Review the private address and exact certificate pin below. Trust lasts for this connection only." }
@@ -62,6 +183,7 @@ final class SessionModel: ObservableObject {
     }
     func connect() {
         guard !active else { return }
+        selectedTrustedDevice = nil; pendingRegistration = nil
         reconnectMethod = .invitation
         numberAuthorized = false
         startConnection()
@@ -71,12 +193,15 @@ final class SessionModel: ObservableObject {
         guard ContinuousClock.now < enrollment.expiresAt, Invitation.validViewerLabel(enrollment.viewerName) else {
             close(message: "Invitation was rejected or expired. Create a new invitation.", failed: true, numberConnection: true); return
         }
+        selectedTrustedDevice = nil; reconnectAttempt = 0
+        pendingRegistration = rememberThisPC ? enrollment.offer.invitation : nil
         invitation = enrollment.offer.invitation
         viewerLabel = enrollment.viewerName
         numberAuthorized = true
         startConnection()
     }
     private func startConnection() {
+        reconnectTask?.cancel(); reconnectTask = nil
         guard !active, let invitation else { return }
         let label = viewerLabel
         guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
@@ -107,6 +232,12 @@ final class SessionModel: ObservableObject {
                     self.lastIncoming = .now
                     switch incoming {
                     case .ready(let ready):
+                        if ready.clipboardVersion == 1 {
+                            self.clipboard = ClipboardModel(send: { [weak self] packet in self?.sendControl(packet) ?? false })
+                        }
+                        if ready.qualityVersion == 1 {
+                            self.quality = QualityModel(send: { [weak self] packet in self?.sendControl(packet) ?? false })
+                        }
                         if let offer = ready.files {
                             self.files = try FileTransferModel(invitation: invitation, offer: offer)
                         }
@@ -127,11 +258,16 @@ final class SessionModel: ObservableObject {
                     case .video(let video): try await self.decoder?.decode(video.accessUnit)
                     case .error(let code):
                         self.fail(Self.message(code)); return
+                    case .clipboard(let response): self.clipboard?.accept(response)
+                    case .quality(let response): self.quality?.accept(response)
                     case .heartbeat: break
                     }
                 }
             } catch {
-                if self.identity == id { self.fail("Connection ended or validation failed. Ask the host for a new invitation.") }
+                if self.identity == id {
+                    if (error as? NativeFailure) == .transport { self.transportFailed() }
+                    else { self.fail(self.selectedTrustedDevice == nil ? "Connection ended or validation failed. Ask the host for a new invitation." : "Connection validation failed. Check the registered PC or create a new invitation.") }
+                }
             }
         }
     }
@@ -141,7 +277,10 @@ final class SessionModel: ObservableObject {
         case .presented:
             let statusChanged = phase != .streaming || displayBehind
             presentationBackpressureSince = nil; displayBehind = false
-            if phase != .streaming { phase = .streaming }
+            if phase != .streaming {
+                phase = .streaming
+                if let pending = pendingRegistration { registerConnectedDevice(pending) }
+            }
             if statusChanged { updateStreamingStatus() }
         case .backpressure:
             let began = presentationBackpressureSince ?? now
@@ -154,7 +293,7 @@ final class SessionModel: ObservableObject {
     }
     private func updateStreamingStatus() {
         let reception = displayBehind ? "Display is behind; still receiving decoded images." : "Receiving the host desktop."
-        let value = reception + (inputRecovery ? " Input paused; click the desktop to resume." : " Temporary trust; no saved pairing.")
+        let value = reception + (inputRecovery ? " Input paused; click the desktop to resume." : (selectedTrustedDevice == nil ? " Temporary trust; no saved pairing." : " Registered device; encrypted connection."))
         if status != value { status = value }
     }
     private func presentationFailed() {
@@ -187,7 +326,7 @@ final class SessionModel: ObservableObject {
                 guard let self, self.identity == id, !Task.isCancelled else { return }
                 let now = ContinuousClock.now
                 guard self.checkDeadlines(now: now) else { return }
-                if now - self.lastHeartbeat >= .seconds(2) { self.pumpWriter() }
+                if now - self.lastHeartbeat >= .seconds(2) { self.quality?.reportPressure(self.displayBehind); self.pumpWriter() }
             }
         }
     }
@@ -203,6 +342,11 @@ final class SessionModel: ObservableObject {
             fail("The first decoded image did not arrive. Create a new invitation."); return false
         }
         return true
+    }
+    @discardableResult func sendControl(_ packet: Packet) -> Bool {
+        guard phase == .streaming, !fileUIInputSuspended else { return false }
+        do { try input.append(packet); pumpWriter(); return true }
+        catch { return false }
     }
     @discardableResult func send(_ packet: Packet) -> Bool {
         guard phase == .streaming, !inputRecovery, !fileUIInputSuspended else { return false }
@@ -244,6 +388,7 @@ final class SessionModel: ObservableObject {
         return send(packet)
     }
     func releaseInput() {
+        clipboard?.cancel()
         guard active else { return }
         inputEpoch &+= 1
         input.revoke(); inputRecovery = true; surface?.forgetHeldKeys(); pumpWriter()
@@ -288,15 +433,24 @@ final class SessionModel: ObservableObject {
                     self.nextInput = .now + .milliseconds(2) // <=500 input envelopes/second
                 }
                 if self.identity == id { self.writerBusy = false }
-            } catch { if self.identity == id { self.fail("Input transport stopped. Create a new invitation to reconnect.") } }
+            } catch { if self.identity == id { self.transportFailed() } }
         }
     }
-    func disconnect() { close(message: "Disconnected. Reconnect with a fresh invitation.", failed: false) }
+    func disconnect() {
+        let registered = selectedTrustedDevice != nil
+        reconnectTask?.cancel(); reconnectTask = nil; selectedTrustedDevice = nil; reconnectAttempt = 0
+        close(message: registered ? "연결을 종료했어요. 등록된 PC를 선택하거나 새 번호로 연결하세요." :
+            "Disconnected. Reconnect with a fresh invitation.", failed: false)
+    }
     private func fail(_ message: String) { close(message: message, failed: true) }
     private func close(message: String, failed: Bool, numberConnection: Bool? = nil) {
         if let numberConnection { reconnectMethod = numberConnection ? .number : .invitation }
         else if active { reconnectMethod = numberAuthorized ? .number : .invitation }
         identity = UUID(); inputEpoch &+= 1
+        reconnectTask?.cancel(); reconnectTask = nil
+        trustedTask?.cancel(); trustedTask = nil; trustedClient?.close(); trustedClient = nil
+        registrationTask?.cancel(); registrationTask = nil; pendingRegistration = nil
+        clipboard?.cancel(); clipboard = nil; quality = nil
         files?.close(); files = nil
         fileUIInputSuspended = false
         input = InputBuffer()

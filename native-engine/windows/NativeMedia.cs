@@ -64,7 +64,7 @@ namespace Knot.NativePreview
 
     // The owned DLL is resolved by absolute application path with dependency search
     // limited to that directory and System32. No PATH/current-directory probing.
-    internal sealed class WindowsMediaSource : IMediaSource
+    internal sealed class WindowsMediaSource : IMediaSource, IAdaptiveMediaSource
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibraryEx(string name, IntPtr reserved, uint flags);
@@ -74,9 +74,11 @@ namespace Knot.NativePreview
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr CreateDelegate(ref MediaConfig config, out MediaInfo info, out int error);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int ReadDelegate(IntPtr media, [Out] byte[] buffer, uint capacity, out uint written, out uint flags, out ulong timestamp);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void CloseDelegate(IntPtr media);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int QualityDelegate(IntPtr media, uint fps, uint bitrate);
         private IntPtr library, media;
         private ReadDelegate read;
         private CloseDelegate close;
+        private QualityDelegate quality;
         private MediaInfo info;
         private readonly int ownerThread;
         public MediaInfo Info { get { return info; } }
@@ -101,6 +103,7 @@ namespace Knot.NativePreview
                 CreateDelegate create = Export<CreateDelegate>("kn_media_create");
                 read = Export<ReadDelegate>("kn_media_read");
                 close = Export<CloseDelegate>("kn_media_close");
+                quality = Export<QualityDelegate>("kn_media_set_quality");
                 int error;
                 media = create(ref config, out info, out error);
                 if (media == IntPtr.Zero) throw NativeMediaErrors.ForStatus(error);
@@ -112,6 +115,12 @@ namespace Knot.NativePreview
         {
             if (ownerThread != System.Threading.Thread.CurrentThread.ManagedThreadId || media == IntPtr.Zero) throw new ProtocolException("capture");
             return read(media, buffer, (uint)buffer.Length, out written, out flags, out timestampMicros);
+        }
+        public bool TrySetQuality(uint fps, uint bitrate)
+        {
+            if (ownerThread != System.Threading.Thread.CurrentThread.ManagedThreadId || media == IntPtr.Zero || fps < 1 || fps > info.Fps || bitrate < 1000000 || bitrate > info.Bitrate)
+                return false;
+            return quality(media, fps, bitrate) == 0;
         }
         public void Dispose()
         {

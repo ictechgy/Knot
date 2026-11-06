@@ -4,6 +4,8 @@ import KnotNativeCore
 enum NativeIncoming: Sendable {
     case ready(Ready)
     case video(VideoPacket)
+    case clipboard(ClipboardResponse)
+    case quality(Data)
     case heartbeat
     case error(String)
 }
@@ -46,6 +48,8 @@ actor NativePacketReader {
             case .video:
                 guard let video else { throw NativeFailure.state }
                 return .video(video)
+            case .qualityStatus: return .quality(bytes)
+            case .clipboardResponse: return .clipboard(try ClipboardResponse(bytes))
             case .hostHeartbeat: return .heartbeat
             case .error:
                 return .error(try StrictJSON.object(bytes, keys: ["code"], limit: 128).string("code"))

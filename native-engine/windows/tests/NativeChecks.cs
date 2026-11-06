@@ -40,6 +40,9 @@ namespace Knot.NativePreview
                 stage = "explorer-ole-data"; DragBridgeChecks(); ++explorerOleFixtures;
                 stage = "folder-trees"; TreeChecks();
                 stage = "media-quality-bounds"; MediaQualityChecks();
+                stage = "adaptive-quality"; QualityChecks();
+                stage = "explicit-clipboard"; ClipboardChecks();
+                stage = "native-updates"; UpdateChecks();
                 stage = "host-policy"; HostPolicyChecks();
                 stage = "unicode-ownership"; UnicodeOwnershipChecks();
                 stage = "fresh-certificate"; FreshCertificateChecks();

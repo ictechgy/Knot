@@ -1,5 +1,16 @@
 # Design
 
+## Native convenience extension (2026-11-06)
+
+The user authorized remembered devices, reconnection, explicit text copy/paste, Mac shortcut compatibility, quick activation, file convenience, adaptive quality and automatic updates. This supersedes the native slice's earlier prohibition on persistent trust and its clipboard/reconnect/update exclusions only as implemented and validated below. Keep the Quiet Sidebar and the primary PC-list/connect flow; place secondary actions inside connected controls or a single settings disclosure.
+
+- Device registration requires explicit consent after authenticated short-code enrollment. Store credentials in Keychain/CurrentUser DPAPI; revoke explicitly. Fresh reconnect authentication must bind the pinned host identity and source/session; never adopt replacement certificates silently. Manual disconnect/stop cancels reconnect.
+- Read/write clipboard text only for an explicit copy/paste gesture in an authenticated session. No ambient clipboard polling. Mac shortcut compatibility is optional; preserve OS Mission Control and input-method ownership.
+- Remember nonsecret preferences separately from credentials. Global quick activation uses one registered shortcut, never a keyboard event tap. A synthetic renderer must not register shortcuts, read preferences or access user data.
+- File retry copies only unfinished upload items; completion gives an inline announcement and explicit Finder reveal. No automatic opening of received content. Byte-offset resume is not implied.
+- Quality adapts bounded bitrate/frame pacing; display dimensions/topology stay fixed. Surface unsupported live encoder adjustment honestly.
+- Automatic installation requires a configured trusted signed publisher feed. Verify platform/build/size/hash/signature before install, preserve per-user state and relaunch. An unconfigured publisher shows unavailable instead of downloading unsigned updates.
+
 ## Source of truth
 - Status: Active
 - Last refreshed: 2026-11-06
