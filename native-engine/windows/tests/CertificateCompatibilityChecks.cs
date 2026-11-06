@@ -105,9 +105,10 @@ namespace Knot.NativePreview
                 stage = "persistent-certificate-compatible-reuse";
                 Check(!RunCertificate.RequiresCompatibilityMigration(fresh));
                 using (RunCertificate reopened = RunCertificate.Persistent(fresh)) Check(reopened.Pin == originalPin);
-                RejectCertificate(delegate { RunCertificate.ConvertPersistentForCompatibility(fresh); }, false);
+                RunCertificate.ConvertPersistentForCompatibility(fresh);
                 Check(fresh.Writes == 1 && fresh.Revocations == 0);
                 Check(NativeProtocol.Equal(unchanged, File.ReadAllBytes(Path.Combine(missing, "identity.dpapi"))));
+                using (RunCertificate reopened = RunCertificate.Persistent(fresh)) Check(reopened.Pin == originalPin);
 
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 legacy = PersistentCertificateFactory.CreatePfx(now.AddDays(-1), now.AddYears(5));
@@ -226,8 +227,14 @@ namespace Knot.NativePreview
             // The parent still owns the lease when this starts. All certificate
             // reads happen after it publishes and releases the replacement.
             Check(!RunCertificate.RequiresCompatibilityMigration(storage));
-            RejectCertificate(delegate { RunCertificate.ConvertPersistentForCompatibility(storage); }, false);
-            using (RunCertificate current = RunCertificate.Persistent(storage)) Check(current.Certificate.HasPrivateKey);
+            byte[] unchanged = File.ReadAllBytes(Path.Combine(root, "lease", "identity.dpapi"));
+            string pin;
+            using (RunCertificate current = RunCertificate.Persistent(storage)) { Check(current.Certificate.HasPrivateKey); pin = current.Pin; }
+            // This is the stale second form's same direct button call. It must
+            // return successfully so that form can proceed to StartShare.
+            RunCertificate.ConvertPersistentForCompatibility(storage);
+            using (RunCertificate current = RunCertificate.Persistent(storage)) Check(current.Pin == pin);
+            Check(NativeProtocol.Equal(unchanged, File.ReadAllBytes(Path.Combine(root, "lease", "identity.dpapi"))));
             Check(storage.Revocations == 0 && storage.Writes == 0);
             Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"crossProcessCertificateLease\":true,\"writes\":0,\"revocations\":0}");
             return 0;

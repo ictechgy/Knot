@@ -194,7 +194,7 @@ class NativeRebuildTests(unittest.TestCase):
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
                                        actualCapture=False, actualSendInput=False,
                                        actualFreshExplorerInputFixtures=1, actualFreshExplorerOleFixtures=1,
-                                       actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28, actualPersistentCertificateFixtures=2,
+                                       actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28, actualPersistentCertificateFixtures=3,
                                        actualCrossProcessCertificateLeaseFixtures=1)).encode()
             elif label == "native-pairing-managed-checks":
                 return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,

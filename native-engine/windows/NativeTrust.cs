@@ -69,7 +69,11 @@ namespace Knot.NativePreview
                     using (X509Certificate2 old = PersistentCertificateFactory.Inspect(previous))
                     {
                         PersistentCertificateFactory.Validate(old);
-                        if (!PersistentCertificateFactory.RequiresMigration(old)) throw new CryptographicException("The registered host identity does not require compatibility conversion.");
+                        // Another process can finish conversion after this form
+                        // displayed its direct action. A validated compatible
+                        // identity already satisfies the postcondition: never
+                        // revoke credentials or replace it a second time.
+                        if (!PersistentCertificateFactory.RequiresMigration(old)) return;
                     }
                     replacement = PersistentCertificateFactory.CreatePfx(DateTimeOffset.UtcNow);
                     using (X509Certificate2 fresh = PersistentCertificateFactory.Import(replacement))

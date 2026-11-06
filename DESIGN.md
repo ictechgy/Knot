@@ -8,6 +8,8 @@ Never disable SSL policy or adopt a replacement pin automatically. An existing o
 
 Mac errors distinguish an exact-pin mismatch, OS certificate-policy rejection and network failure; provide authored recovery guidance without showing tokens, raw OS logs or private keys. Fresh synthetic UI fixtures render both migration and certificate-error states without opening a user store or adapter.
 
+The explicit conversion action is idempotent under the same lease: after validating an already-compatible identity, return successfully without replacing its bytes or revoking credentials. This lets a stale second form proceed after another process completed conversion. Missing or invalid identities still fail, and genuine revoke/publication errors remain visible.
+
 ## Native convenience extension (2026-11-06)
 
 The user authorized remembered devices, reconnection, explicit text copy/paste, Mac shortcut compatibility, quick activation, file convenience, adaptive quality and automatic updates. This supersedes the native slice's earlier prohibition on persistent trust and its clipboard/reconnect/update exclusions only as implemented and validated below. Keep the Quiet Sidebar and the primary PC-list/connect flow; place secondary actions inside connected controls or a single settings disclosure.

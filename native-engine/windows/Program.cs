@@ -864,7 +864,7 @@ namespace Knot.NativePreview
             catch (CertificateCompatibilityException)
             {
                 certificateCompatibilityRequired = true;
-                FailShareStart("기존 인증서가 Mac의 허용 기간을 초과해요. ‘호환 인증서로 전환하고 공유’를 눌러 새 번호로 연결하세요.");
+                FailShareStart("기존 인증서의 키 또는 유효기간이 Mac 보안 기준에 맞지 않아요. ‘호환 인증서로 전환하고 공유’를 눌러 새 번호로 연결하세요.");
             }
             catch (System.Security.Cryptography.CryptographicException)
             {
