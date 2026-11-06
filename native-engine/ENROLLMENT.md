@@ -1,5 +1,8 @@
 # Native short-code enrollment v2
 
+
+Native.11 extends this short-code enrollment with **explicit opt-in trusted-device registration** after an authorized media claim. Its separate pinned TLS48635 challenge service issues fresh, source-bound media grants; it never makes the short code or old invitation reusable. The earlier saved-credential exclusion below describes the original slice, superseded only by the Native.11 Daily use contract in [README.md](README.md).
+
 Status: implementation contract for native.5. Enrollment provisions one existing
 v1 invitation; it never becomes the media connection. The legacy pinned TLS
 protocol in PROTOCOL.md remains the screen/input transport.

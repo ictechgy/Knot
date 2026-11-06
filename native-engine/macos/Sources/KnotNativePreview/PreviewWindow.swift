@@ -578,9 +578,7 @@ struct PreviewWindow: View {
             }.menuStyle(.borderlessButton).fixedSize()
                 .onChange(of: model.textMode) { _, _ in model.releaseInput() }
             Menu {
-                Toggle("Mac 단축키 · ⌘를 Ctrl로", isOn: $model.macShortcuts)
-                if let clipboard = model.clipboard { NativeClipboardActions(clipboard: clipboard) }
-                if let quality = model.quality { NativeQualityActions(quality: quality) }
+                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: model.clipboard, quality: model.quality)
             } label: { Label("작업 도구", systemImage: "slider.horizontal.3") }.menuStyle(.borderlessButton).fixedSize()
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {

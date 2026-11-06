@@ -62,13 +62,19 @@ struct NativeVisualFixture {
             ("nearby-compact", "nearby", 880, 620, false),
             ("number-compact", "number", 880, 620, false),
             ("number-dark", "number", 1200, 760, true),
+            ("saved-devices", "saved-devices", 1200, 760, false),
+            ("saved-devices-compact", "saved-devices", 880, 620, false),
+            ("number-remembered", "number-remembered", 1200, 760, false),
+            ("work-tools", "work-tools", 880, 620, false),
             ("help-compact", "help", 880, 620, false),
             ("files", "files", 1200, 760, false),
             ("files-compact", "files", 880, 620, false),
             ("files-fullscreen", "files", 1200, 760, false),
             ("files-working", "files-working", 1200, 760, false),
             ("files-error", "files-error", 1200, 760, false),
-            ("files-empty", "files-empty", 1200, 760, false)
+            ("files-empty", "files-empty", 1200, 760, false),
+            ("files-complete", "files-complete", 1200, 760, false),
+            ("files-retry", "files-retry", 1200, 760, false)
         ]
         var images: [[String: Any]] = []
         var fileAdapterAttempts = 0
@@ -76,6 +82,7 @@ struct NativeVisualFixture {
             let model = try makeModel(state, effects: effects)
             let enrollment = try makeEnrollment(state, effects: effects)
             let files = try makeFiles(state)
+            let convenience = state == "work-tools" ? FixtureConvenienceModels(effects: effects) : nil
             let immersive = name.hasPrefix("fullscreen") || name == "files-fullscreen"
             let revealed = name.hasSuffix("controls")
             if name.contains("4k") { model.videoSize = CGSize(width: 3840, height: 2160) }
@@ -90,7 +97,7 @@ struct NativeVisualFixture {
                 else { Color(white: 0.045) }
             })
             let content = root(model: model, enrollment: enrollment, simulated: simulated, help: state == "help", manual: state == "manual-address", fullscreen: immersive,
-                width: width, height: height, dark: dark, files: files)
+                width: width, height: height, dark: dark, files: files, convenience: convenience)
             let view = NSHostingView(rootView: content)
             let rect = NSRect(x: 0, y: 0, width: width, height: height)
             let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -153,6 +160,10 @@ struct NativeVisualFixture {
                 "connectionStep": enrollment.selected != nil ? 3 : enrollment.candidates.isEmpty ? 1 : 2,
                 "candidateCount": enrollment.candidates.count, "explicitSelection": enrollment.selected != nil,
                 "codeStageVisible": codeStage, "renderedNumberFields": numberFields,
+                "rememberThisPC": model.rememberThisPC,
+                "savedDeviceCount": model.savedDevices.count,
+                "convenienceActionsVisible": convenience != nil,
+                "convenienceActionsPresentation": convenience == nil ? "native-menu" : "inline-production-action-views",
                 "searchCompleted": enrollment.hasSearched,
                 "filePanelVisible": !filePanels.isEmpty,
                 "renderedFilePanels": filePanels.count,
@@ -161,13 +172,16 @@ struct NativeVisualFixture {
                 "filePanelFrame": filePanelFrame.map { $0 as Any } ?? NSNull(),
                 "fileInputSuspended": model.fileUIInputSuspended,
                 "fileEntryCount": files?.entries.count ?? 0,
+                "fileCompletedItems": files?.completedItems ?? 0,
+                "fileRetryVisible": files?.canRetryUploads ?? false,
+                "fileRevealVisible": files?.lastReceivedURL != nil,
                 "fileAdaptersInvoked": files?.fixtureOperationAttempts ?? 0,
                 "presenterTransitionChecks": name == "streaming" ? 3 : 0,
                 "stablePresenterAcrossFullscreen": stablePresenter.map { $0 as Any } ?? NSNull()])
             window.close()
             print("Rendered " + file)
         }
-        guard effects.count == 0, effects.mediaCount == 0 else { throw FixtureError.effects }
+        guard effects.count == 0, effects.mediaCount == 0, effects.convenienceCount == 0 else { throw FixtureError.effects }
         let result: [String: Any] = [
             "schema": 1, "renderMethod": "offscreen NSHostingView cacheDisplay into owned bitmap; no shown window or screen capture",
             "controlActiveState": "key, explicit synthetic view environment",
@@ -177,6 +191,7 @@ struct NativeVisualFixture {
             "captureInvoked": false, "actualInputInvoked": false, "screenCaptureInvoked": false,
             "freshSyntheticOnly": true, "enrollmentAdaptersInvoked": effects.count,
             "mediaAdaptersInvoked": effects.mediaCount, "fileAdaptersInvoked": fileAdapterAttempts,
+            "convenienceAdaptersInvoked": effects.convenienceCount,
             "modelPhaseChecks": images.count, "images": images
         ]
         try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
@@ -184,9 +199,15 @@ struct NativeVisualFixture {
     }
 
     @MainActor private static func root(model: SessionModel, enrollment: EnrollmentModel, simulated: AnyView, help: Bool,
-                                        manual: Bool, fullscreen: Bool, width: Int, height: Int, dark: Bool, files: FileTransferModel? = nil) -> some View {
-        PreviewWindow(model: model, simulatedDesktop: simulated, initialHelp: help, simulatedFullscreen: fullscreen,
-            enrollment: enrollment, initialManualAddress: manual, simulatedFiles: files, initialFiles: files != nil)
+                                        manual: Bool, fullscreen: Bool, width: Int, height: Int, dark: Bool, files: FileTransferModel? = nil,
+                                        convenience: FixtureConvenienceModels? = nil) -> some View {
+        Group {
+            if let convenience { FixtureConvenienceSurface(model: model, clipboard: convenience.clipboard, quality: convenience.quality) }
+            else {
+                PreviewWindow(model: model, simulatedDesktop: simulated, initialHelp: help, simulatedFullscreen: fullscreen,
+                    enrollment: enrollment, initialManualAddress: manual, simulatedFiles: files, initialFiles: files != nil)
+            }
+        }
             .environment(\.colorScheme, dark ? .dark : .light)
             .environment(\.controlActiveState, .key)
             .frame(width: CGFloat(width), height: CGFloat(height))
@@ -224,7 +245,7 @@ struct NativeVisualFixture {
     @MainActor private static func makeEnrollment(_ state: String, effects: FixtureEnrollmentEffects) throws -> EnrollmentModel {
         let first = try EnrollmentCandidate(address: "192.168.50.24", port: 48632, slot: Data(repeating: 1, count: 16), name: "작업용 Windows")
         let second = try EnrollmentCandidate(address: "192.168.50.25", port: 48632, slot: Data(repeating: 2, count: 16), name: "개발용 PC")
-        let values = state == "nearby" ? [first, second] : ["number", "number-working", "number-error"].contains(state) ? [first] : []
+        let values = state == "nearby" ? [first, second] : state.hasPrefix("number") ? [first] : []
         let phase: EnrollmentModel.Phase = state == "number-working" ? .authenticating : state == "number-error" ? .failed : state == "searching" ? .discovering : .idle
         let status = state == "number-working" ? "8자리 번호를 확인하고 연결 정보를 안전하게 받고 있어요…" :
             state == "number-error" ? EnrollmentModel.authenticationGuidance :
@@ -236,13 +257,13 @@ struct NativeVisualFixture {
             makeClient: { _, _ in effects.mark(); throw EnrollmentFailure.cancelled },
             initialCandidates: values, initialPhase: phase, initialStatus: status,
             initialSelection: state.hasPrefix("number") ? first.id : nil, initialSearchCompleted: state == "empty")
-        if state == "number" { model.code = "12345678" }
+        if state == "number" || state == "number-remembered" { model.code = "12345678" }
         if state == "manual-address" { model.manualAddress = "100.100.10.12" }
         return model
     }
 
     @MainActor private static func requireInert(model: SessionModel, state: String, effects: FixtureEnrollmentEffects) throws {
-        guard effects.count == 0, effects.mediaCount == 0 else { throw FixtureError.effects }
+        guard effects.count == 0, effects.mediaCount == 0, effects.convenienceCount == 0 else { throw FixtureError.effects }
         guard model.phase == expectedPhase(state) else { throw FixtureError.phase }
     }
     @MainActor private static func expectedPhase(_ state: String) -> SessionModel.Phase {
@@ -265,15 +286,23 @@ struct NativeVisualFixture {
         ]
         return FileTransferModel(rootName: "Knot Files", entries: entries, isBusy: state == "files-working",
             status: state == "files-error" ? "같은 이름의 파일이 있어요. 다른 이름이나 저장 위치를 선택해주세요." :
+                state == "files-complete" ? "회의 자료.pdf 받기를 완료했어요. Finder에서 저장 위치를 확인하세요." :
+                state == "files-retry" ? "1개는 전송을 완료했어요. 연결이 끊겼어요. 미완료 항목을 다시 시도하세요." :
                 state == "files-working" ? "Windows 공유 폴더로 보내는 중이에요. 원본은 유지돼요." :
                 state == "files-empty" ? "공유 폴더가 비어 있어요. Windows 파일을 넣고 새로고침하세요." :
                 "파일을 선택해 받거나 왼쪽 아이콘을 Finder로 끌어주세요.",
             progress: state == "files-working" ? 0.42 : nil,
-            currentName: state == "files-working" ? "project-source.zip" : nil)
+            currentName: state == "files-working" ? "project-source.zip" : nil,
+            completedItems: state == "files-complete" ? 2 : state == "files-retry" ? 1 : 0,
+            unfinishedUploads: state == "files-retry" ? [URL(fileURLWithPath: "/synthetic-fixture/project-source.zip")] : [],
+            lastReceivedURL: state == "files-complete" ? URL(fileURLWithPath: "/synthetic-fixture/회의 자료.pdf") : nil)
     }
     @MainActor private static func makeModel(_ state: String, effects: FixtureEnrollmentEffects) throws -> SessionModel {
-        let model = SessionModel(makeChannel: { _ in effects.markMedia(); throw NativeFailure.state })
+        let saved = state == "saved-devices" ? try makeSavedDevices() : []
+        let model = SessionModel(makeChannel: { _ in effects.markMedia(); throw NativeFailure.state },
+            makeTrustedClient: { _, _ in effects.mark(); throw NativeFailure.state }, initialSavedDevices: saved)
         model.viewerLabel = "나의 Mac"
+        model.rememberThisPC = state == "number-remembered"
         if state.hasPrefix("files") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
         switch state {
         case "reviewed", "invalid-name":
@@ -308,6 +337,18 @@ struct NativeVisualFixture {
         }
         return model
     }
+
+    /// Fixed authored records decoded in memory; no Keychain read or credential creation.
+    private static func makeSavedDevices() throws -> [SavedNativeDevice] {
+        let records: [[String: Any]] = [(UInt8(1), "작업용 Windows", "192.168.50.24"),
+                                      (UInt8(2), "개발용 PC", "192.168.50.25")].map { seed, name, address in
+            ["id": Invitation.encodeBase64URL(Data(repeating: seed, count: 32)), "name": name, "address": address,
+             "certificateSHA256": String(repeating: "0123456789abcdef", count: 4),
+             "secret": Data(repeating: seed, count: 32).base64EncodedString()]
+        }
+        return try JSONDecoder().decode([SavedNativeDevice].self, from: JSONSerialization.data(withJSONObject: records))
+            .map { try $0.validated() }
+    }
 }
 
 enum FixtureError: Error {
@@ -318,10 +359,40 @@ private final class FixtureEnrollmentEffects: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
     private var media = 0
+    private var convenience = 0
     func mark() { lock.lock(); value += 1; lock.unlock() }
     func markMedia() { lock.lock(); media += 1; lock.unlock() }
+    func markConvenience() { lock.lock(); convenience += 1; lock.unlock() }
     var count: Int { lock.lock(); defer { lock.unlock() }; return value }
     var mediaCount: Int { lock.lock(); defer { lock.unlock() }; return media }
+    var convenienceCount: Int { lock.lock(); defer { lock.unlock() }; return convenience }
+}
+
+@MainActor private struct FixtureConvenienceModels {
+    let clipboard: ClipboardModel
+    let quality: QualityModel
+    init(effects: FixtureEnrollmentEffects) {
+        clipboard = ClipboardModel(send: { _ in effects.markConvenience(); return false },
+            readText: { effects.markConvenience(); return nil }, writeText: { _ in effects.markConvenience(); return false })
+        quality = QualityModel(send: { _ in effects.markConvenience(); return false })
+    }
+}
+
+/// Native Menu popups require shown windows. Render their actual production
+/// action views inline in a fresh owned offscreen view instead.
+private struct FixtureConvenienceSurface: View {
+    @ObservedObject var model: SessionModel
+    @ObservedObject var clipboard: ClipboardModel
+    @ObservedObject var quality: QualityModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Label("작업 도구", systemImage: "slider.horizontal.3").font(.system(size: 24, weight: .semibold))
+            VStack(alignment: .leading, spacing: 14) {
+                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: clipboard, quality: quality)
+            }.padding(24).nativePanel()
+            Spacer()
+        }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity).background(NativeStyle.canvas)
+    }
 }
 private final class FixtureEmptyDiscovery: EnrollmentDiscovering, @unchecked Sendable {
     func discover(address: String?) async throws -> [EnrollmentCandidate] { [] }

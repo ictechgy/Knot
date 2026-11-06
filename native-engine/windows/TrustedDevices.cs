@@ -158,6 +158,8 @@ namespace Knot.NativePreview
                     using (SslStream tls = new SslStream(accepted.GetStream(), false))
                     {
                         tls.AuthenticateAsServer(certificate, false, SslProtocols.Tls12, false);
+                        try
+                        {
                         var hello = Read(tls, "op", "id", "name", "value", "key");
                         string op = StrictJson.String(hello, "op"), id = StrictJson.String(hello, "id"), name = StrictJson.String(hello, "name");
                         string value = StrictJson.String(hello, "value"), keyText = StrictJson.String(hello, "key");
@@ -186,6 +188,14 @@ namespace Knot.NativePreview
                         }
                         else throw new ProtocolException("protocol");
                         deadline.TryComplete();
+                        }
+                        catch (ProtocolException error)
+                        {
+                            // This response is available only after pinned TLS.
+                            // Unknown device, revoked key, wrong proof and malformed
+                            // requests have one fixed rejection, without diagnostics.
+                            NativeProtocol.Write(tls, 127, StrictJson.Utf8.GetBytes(error.Code == "busy" ? "{\"code\":\"busy\"}" : "{\"code\":\"rejected\"}"));
+                        }
                     }
                 }
                 catch (Exception) { lock (gate) { if (stopped) return; } }

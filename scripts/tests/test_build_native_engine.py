@@ -411,7 +411,8 @@ class NativeRebuildTests(unittest.TestCase):
         for state in ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected",
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
                       "nearby-compact", "number-compact", "number-dark", "help-compact",
-                      "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty"]:
+                      "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
+                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
             report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,

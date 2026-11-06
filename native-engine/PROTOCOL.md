@@ -1,6 +1,6 @@
 # Knot Native Engine v1 research contract
 
-Status: experimental vertical slice; independent of Sunshine, Moonlight and Glimmer. Windows11 x64/Home logged-in SDR primary desktop host -> AppleSilicon macOS26+ viewer. Native.10 adds bounded file/folder transfer and active Explorer drag export; separate contracts are [FILES.md](FILES.md) and [TREES.md](TREES.md). No prelogin, lock/UAC secure desktop, audio, clipboard sync, virtual monitor, updater, saved pairing or automatic reconnect. Existing product remains unchanged for comparison.
+Status: experimental vertical slice; independent of Sunshine, Moonlight and Glimmer. Windows11 x64/Home logged-in SDR primary desktop host -> AppleSilicon macOS26+ viewer. Native.10 adds bounded file/folder transfer and active Explorer drag export; separate contracts are [FILES.md](FILES.md) and [TREES.md](TREES.md). No prelogin, lock/UAC secure desktop, audio, ambient clipboard sync or virtual monitor. Native.11 adds explicit clipboard requests, opt-in trusted reconnect and signed-update infrastructure (publisher remains unconfigured). Existing product remains unchanged for comparison.
 
 ## Short-code provisioning
 
@@ -74,3 +74,13 @@ Quality is selected on Windows before sharing: maximum3840×2160/30fps/40Mbps by
 Mac ordinary typing uses its local input method and sends committed Unicode. Local Caps Lock language/capitalization events never become Windows Caps Lock toggles. Navigation/shortcuts remain physical with owned matching key-ups; composition is cancelled and late commits rejected on revocation/focus loss. Native fullscreen removes persistent chrome height while preserving one presenter and matching aspect-fit pointer geometry. Actual IME/fullscreen/GPU4K acceptance remains a device task.
 
 Input0x26 carries a16-byte ordered Explorer handoff nonce; it is admitted only against session-owned left input and matched to the separately authenticated capture request. It is not a media-writer response or arbitrary file path. See TREES.md for expiry, cancellation and COPY-only semantics.
+
+## Native.11 convenience extension
+
+Ready may additionally contain the independently optional scalar keys `clipboardVersion=1`, `qualityVersion=1`, `trustedVersion=1`. Unknown keys, versions and incomplete file-offer groups remain rejected. A feature is enabled only when offered by the authenticated host.
+
+Client `0x30` is an explicit clipboard request: operation byte (1 copy/2 paste),16-byte request nonce, then strict UTF-8 text (at most1,048,576 bytes, no NUL; copy text empty). Server `0x31` is operation/status byte pair, echoed nonce, then bounded strict UTF-8 (paste and unsuccessful replies have no text). One pending request is bound to the active session; late/cancelled replies cannot write the Mac pasteboard. The media transport retains ordinary4,096-byte outgoing limits, with only a fully validated clipboard-request exception. An explicit clipboard gesture queues release of held input before dropping local ownership, including validation failures.
+
+Client `0x32` is one quality preference byte (0 automatic,1 text clarity,2 responsiveness); `0x33` is one pressure byte (0 healthy,1 overloaded). Server `0x34` is9 bytes: big-endian uint32 applied maximum FPS and bitrate followed by live-adjustment-supported0/1. Updates remain within the initial host-selected bounds; dimensions never change. One media MTA owns the dynamic encoder operation. Unsupported changes retain prior settings and report that limitation.
+
+Registered-device provisioning and fresh challenge/grant exchange run on independent pinned TLS TCP48635, active only while Windows sharing is enabled. Persistent credentials are not reusable invitations and do not bypass the existing source-bound one-use media claim. See the Native.11 Daily use section in [README.md](README.md) and source-backed tests. [UPDATES.md](UPDATES.md) governs the separate signed publishing/installation contract.

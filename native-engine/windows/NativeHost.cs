@@ -328,8 +328,8 @@ namespace Knot.NativePreview
             }
             catch (ProtocolException error) { if (!Stopping) { SendError(error.Code); Notify(Guidance(error.GuidanceCategory)); } }
             catch (AuthenticationException) { if (!Stopping) Notify("TLS authentication failed. Create a new invitation."); }
-            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } }
-            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } }
+            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } }
+            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } }
             catch (ObjectDisposedException) { }
             catch (Exception) { if (!Stopping) { SendError("capture"); Notify("Native preview could not start. Check the bundled media engine and supported SDR display."); } }
             finally
@@ -474,8 +474,8 @@ namespace Knot.NativePreview
                 }
             }
             catch (ProtocolException error) { if (!Stopping) Notify(Guidance(error.GuidanceCategory)); Stop(); }
-            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } Stop(); }
-            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify("Connection ended. Waiting to reconnect a registered device."); } Stop(); }
+            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } Stop(); }
+            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } Stop(); }
             catch (Exception) { if (!Stopping) Notify("Session stopped. Check the host before reconnecting."); Stop(); }
         }
         private string[] CaptureExplorerDrag(string nonce)

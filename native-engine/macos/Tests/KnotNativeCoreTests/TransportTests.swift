@@ -58,7 +58,9 @@ private final class LoopbackHost: @unchecked Sendable {
     private let queue = DispatchQueue(label: "knot-native.fresh-tls-test")
     private let lock = NSLock()
     private var connections: [NWConnection] = []
-    init(identity: SecIdentity) throws {
+    private let expectedClientBytes: Data?
+    init(identity: SecIdentity, expectedClientBytes: Data? = nil) throws {
+        self.expectedClientBytes = expectedClientBytes
         let tls = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
         sec_protocol_options_set_local_identity(tls.securityProtocolOptions, try #require(sec_identity_create(identity)))
@@ -78,6 +80,7 @@ private final class LoopbackHost: @unchecked Sendable {
                 self.lock.lock(); self.connections.append(connection); self.lock.unlock()
                 connection.stateUpdateHandler = { state in
                     if case .ready = state {
+                        if let expected = self.expectedClientBytes { self.consume(connection, expected: expected, offset: 0) }
                         // Deliberately fragmented framed message exercises exact reads.
                         connection.send(content: Data([4,0]), completion: .contentProcessed { _ in
                             connection.send(content: Data([0,0,0]), completion: .contentProcessed { _ in })
@@ -88,6 +91,16 @@ private final class LoopbackHost: @unchecked Sendable {
             }
             queue.asyncAfter(deadline: .now() + 5) { gate.finish(.failure(NativeFailure.transport)) }
             listener.start(queue: queue)
+        }
+    }
+    private func consume(_ connection: NWConnection, expected: Data, offset: Int) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: min(65_536, expected.count - offset)) { [weak self] bytes, _, complete, error in
+            guard let self, let bytes, !bytes.isEmpty, error == nil,
+                  bytes == expected.subdata(in: offset..<offset + bytes.count) else { connection.cancel(); return }
+            let next = offset + bytes.count
+            if next == expected.count { connection.send(content: Data([0xAA]), completion: .contentProcessed { _ in }) }
+            else if !complete { self.consume(connection, expected: expected, offset: next) }
+            else { connection.cancel() }
         }
     }
     func stop() { listener.cancel(); lock.lock(); let owned = connections; connections = []; lock.unlock(); for item in owned { item.cancel() } }
@@ -146,6 +159,27 @@ private final class PortGate: @unchecked Sendable {
     let bad = TLSChannel(endpoint: .hostPort(host: .ipv4(.loopback), port: port), pin: String(repeating: "0", count: 64))
     defer { bad.close() }
     do { try await bad.start(); Issue.record("Mismatched pin established TLS") } catch {}
+}
+
+@Test func realTLSAcceptsClipboardBoundaryAndRejectsOversizeWithoutDisconnect() async throws {
+    let fixture = try CertificateFixture()
+    let packets = try [4_079, 4_080, ClipboardProtocol.maximumTextBytes].map {
+        try ClipboardProtocol.request(.paste, nonce: Data(repeating: 3, count: 16), text: String(repeating: "x", count: $0))
+    }
+    let heartbeat = Packet(kind: .heartbeat)
+    var expected = Data(); for packet in packets { expected.append(packet.encoded) }; expected.append(heartbeat.encoded)
+    let server = try LoopbackHost(identity: fixture.identity, expectedClientBytes: expected)
+    defer { server.stop() }
+    let port = try await server.start()
+    let channel = TLSChannel(endpoint: .hostPort(host: .ipv4(.loopback), port: port), pin: fixture.pin)
+    defer { channel.close() }
+    try await channel.start()
+    #expect(try await channel.readExactly(5) == Data([4, 0, 0, 0, 0]))
+    for packet in packets { try await channel.send(packet) }
+    let invalid = Packet(kind: .clipboardRequest, payload: packets.last!.payload + Data([0x78]))
+    do { try await channel.send(invalid); Issue.record("Over-limit clipboard reached TLS") } catch {}
+    try await channel.send(heartbeat)
+    #expect(try await channel.readExactly(1) == Data([0xAA]))
 }
 
 @Test func freshFileTLSUsesExactPinSeparateChunkBoundAndSynchronousRevocation() async throws {

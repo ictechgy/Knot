@@ -484,7 +484,7 @@ class Builder:
         rows = report.get("images")
         if self.platform == "macos" and (type(report.get("fileAdaptersInvoked")) is not int or report["fileAdaptersInvoked"] != 0):
             raise ValueError("Mac UI checks must measure zero file adapter invocations")
-        if not isinstance(rows, list) or not 7 <= len(rows) <= 40:
+        if not isinstance(rows, list) or not 7 <= len(rows) <= 64:
             raise ValueError("UI fixture state coverage is missing or excessive")
         names = set()
         for row in rows:
@@ -506,7 +506,8 @@ class Builder:
                      ["idle", "reviewed", "approval", "streaming", "input-paused", "failed", "help", "compact", "dark", "fullscreen-text-rejected",
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
                       "nearby-compact", "number-compact", "number-dark", "help-compact",
-                      "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty"]}
+                      "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
+                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
                      ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",

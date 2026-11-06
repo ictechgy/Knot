@@ -17,7 +17,7 @@ final class FileTransferModel: ObservableObject {
     @Published private(set) var completedItems = 0
     var canRetryUploads: Bool { !isBusy && client != nil && !unfinishedUploads.isEmpty }
     func retryUnfinishedUploads() { guard canRetryUploads else { return }; send(urls: unfinishedUploads) }
-    func revealLastReceived() { if let lastReceivedURL { NSWorkspace.shared.activateFileViewerSelecting([lastReceivedURL]) } }
+    func revealLastReceived() { if fixtureMode { fixtureOperationAttempts += 1; return }; if let lastReceivedURL { NSWorkspace.shared.activateFileViewerSelecting([lastReceivedURL]) } }
     private var client: (any NativeFileWorking)?
     private let gate: FileRunGate
     private var work: Task<Void, Never>?
@@ -53,10 +53,12 @@ final class FileTransferModel: ObservableObject {
     /// creation happens while a synthetic view is being rendered.
     init(rootName: String, entries: [NativeFileEntry] = [], isBusy: Bool = false,
          status: String = "Windows 공유 폴더의 파일을 확인하세요.", progress: Double? = nil,
-         currentName: String? = nil, truncated: Bool = false) {
+         currentName: String? = nil, truncated: Bool = false, completedItems: Int = 0,
+         unfinishedUploads: [URL] = [], lastReceivedURL: URL? = nil) {
         self.rootName = rootName; self.entries = Array(entries.prefix(FileWire.maximumEntries))
         self.isBusy = isBusy; self.status = status; self.progress = progress
         self.currentName = currentName; self.truncated = truncated
+        self.completedItems = max(0, completedItems); self.unfinishedUploads = Array(unfinishedUploads.prefix(32)); self.lastReceivedURL = lastReceivedURL
         gate = FileRunGate(); client = disabledFileClient()
         fixtureMode = true
     }

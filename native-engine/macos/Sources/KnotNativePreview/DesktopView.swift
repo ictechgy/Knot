@@ -253,9 +253,9 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
         if acceptsInput, model?.macShortcuts == true, flags == .command,
            heldButtons.isEmpty, let clipboard = model?.clipboard,
            event.keyCode == 8 || event.keyCode == 9 {
-            // The host performs an owned release + temporary Ctrl+C/V. Local
-            // modifiers are forgotten so later flags/keys cannot retain them.
-            forgetHeldKeys()
+            // Release remotely even when an empty/invalid clipboard or failed
+            // enqueue prevents the host clipboard helper from ever running.
+            guard model?.prepareClipboardGesture() == true else { return }
             if event.keyCode == 8 { clipboard.copyFromRemote() } else { clipboard.pasteToRemote() }
             return
         }

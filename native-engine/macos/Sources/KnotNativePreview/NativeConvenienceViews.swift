@@ -1,5 +1,18 @@
 import SwiftUI
 
+struct NativeWorkToolsActions: View {
+    @Binding var macShortcuts: Bool
+    let clipboard: ClipboardModel?
+    let quality: QualityModel?
+    var body: some View {
+        Group {
+            Toggle("Mac 단축키 · ⌘를 Ctrl로", isOn: $macShortcuts)
+            if let clipboard { NativeClipboardActions(clipboard: clipboard) }
+            if let quality { NativeQualityActions(quality: quality) }
+        }
+    }
+}
+
 struct NativeClipboardActions: View {
     @ObservedObject var clipboard: ClipboardModel
     var body: some View {

@@ -53,7 +53,15 @@ enum NativeDeviceKeychain {
     static func remove(_ id: String) throws { try save(load().filter { $0.id != id }) }
 }
 
-final class NativeTrustedClient: @unchecked Sendable {
+protocol NativeTrustedConnecting: AnyObject, Sendable {
+    func connect(revoke: Bool) async throws -> Invitation?
+    func close()
+}
+extension NativeTrustedConnecting {
+    func connect() async throws -> Invitation? { try await connect(revoke: false) }
+}
+
+final class NativeTrustedClient: NativeTrustedConnecting, @unchecked Sendable {
     private let channel: TLSChannel
     private let device: SavedNativeDevice
     private let name: String
@@ -80,8 +88,21 @@ final class NativeTrustedClient: @unchecked Sendable {
     private func receive(keys: Set<String>) async throws -> [String: JSONValue] {
         let header = try await channel.readExactly(5)
         let length = Int(header.readBE(UInt32.self, at: 1))
-        guard header.first == 1, (1...4096).contains(length) else { throw NativeFailure.malformed }
-        return try StrictJSON.object(await channel.readExactly(length), keys: keys, limit: 4096)
+        guard let kind = header.first, (1...4096).contains(length), kind == 1 || kind == 0x7f,
+              kind != 0x7f || length <= 128 else { throw NativeFailure.malformed }
+        return try Self.response(kind: kind, payload: await channel.readExactly(length), keys: keys)
+    }
+    static func response(kind: UInt8, payload: Data, keys: Set<String>) throws -> [String: JSONValue] {
+        if kind == 0x7f {
+            let response = try StrictJSON.object(payload, keys: ["code"], limit: 128)
+            switch try response.string("code") {
+            case "rejected": throw NativeFailure.trust
+            case "busy": throw NativeFailure.transport
+            default: throw NativeFailure.malformed
+            }
+        }
+        guard kind == 1 else { throw NativeFailure.malformed }
+        return try StrictJSON.object(payload, keys: keys, limit: 4096)
     }
     func register(invitation: Invitation) async throws {
         try await withTaskCancellationHandler {

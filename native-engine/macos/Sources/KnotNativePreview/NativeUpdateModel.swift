@@ -68,20 +68,44 @@ private final class NativeUpdateDownloadLimit: NSObject, URLSessionDownloadDeleg
               FileManager.default.isWritableFile(atPath: Bundle.main.bundleURL.deletingLastPathComponent().path) else {
             status = "설치된 앱을 업데이트하려면 쓰기 가능한 Applications 폴더로 옮겨 주세요."; return
         }
-        do {
-            let fresh = try NativeUpdateManifest.verify(Data(contentsOf: stage.appendingPathComponent("manifest.feed")), configuration: configuration, platform: "macos-arm64")
-            guard fresh.build == manifest.build else { throw NativeUpdateError.invalid }
-            try fresh.verifyFile(stage.appendingPathComponent("payload.zip"))
-            let helper = stage.appendingPathComponent("KnotNativeUpdateHandoff")
-            try FileManager.default.copyItem(at: executable, to: helper)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
-            guard let configURL = Bundle.main.url(forResource: "NativeUpdateConfig", withExtension: "txt") else { throw NativeUpdateError.unconfigured }
-            try FileManager.default.copyItem(at: configURL, to: stage.appendingPathComponent("NativeUpdateConfig.txt"))
-            let process = Process(); process.executableURL = helper
-            process.arguments = ["--knot-native-update-v1", String(getpid()), Bundle.main.bundleURL.resolvingSymlinksInPath().path, stage.path]
-            try process.run()
-            pending = nil; available = false; stop(); beforeExit(); NSApp.terminate(nil)
-        } catch { status = "안전하게 업데이트를 시작하지 못했습니다. 다시 확인해 주세요." }
+        checking = true; status = "업데이트를 설치할 준비를 하고 있습니다."
+        operation = Task { [weak self] in
+            let pipe = Pipe(), process = Process()
+            defer { try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close() }
+            do {
+                let fresh = try NativeUpdateManifest.verify(Data(contentsOf: stage.appendingPathComponent("manifest.feed")), configuration: configuration, platform: "macos-arm64")
+                guard fresh.build == manifest.build else { throw NativeUpdateError.invalid }
+                try fresh.verifyFile(stage.appendingPathComponent("payload.zip"))
+                let helper = stage.appendingPathComponent("KnotNativeUpdateHandoff")
+                try FileManager.default.copyItem(at: executable, to: helper)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+                guard let configURL = Bundle.main.url(forResource: "NativeUpdateConfig", withExtension: "txt") else { throw NativeUpdateError.unconfigured }
+                try FileManager.default.copyItem(at: configURL, to: stage.appendingPathComponent("NativeUpdateConfig.txt"))
+                let nonce = UUID().uuidString + UUID().uuidString
+                process.executableURL = helper
+                process.arguments = ["--knot-native-update-v1", String(getpid()), Bundle.main.bundleURL.resolvingSymlinksInPath().path, stage.path, nonce]
+                process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+                try process.run()
+                // Only the child owns the write end after launch. EOF then reports a
+                // validation failure immediately instead of waiting for a timeout.
+                try pipe.fileHandleForWriting.close()
+                try await NativeUpdateAcknowledgement.wait(readDescriptor: pipe.fileHandleForReading.fileDescriptor,
+                                                           expected: NativeUpdateAcknowledgement.receipt(nonce))
+                try Task.checkCancellation()
+                guard let self, process.isRunning else { throw NativeUpdateError.installation }
+                self.pending = nil; self.available = false; self.checking = false
+                self.checks?.cancel(); self.checks = nil
+                beforeExit(); NSApp.terminate(nil)
+            } catch {
+                if process.isRunning { process.terminate() }
+                // The existing app and window stay usable if preparation/READY fails.
+                self?.checking = false
+                self?.status = "업데이트 준비를 완료하지 못했습니다. 현재 앱은 계속 사용할 수 있습니다."
+                for name in ["KnotNativeUpdateHandoff", "NativeUpdateConfig.txt"] {
+                    try? FileManager.default.removeItem(at: stage.appendingPathComponent(name))
+                }
+            }
+        }
     }
     private static func privateStage() throws -> URL {
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("knot-native-update-" + UUID().uuidString)
@@ -112,7 +136,7 @@ enum NativeUpdateHandoff {
         do { try run(a); exit(0) } catch { exit(1) }
     }
     private static func run(_ a: [String]) throws {
-        guard a.count == 5, let pid = Int32(a[2]), pid > 1 else { throw NativeUpdateError.installation }
+        guard a.count == 6, let pid = Int32(a[2]), pid > 1, NativeUpdateAcknowledgement.validNonce(a[5]) else { throw NativeUpdateError.installation }
         let app = URL(fileURLWithPath: a[3]).standardizedFileURL, stage = URL(fileURLWithPath: a[4]).standardizedFileURL
         guard app.path == app.resolvingSymlinksInPath().path, app.lastPathComponent == "Knot Native Preview.app",
               stage.path == stage.resolvingSymlinksInPath().path, stage.lastPathComponent.hasPrefix("knot-native-update-"),
@@ -126,39 +150,33 @@ enum NativeUpdateHandoff {
               let installedVersion = installed.object(forInfoDictionaryKey: "KnotNativeVersion") as? String,
               try NativeUpdateManifest.versionBuild(installedVersion) < manifest.build else { throw NativeUpdateError.downgrade }
         let names = try command("/usr/bin/zipinfo", ["-1", package.path])
-        let rows = names.split(separator: "\n", omittingEmptySubsequences: true)
-        guard !rows.isEmpty, rows.count <= 10_000, rows.allSatisfy({ row in
-            let name = String(row), parts = name.split(separator: "/", omittingEmptySubsequences: false)
-            return name.hasPrefix("Knot Native Preview.app/") && !name.contains("\\") && !parts.contains("..") &&
-                name.utf8.allSatisfy({ $0 >= 32 && $0 != 127 })
-        }) else { throw NativeUpdateError.installation }
         let listing = try command("/usr/bin/zipinfo", ["-l", package.path])
-        var expandedBytes: Int64 = 0, entryCount = 0
-        for row in listing.split(separator: "\n") {
-            guard let first = row.first, ["-", "d", "l"].contains(first) else { continue }
-            let fields = row.split(whereSeparator: { $0 == " " || $0 == "\t" })
-            guard first != "l", fields.count >= 5, let size = Int64(fields[3]), size >= 0,
-                  size <= 1024 * 1024 * 1024 - expandedBytes else { throw NativeUpdateError.installation }
-            expandedBytes += size; entryCount += 1
-        }
-        guard entryCount == rows.count else { throw NativeUpdateError.installation }
+        try NativeUpdateArchiveInventory.validate(names: names, listing: listing)
         let extraction = stage.appendingPathComponent("expanded"); try FileManager.default.createDirectory(at: extraction, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         _ = try command("/usr/bin/ditto", ["-x", "-k", package.path, extraction.path])
         let candidate = extraction.appendingPathComponent(app.lastPathComponent)
         guard let replacement = Bundle(url: candidate), replacement.bundleIdentifier == installed.bundleIdentifier,
               replacement.object(forInfoDictionaryKey: "KnotNativeVersion") as? String == manifest.version else { throw NativeUpdateError.installation }
         _ = try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", candidate.path])
+        let transaction = try NativeUpdateTransaction.prepare(candidate: candidate, destination: app) { copied in
+            guard let bundle = Bundle(url: copied), bundle.bundleIdentifier == installed.bundleIdentifier,
+                  bundle.object(forInfoDictionaryKey: "KnotNativeVersion") as? String == manifest.version else { throw NativeUpdateError.installation }
+            _ = try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", copied.path])
+        }
+        var published = false
+        defer { if !published { transaction.discardPreparedCopy() } }
+        // Every validation and same-volume atomic-exchange capability check above
+        // must finish before the parent is allowed to leave its working window.
+        try FileHandle.standardOutput.write(contentsOf: NativeUpdateAcknowledgement.receipt(a[5]))
         let deadline = Date().addingTimeInterval(180)
         while kill(pid, 0) == 0 { guard Date() < deadline else { throw NativeUpdateError.installation }; Thread.sleep(forTimeInterval: 0.1) }
-        // Stage beside the installed app so the rename publication remains on one filesystem.
-        let sibling = app.deletingLastPathComponent().appendingPathComponent(".knot-native-update-" + UUID().uuidString + ".app")
-        let backup = app.deletingLastPathComponent().appendingPathComponent(".knot-native-backup-" + UUID().uuidString + ".app")
-        try FileManager.default.copyItem(at: candidate, to: sibling)
-        try FileManager.default.moveItem(at: app, to: backup)
-        do { try FileManager.default.moveItem(at: sibling, to: app) }
-        catch { try? FileManager.default.moveItem(at: backup, to: app); try? FileManager.default.removeItem(at: sibling); throw error }
+        try transaction.publish()
+        published = true
         _ = try command("/usr/bin/open", [app.path, "--args", "--knot-native-update-resume"])
-        try? FileManager.default.removeItem(at: backup); try? FileManager.default.removeItem(at: stage)
+        // After exchange, replacement contains the old app. Retain it if launching
+        // the new app fails; the canonical path always contains a complete app.
+        transaction.discardPreparedCopy()
+        try? FileManager.default.removeItem(at: stage)
     }
     private static func command(_ path: String, _ args: [String]) throws -> String {
         let process = Process(), pipe = Pipe(); process.executableURL = URL(fileURLWithPath: path); process.arguments = args
@@ -172,4 +190,110 @@ enum NativeUpdateHandoff {
         guard process.terminationStatus == 0 else { throw NativeUpdateError.installation }
         return String(decoding: data, as: UTF8.self)
     }
+}
+
+/// One nonce-bound message on an inherited, owned pipe. Reads are nonblocking
+/// and yield between attempts, so helper validation never blocks the app UI.
+enum NativeUpdateAcknowledgement {
+    static func validNonce(_ value: String) -> Bool {
+        value.utf8.count == 72 && value.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) || $0 == 45 }
+    }
+    static func receipt(_ nonce: String) -> Data { Data(("KNOT-NATIVE-UPDATE-READY-1\n" + nonce + "\n").utf8) }
+    static func wait(readDescriptor: Int32, expected: Data, timeout: Duration = .seconds(45)) async throws {
+        let flags = fcntl(readDescriptor, F_GETFL)
+        guard flags >= 0, fcntl(readDescriptor, F_SETFL, flags | O_NONBLOCK) == 0,
+              !expected.isEmpty, expected.count <= 256 else { throw NativeUpdateError.installation }
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        var received = Data(), buffer = [UInt8](repeating: 0, count: 257)
+        while true {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw NativeUpdateError.installation }
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(readDescriptor, $0.baseAddress, $0.count) }
+            if count > 0 {
+                received.append(contentsOf: buffer.prefix(count))
+                guard received.count <= expected.count, expected.starts(with: received) else { throw NativeUpdateError.installation }
+                if received.count == expected.count { return }
+            } else if count == 0 { throw NativeUpdateError.installation }
+            else if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR { throw NativeUpdateError.installation }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+    }
+}
+
+enum NativeUpdateArchiveInventory {
+    static func validate(names: String, listing: String) throws {
+        let rows = names.split(separator: "\n", omittingEmptySubsequences: true)
+        var unique = Set<String>()
+        guard !rows.isEmpty, rows.count <= 10_000 else { throw NativeUpdateError.installation }
+        for row in rows {
+            let name = String(row), parts = name.split(separator: "/", omittingEmptySubsequences: false)
+            guard name.hasPrefix("Knot Native Preview.app/"), !name.contains("\\"), !parts.contains(".."), !parts.contains("."),
+                  parts.dropLast().allSatisfy({ !$0.isEmpty }),
+                  name.utf8.allSatisfy({ $0 >= 32 && $0 != 127 }),
+                  unique.insert(name.precomposedStringWithCanonicalMapping.lowercased()).inserted else { throw NativeUpdateError.installation }
+        }
+        var expandedBytes: Int64 = 0, entryCount = 0
+        for row in listing.split(separator: "\n") {
+            guard let first = row.first, ["-", "d", "l", "b", "c", "p", "s"].contains(first) else { continue }
+            let fields = row.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard ["-", "d"].contains(first), fields.count >= 5, let size = Int64(fields[3]), size >= 0,
+                  size <= 1024 * 1024 * 1024 - expandedBytes else { throw NativeUpdateError.installation }
+            expandedBytes += size; entryCount += 1
+        }
+        guard entryCount == rows.count else { throw NativeUpdateError.installation }
+    }
+}
+
+/// Prepared update and installed app always remain two complete directories.
+/// Publish performs one kernel namespace exchange; there is no old->backup gap.
+struct NativeUpdateTransaction {
+    let destination: URL, replacement: URL
+    private let installedIdentity: Identity, preparedIdentity: Identity, parentIdentity: Identity
+    struct Identity: Equatable {
+        let device: dev_t, inode: ino_t
+        static func directory(_ path: URL, owned: Bool = true) throws -> Identity {
+            var value = stat()
+            guard path.standardizedFileURL.path == path.resolvingSymlinksInPath().path,
+                  lstat(path.path, &value) == 0, value.st_mode & S_IFMT == S_IFDIR,
+                  !owned || value.st_uid == geteuid() else { throw NativeUpdateError.installation }
+            return Identity(device: value.st_dev, inode: value.st_ino)
+        }
+    }
+    static func exchange(_ a: URL, _ b: URL) throws {
+        guard renameatx_np(AT_FDCWD, a.path, AT_FDCWD, b.path, UInt32(RENAME_SWAP)) == 0 else { throw NativeUpdateError.installation }
+    }
+    static func probeAtomicExchange(in parent: URL) throws {
+        let a = parent.appendingPathComponent(".knot-native-swap-probe-" + UUID().uuidString)
+        let b = parent.appendingPathComponent(".knot-native-swap-probe-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: a, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
+        try FileManager.default.createDirectory(at: b, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let ai = try Identity.directory(a), bi = try Identity.directory(b)
+        try exchange(a, b)
+        guard try Identity.directory(a) == bi, try Identity.directory(b) == ai else { throw NativeUpdateError.installation }
+    }
+    static func prepare(candidate: URL, destination: URL,
+                        probe: (URL) throws -> Void = NativeUpdateTransaction.probeAtomicExchange,
+                        validate: (URL) throws -> Void) throws -> NativeUpdateTransaction {
+        let parent = destination.deletingLastPathComponent()
+        let installed = try Identity.directory(destination), parentIdentity = try Identity.directory(parent, owned: false)
+        _ = try Identity.directory(candidate)
+        try probe(parent)
+        let replacement = parent.appendingPathComponent(".knot-native-update-" + UUID().uuidString + ".app")
+        try FileManager.default.copyItem(at: candidate, to: replacement)
+        do {
+            try validate(replacement)
+            let prepared = try Identity.directory(replacement)
+            guard prepared.device == installed.device else { throw NativeUpdateError.installation }
+            return Self(destination: destination, replacement: replacement, installedIdentity: installed,
+                        preparedIdentity: prepared, parentIdentity: parentIdentity)
+        } catch { try? FileManager.default.removeItem(at: replacement); throw error }
+    }
+    func publish(exchange: (URL, URL) throws -> Void = NativeUpdateTransaction.exchange) throws {
+        guard try Identity.directory(destination) == installedIdentity,
+              try Identity.directory(replacement) == preparedIdentity,
+              try Identity.directory(destination.deletingLastPathComponent(), owned: false) == parentIdentity else { throw NativeUpdateError.installation }
+        try exchange(destination, replacement)
+    }
+    func discardPreparedCopy() { try? FileManager.default.removeItem(at: replacement) }
 }

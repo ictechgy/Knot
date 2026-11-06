@@ -53,8 +53,10 @@ namespace Knot.NativePreview
                             TrustedWrite(tls, "{\"proof\":" + StrictJson.Quote(attempt == 1 ? previousProof : proof) + "}");
                             if (attempt == 1)
                             {
-                                bool failed = false; try { NativeProtocol.ReadClient(tls, true); } catch (IOException) { failed = true; }
-                                Check(failed && issued == 1);
+                                byte[] header = NativeProtocol.ReadExactly(tls, 5);
+                                Check(header[0] == 127 && NativeProtocol.U32(header, 1) <= 128);
+                                string rejection = StrictJson.String(StrictJson.Parse(NativeProtocol.ReadExactly(tls, (int)NativeProtocol.U32(header, 1)), "code"), "code");
+                                Check(rejection == "rejected" && issued == 1);
                             }
                             else {
                                 string invitation = StrictJson.String(StrictJson.Parse(NativeProtocol.ReadClient(tls, true).Payload, "invitation"), "invitation");

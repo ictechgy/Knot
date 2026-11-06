@@ -62,6 +62,10 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
         return SecTrustEvaluateWithError(trust, nil)
     }
 
+    static func startFailure(_ error: NWError) -> NativeFailure {
+        if case .tls = error { return .trust }
+        return .transport
+    }
     func start() async throws {
         try await withCheckedThrowingContinuation { continuation in
             let id = UUID()
@@ -70,7 +74,8 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
                 connection.stateUpdateHandler = { state in
                     switch state {
                     case .ready: _ = gate.finish(.success(()))
-                    case .failed, .cancelled: _ = gate.finish(.failure(NativeFailure.transport))
+                    case .failed(let error): _ = gate.finish(.failure(Self.startFailure(error)))
+                    case .cancelled: _ = gate.finish(.failure(NativeFailure.transport))
                     default: break
                     }
                 }
@@ -111,7 +116,8 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
     }
 
     func send(_ packet: Packet) async throws {
-        guard packet.payload.count <= 4096 else { throw NativeFailure.oversized }
+        if packet.kind == .clipboardRequest { try ClipboardProtocol.validateRequest(packet.payload) }
+        else { guard packet.payload.count <= 4096 else { throw NativeFailure.oversized } }
         var timeout = 10.0
         if packet.kind == .hello {
             let remaining = helloDeadline - ContinuousClock.now
@@ -122,7 +128,8 @@ final class TLSChannel: NativeChannel, @unchecked Sendable {
     }
 
     // File channels use an independent connection and packet type. The media
-    // NativeChannel.send contract above remains capped at 4096 bytes.
+    // NativeChannel.send retains its ordinary 4096-byte cap, with one strictly
+    // parsed, bounded clipboard request exception.
     func sendFilePacket(_ packet: FilePacket) async throws {
         var budget = 30.0
         if packet.kind == .hello {

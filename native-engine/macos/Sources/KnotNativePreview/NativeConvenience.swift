@@ -25,12 +25,11 @@ final class NativePreferences: ObservableObject {
         model.$quality.sink { [weak self] quality in
             self?.qualityObservation = quality?.$preference.dropFirst().sink { [weak self] in self?.defaults.set(Int($0.rawValue), forKey: "native.quality") }
         }.store(in: &observations)
-        model.$phase.sink { [weak self, weak model] phase in
-            guard phase == .streaming, let self, let model,
-                  let raw = self.defaults.object(forKey: "native.quality") as? Int,
-                  let value = QualityModel.Preference(rawValue: UInt8(clamping: raw)) else { return }
-            model.quality?.choose(value)
-        }.store(in: &observations)
+    }
+    func restoreQuality(_ model: SessionModel) {
+        guard model.phase == .streaming, let raw = defaults.object(forKey: "native.quality") as? Int,
+              let value = QualityModel.Preference(rawValue: UInt8(clamping: raw)) else { return }
+        model.quality?.choose(value)
     }
 }
 

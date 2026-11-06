@@ -22,11 +22,15 @@ final class SessionModel: ObservableObject {
     @Published private(set) var quality: QualityModel?
     private var selectedTrustedDevice: SavedNativeDevice?
     private var pendingRegistration: Invitation?
-    private var trustedClient: NativeTrustedClient?
+    private var trustedClient: (any NativeTrustedConnecting)?
     private var trustedTask: Task<Void, Never>?
     private var registrationTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
+    var reconnectAttemptCount: Int { reconnectAttempt }
+    var hasPendingReconnect: Bool { reconnectTask != nil }
+    private let makeTrustedClient: @Sendable (SavedNativeDevice, String) throws -> any NativeTrustedConnecting
+    private let waitForReconnect: @MainActor @Sendable (Duration) async throws -> Void
     @Published var showFullscreenControls = false
     @Published private(set) var numberAuthorized = false
     @Published private(set) var files: FileTransferModel?
@@ -62,9 +66,16 @@ final class SessionModel: ObservableObject {
     var active: Bool { [.connecting, .approval, .decoding, .streaming].contains(phase) }
 
     init(makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) },
-         waitForInputDeadline: @escaping @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void = { try await Task.sleep(until: $0) }) {
+         waitForInputDeadline: @escaping @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void = { try await Task.sleep(until: $0) },
+         makeTrustedClient: @escaping @Sendable (SavedNativeDevice, String) throws -> any NativeTrustedConnecting = { try NativeTrustedClient(device: $0, viewerName: $1) },
+         waitForReconnect: @escaping @MainActor @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+         initialSavedDevices: [SavedNativeDevice] = [], initialRegisteredDevice: SavedNativeDevice? = nil) {
         self.makeChannel = makeChannel
         self.waitForInputDeadline = waitForInputDeadline
+        self.makeTrustedClient = makeTrustedClient; self.waitForReconnect = waitForReconnect
+        // Explicit fixture inputs; initialization never opens Keychain/network.
+        savedDevices = Array(initialSavedDevices.prefix(16))
+        selectedTrustedDevice = initialRegisteredDevice
     }
 
     func prepareForUpdate() {
@@ -100,7 +111,7 @@ final class SessionModel: ObservableObject {
         let id = UUID(); identity = id; phase = .connecting
         status = "등록된 PC의 인증서를 확인하고 있어요…"
         do {
-            let client = try NativeTrustedClient(device: device, viewerName: viewerLabel); trustedClient = client
+            let client = try makeTrustedClient(device, viewerLabel); trustedClient = client
             trustedTask = Task { [weak self] in
                 do {
                     guard let invitation = try await client.connect() else { throw NativeFailure.trust }
@@ -110,8 +121,12 @@ final class SessionModel: ObservableObject {
                     self.startConnection()
                 } catch {
                     guard let self, self.identity == id, !Task.isCancelled else { return }
-                    self.close(message: "등록된 PC에 연결하지 못했어요. Windows에서 공유 중인지 확인하세요.", failed: true)
-                    self.scheduleReconnect(device)
+                    if (error as? NativeFailure) == .transport {
+                        self.close(message: "등록된 PC에 연결하지 못했어요. Windows에서 공유 중인지 확인하세요.", failed: true)
+                        self.scheduleReconnect(device)
+                    } else {
+                        self.close(message: "등록된 PC의 인증서나 연결 권한을 확인하지 못했어요. Windows의 등록 기기를 확인하고 새 번호로 다시 등록하세요.", failed: true)
+                    }
                 }
             }
         } catch { close(message: "등록된 PC 정보를 확인하지 못했어요. 다시 등록해주세요.", failed: true) }
@@ -163,8 +178,9 @@ final class SessionModel: ObservableObject {
         status = "연결이 끊겼어요. \(delay)초 후 등록된 PC에 다시 연결해요 (\(reconnectAttempt)/6)."
         let run = identity
         reconnectTask = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
-            guard let self, self.identity == run, !Task.isCancelled, !self.active, self.autoReconnect else { return }
+            guard let self else { return }
+            do { try await self.waitForReconnect(.seconds(delay)) } catch { return }
+            guard self.identity == run, !Task.isCancelled, !self.active, self.autoReconnect else { return }
             self.reconnectTask = nil; self.beginTrustedConnection(device)
         }
     }
@@ -279,6 +295,7 @@ final class SessionModel: ObservableObject {
             presentationBackpressureSince = nil; displayBehind = false
             if phase != .streaming {
                 phase = .streaming
+                if selectedTrustedDevice != nil { reconnectAttempt = 0 }
                 if let pending = pendingRegistration { registerConnectedDevice(pending) }
             }
             if statusChanged { updateStreamingStatus() }
@@ -336,7 +353,9 @@ final class SessionModel: ObservableObject {
         guard active else { return false }
         let silence: Duration = phase == .approval ? .seconds(65) : .seconds(10)
         guard now - lastIncoming < silence, phase != .approval || now - connectedAt < .seconds(125) else {
-            fail("The peer or host approval timed out. Create a new invitation."); return false
+            if phase == .streaming, selectedTrustedDevice != nil { transportFailed() }
+            else { fail("The peer or host approval timed out. Create a new invitation.") }
+            return false
         }
         guard phase != .decoding || now - readyAt < .seconds(15) else {
             fail("The first decoded image did not arrive. Create a new invitation."); return false
@@ -386,6 +405,21 @@ final class SessionModel: ObservableObject {
             return false
         }
         return send(packet)
+    }
+    /// A clipboard gesture may fail before any request reaches the host. Queue
+    /// an ordered owned-input release before forgetting local modifier state,
+    /// independently of validation, empty clipboards or send admission failure.
+    /// Preserve an existing focus/recovery pause without pausing normal typing.
+    @discardableResult func prepareClipboardGesture() -> Bool {
+        guard phase == .streaming, !fileUIInputSuspended else { return false }
+        clipboard?.cancel()
+        let wasPaused = inputRecovery
+        inputEpoch &+= 1
+        input.revoke()
+        if !wasPaused { input.recover() }
+        surface?.forgetHeldKeys()
+        pumpWriter()
+        return true
     }
     func releaseInput() {
         clipboard?.cancel()
