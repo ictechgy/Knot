@@ -316,7 +316,7 @@ class NativeRebuildTests(unittest.TestCase):
         visual = json.loads((self.output / "native-ui-visual-checks.json").read_text())
         self.assertEqual(visual["visualAcceptance"], "manual-review-required")
         self.assertIn("INERT", visual["rendererReport"]["renderMethod"])
-        self.assertEqual(len(visual["rendererReport"]["images"]), 18)
+        self.assertEqual(len(visual["rendererReport"]["images"]), 22)
 
     def test_failed_rebuild_cannot_retain_prior_success_claim(self):
         self.build_with_inert_tools()
@@ -441,7 +441,9 @@ class NativeRebuildTests(unittest.TestCase):
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
                       "nearby-compact", "number-compact", "number-dark", "help-compact",
                       "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
-                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch"]:
+                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch",
+                      "audio-on", "audio-muted", "audio-unavailable", "audio-on-compact", "audio-muted-compact", "audio-unavailable-compact",
+                      "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
             report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,
@@ -450,6 +452,7 @@ class NativeRebuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "without production effects"):
             builder.record_visual_checks(self.output / "visuals", [])
         report["syntheticWindowsShown"] = False
+        report.update(audioDeviceInvoked=False, audioEngineInvoked=False, audioAdaptersInvoked=0)
         report_path.write_text(json.dumps(report))
         self.assertTrue(builder.record_visual_checks(self.output / "visuals", []).is_file())
 
