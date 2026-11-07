@@ -149,10 +149,12 @@ private final class MuteRetryFixtures: @unchecked Sendable {
 }
 
 @MainActor private func muteEventually(_ condition: () async -> Bool) async -> Bool {
-    let deadline = ContinuousClock.now + .seconds(2)
+    // Readiness is a fixture synchronization condition, not a two-second
+    // performance claim about a shared runner executing concurrent codec tests.
+    let deadline = ContinuousClock.now + .seconds(10)
     while ContinuousClock.now < deadline {
         if await condition() { return true }
-        await Task.yield()
+        do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
     }
     return await condition()
 }

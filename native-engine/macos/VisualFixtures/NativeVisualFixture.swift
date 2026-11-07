@@ -35,6 +35,8 @@ struct NativeVisualFixture {
             ("idle", "idle", 1200, 760, false),
             ("reviewed", "reviewed", 1200, 760, false),
             ("connecting", "connecting", 1200, 760, false),
+            ("wake-reconnect", "wake-reconnect", 1200, 760, false),
+            ("wake-reconnect-compact", "wake-reconnect", 880, 620, false),
             ("approval", "approval", 1200, 760, false),
             ("decoding", "decoding", 1200, 760, false),
             ("streaming", "streaming", 1200, 760, false),
@@ -182,6 +184,7 @@ struct NativeVisualFixture {
             imageResult["renderedNumberFields"] = numberFields
             imageResult["rememberThisPC"] = model.rememberThisPC
             imageResult["savedDeviceCount"] = model.savedDevices.count
+            imageResult["pendingReconnect"] = model.hasPendingReconnect
             imageResult["convenienceActionsVisible"] = convenience != nil
             imageResult["convenienceActionsPresentation"] = convenience == nil ? "native-menu" : "inline-production-action-views"
             imageResult["audioState"] = audio.map { String(describing: $0.session.state) } ?? "absent"
@@ -206,6 +209,7 @@ struct NativeVisualFixture {
             images.append(imageResult)
             window.close()
             audio?.session.stop()
+            model.disconnect()
             print("Rendered " + file)
         }
         guard effects.count == 0, effects.mediaCount == 0, effects.convenienceCount == 0 else { throw FixtureError.effects }
@@ -294,6 +298,7 @@ struct NativeVisualFixture {
     @MainActor private static func requireInert(model: SessionModel, state: String, effects: FixtureEnrollmentEffects) throws {
         guard effects.count == 0, effects.mediaCount == 0, effects.convenienceCount == 0 else { throw FixtureError.effects }
         guard model.phase == expectedPhase(state) else { throw FixtureError.phase }
+        guard model.hasPendingReconnect == (state == "wake-reconnect") else { throw FixtureError.phase }
     }
     @MainActor private static func expectedPhase(_ state: String) -> SessionModel.Phase {
         if state.hasPrefix("files") || state.hasPrefix("audio-") { return .streaming }
@@ -357,13 +362,17 @@ struct NativeVisualFixture {
             lastReceivedURL: state == "files-complete" ? URL(fileURLWithPath: "/synthetic-fixture/회의 자료.pdf") : nil)
     }
     @MainActor private static func makeModel(_ state: String, effects: FixtureEnrollmentEffects) throws -> SessionModel {
-        let saved = state == "saved-devices" ? try makeSavedDevices() : []
+        let saved = ["saved-devices", "wake-reconnect"].contains(state) ? try makeSavedDevices() : []
         let model = SessionModel(makeChannel: { _ in effects.markMedia(); throw NativeFailure.state },
-            makeTrustedClient: { _, _ in effects.mark(); throw NativeFailure.state }, initialSavedDevices: saved)
+            makeTrustedClient: { _, _ in effects.mark(); throw NativeFailure.state },
+            waitForWakeReadiness: { try await Task.sleep(for: .seconds(30)) },
+            initialSavedDevices: saved, initialRegisteredDevice: state == "wake-reconnect" ? saved.first : nil)
         model.viewerLabel = "나의 Mac"
         model.rememberThisPC = state == "number-remembered"
         if state.hasPrefix("files") || state.hasPrefix("audio-") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
         switch state {
+        case "wake-reconnect":
+            model.phase = .streaming; model.systemWillSleep(); model.systemDidWake()
         case "reviewed", "invalid-name":
             let body: [String: Any] = ["v": 1, "address": "192.168.50.24", "port": 48631,
                 "certificateSHA256": String(repeating: "0123456789abcdef", count: 4),

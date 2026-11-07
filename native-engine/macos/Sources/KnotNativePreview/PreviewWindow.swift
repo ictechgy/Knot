@@ -45,6 +45,7 @@ struct PreviewWindow: View {
     }
 
     private var phaseTitle: String {
+        if model.hasPendingReconnect { return "재연결 준비 중" }
         if model.phase == .approval, model.numberAuthorized { return "화면 준비 중" }
         if !model.active, enrollment.busy { return enrollment.phase == .discovering ? "PC 찾는 중" : "번호 확인 중" }
         if !model.active, enrollment.phase == .failed { return "연결 확인 필요" }
@@ -138,15 +139,25 @@ struct PreviewWindow: View {
                     symbol: model.phase == .failed || enrollment.phase == .failed ? "exclamationmark.circle" : enrollment.busy ? "clock" : "circle",
                     tint: model.phase == .failed || enrollment.phase == .failed ? .orange : .secondary)
             }
-            if model.phase == .failed || model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters." { failurePanel }
-            if !model.savedDevices.isEmpty { savedDevicesCard }
-            if let target = reviewedTarget { targetCard(target) }
-            else {
-                connectionProgress
-                if let candidate = enrollment.selected { numberCard(candidate) }
+            if model.hasPendingReconnect {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("등록된 PC에 다시 연결해요", systemImage: "arrow.clockwise").font(.headline)
+                    Text(model.status).font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("재연결 취소") { enrollment.cancel(); model.disconnect() }
+                        .buttonStyle(.bordered)
+                        .accessibilityHint("자동 재연결을 멈추고 다른 PC를 선택할 수 있어요.")
+                }.padding(20).nativePanel()
+            } else {
+                if model.phase == .failed || model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters." { failurePanel }
+                if !model.savedDevices.isEmpty { savedDevicesCard }
+                if let target = reviewedTarget { targetCard(target) }
                 else {
-                    discoveryCard
-                    alternateMethods
+                    connectionProgress
+                    if let candidate = enrollment.selected { numberCard(candidate) }
+                    else {
+                        discoveryCard
+                        alternateMethods
+                    }
                 }
             }
             DisclosureGroup(isExpanded: $showingOptions) {

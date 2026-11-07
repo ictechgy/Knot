@@ -12,10 +12,11 @@ struct KnotNativePreviewApp: App {
     @StateObject private var preferences = NativePreferences()
     @StateObject private var quick = NativeQuickActivation()
     @StateObject private var updates = NativeUpdateModel()
+    @StateObject private var power = NativePowerMonitor()
     init() { NativeUpdateHandoff.runIfRequested() }
     var body: some Scene {
         Window("Knot Native Preview", id: "main") {
-            NativeMainContent(model: model, windowState: windowState, preferences: preferences, quick: quick, updates: updates)
+            NativeMainContent(model: model, windowState: windowState, preferences: preferences, quick: quick, updates: updates, power: power)
         }
             .defaultSize(width: 1200, height: 760)
             .commands {
@@ -26,7 +27,7 @@ struct KnotNativePreviewApp: App {
                     }.keyboardShortcut("k", modifiers: [.control, .option, .command])
                         .disabled(!windowState.canToggleFullscreenControls(for: model))
                     Button("연결 종료") { model.disconnect() }
-                        .keyboardShortcut("d", modifiers: [.control, .option, .command]).disabled(!model.active)
+                        .keyboardShortcut("d", modifiers: [.control, .option, .command]).disabled(!model.active && !model.hasPendingReconnect)
                 }
             }
         MenuBarExtra("Knot", systemImage: "display") {
@@ -42,9 +43,11 @@ private struct NativeMainContent: View {
     @ObservedObject var preferences: NativePreferences
     @ObservedObject var quick: NativeQuickActivation
     @ObservedObject var updates: NativeUpdateModel
+    @ObservedObject var power: NativePowerMonitor
     var body: some View {
         PreviewWindow(model: model, windowState: windowState, updates: updates)
             .onAppear {
+                power.bind(model, notificationCenter: NSWorkspace.shared.notificationCenter)
                 preferences.bind(model)
                 model.refreshSavedDevices(); model.resumeAfterUpdateIfRequested()
                 windowState.onFullscreenChanged = { preferences.preferFullscreen = $0 }
@@ -72,7 +75,7 @@ private struct NativeMenuContent: View {
             Text(updates.status)
             if updates.available { Button("업데이트하고 다시 열기") { updates.install { model.prepareForUpdate() } } }
             Divider()
-            Button("연결 종료") { model.disconnect() }.disabled(!model.active)
+            Button("연결 종료") { model.disconnect() }.disabled(!model.active && !model.hasPendingReconnect)
             Button("Knot 종료") { model.disconnect(); quick.stop(); NSApp.terminate(nil) }
         }
     }

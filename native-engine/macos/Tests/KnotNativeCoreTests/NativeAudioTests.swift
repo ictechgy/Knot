@@ -183,17 +183,28 @@ private final class AudioFixtureFactory: @unchecked Sendable {
     var creations: Int { lock.withLock { count } }
 }
 
+/// These fixtures assert lifecycle ordering, not scheduler latency. Yielding
+/// in a hot loop can consume the readiness budget while unrelated concurrent
+/// codec tests occupy MainActor on a shared CI runner.
+@MainActor private func audioEventually(_ condition: () async -> Bool) async -> Bool {
+    let deadline = ContinuousClock.now + .seconds(10)
+    while ContinuousClock.now < deadline {
+        if await condition() { return true }
+        do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
+    }
+    return await condition()
+}
+
 @Test @MainActor func audioSessionAuthenticatesBeforeCreatingOutputAndMuteKeepsDraining() async throws {
     let channel = AudioFixtureChannel(try audioFixtureReady().encoded + audioFixturePCM().encoded + NativeAudioPacket(kind: .heartbeat).encoded)
     let factory = AudioFixtureFactory()
     let session = try NativeAudioSession(invitation: audioFixtureInvitation(), makeChannel: { _ in channel }, makePlayer: { factory.make() })
+    defer { session.stop() }
     #expect(factory.creations == 0 && session.state == .idle)
     session.setMuted(true)
     let task = try #require(session.start())
     #expect(session.start() == nil)
-    let deadline = ContinuousClock.now + .seconds(2)
-    while !channel.snapshot().waiting, ContinuousClock.now < deadline { await Task.yield() }
-    try #require(channel.snapshot().waiting)
+    try #require(await audioEventually { channel.snapshot().waiting })
     let output = await factory.player.snapshot()
     #expect(session.state == .playing && session.isAvailable && session.muted)
     #expect(output.starts == 1 && output.frames == 960 && output.muted)
@@ -201,7 +212,7 @@ private final class AudioFixtureFactory: @unchecked Sendable {
     #expect(stream.writes.count == 1 && stream.writes[0].kind == .hello)
     #expect(stream.requests.allSatisfy { $0.1 > .zero && $0.1 <= .seconds(5) })
     session.toggleMuted()
-    while (await factory.player.snapshot()).muted, ContinuousClock.now < deadline { await Task.yield() }
+    try #require(await audioEventually { !(await factory.player.snapshot()).muted })
     let unmuted = await factory.player.snapshot()
     #expect(!session.muted && !unmuted.muted)
     session.stop(); await task.value
@@ -237,10 +248,9 @@ private final class AudioFixtureFactory: @unchecked Sendable {
 @Test @MainActor func stoppingOptionalAudioCancelsPendingReadAndRejectsLateState() async throws {
     let channel = AudioFixtureChannel(Data()), factory = AudioFixtureFactory()
     let session = try NativeAudioSession(invitation: audioFixtureInvitation(), makeChannel: { _ in channel }, makePlayer: { factory.make() })
+    defer { session.stop() }
     let task = try #require(session.start())
-    let deadline = ContinuousClock.now + .seconds(2)
-    while !channel.snapshot().waiting, ContinuousClock.now < deadline { await Task.yield() }
-    try #require(channel.snapshot().waiting)
+    try #require(await audioEventually { channel.snapshot().waiting })
     session.stop(); await task.value
     #expect(task.isCancelled && session.state == .stopped && !session.isAvailable)
     #expect(channel.snapshot().closed && factory.creations == 0 && session.start() == nil)
@@ -248,26 +258,27 @@ private final class AudioFixtureFactory: @unchecked Sendable {
 
 private actor AudioSuspendedFixturePlayer: NativeAudioPlaying {
     private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
     private(set) var started = false
     private(set) var stopped = false
     func start(muted: Bool) async {
+        guard !released else { started = true; return }
         await withCheckedContinuation { continuation in self.continuation = continuation; started = true }
     }
     func enqueue(_ pcm: NativeAudioPCM) {}
     func setMuted(_ muted: Bool) {}
     func stop() { stopped = true }
-    func finishStart() { let waiting = continuation; continuation = nil; waiting?.resume() }
+    func finishStart() { released = true; let waiting = continuation; continuation = nil; waiting?.resume() }
 }
 
 @Test @MainActor func audioOutputStartingAfterStopCannotRestoreAvailability() async throws {
     let channel = AudioFixtureChannel(try audioFixtureReady().encoded), player = AudioSuspendedFixturePlayer()
     let session = try NativeAudioSession(invitation: audioFixtureInvitation(), makeChannel: { _ in channel }, makePlayer: { player })
+    defer { session.stop(); Task { await player.finishStart() } }
     var becameAvailable = false
     session.onChange = { [weak session] in if session?.isAvailable == true { becameAvailable = true } }
     let task = try #require(session.start())
-    let deadline = ContinuousClock.now + .seconds(2)
-    while !(await player.started), ContinuousClock.now < deadline { await Task.yield() }
-    try #require(await player.started)
+    try #require(await audioEventually { await player.started })
     session.stop()
     await player.finishStart(); await task.value
     #expect(!becameAvailable && session.state == .stopped && !session.isAvailable && channel.snapshot().closed)

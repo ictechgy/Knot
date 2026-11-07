@@ -489,18 +489,25 @@ private final class PublishedEmissionCounter: @unchecked Sendable {
 @Test @MainActor func disconnectRevokesBlockedWriterAndQueuedInputSynchronously() async throws {
     let transport = InertChannel(blockedKind: .key), presenter = InertPresenter([.presented])
     let model = beginInert(transport, presenter: presenter)
+    defer { model.disconnect() }
     try await approveInert(transport, model)
     model.presentDecodedImage(try syntheticPresentationPixel())
     try #require(model.phase == .streaming)
     model.send(try Input.key(down: true, scan: 0x1e, extended: false))
     for _ in 0..<100 { if transport.attemptedKinds().contains(.key) { break }; try await Task.sleep(for: .milliseconds(5)) }
-    try #require(transport.attemptedKinds() == [.hello, .key])
+    let attemptedBeforeStop = transport.attemptedKinds()
+    // A valid liveness heartbeat may be sent while unrelated concurrent tests
+    // delay this fixture. The first input still must be the single blocked key.
+    try #require(attemptedBeforeStop.filter { $0 != .heartbeat } == [.hello, .key])
+    try #require(attemptedBeforeStop.last == .key)
+    let sentBeforeStop = transport.snapshot()
+    #expect(sentBeforeStop.map(\.kind).filter { $0 != .heartbeat } == [.hello])
     model.send(try Input.key(down: true, scan: 0x30, extended: false))
     let start = ContinuousClock.now; model.disconnect()
     #expect(ContinuousClock.now - start < .milliseconds(100) && transport.closeCount() == 1)
     try await Task.sleep(for: .milliseconds(20))
-    #expect(model.phase == .idle && transport.attemptedKinds() == [.hello, .key])
-    #expect(transport.snapshot().map(\.kind) == [.hello])
+    #expect(model.phase == .idle && transport.attemptedKinds() == attemptedBeforeStop)
+    #expect(transport.snapshot() == sentBeforeStop)
 }
 
 @Test @MainActor func presentationFailureAfterStreamingRevokesTransportAndInput() async throws {
