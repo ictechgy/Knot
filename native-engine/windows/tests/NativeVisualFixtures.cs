@@ -263,6 +263,13 @@ namespace Knot.NativePreview
                             if (!form.FixtureAudioConsentMatches(false, state.RunPresent))
                                 throw new InvalidOperationException("Playback audio must begin disabled and be editable only outside a run.");
                             form.SetFixtureAudioConsent(frame.AudioAllowed);
+                            if (frame.AudioAllowed)
+                            {
+                                if (!form.FixtureAudioStartConsent(true) || form.FixtureAudioStartConsent(false) ||
+                                    !form.FixtureAudioConsentMatches(false, state.RunPresent))
+                                    throw new InvalidOperationException("Only a fresh owner action can include audio; automatic new hosts clear playback consent.");
+                                form.SetFixtureAudioConsent(true);
+                            }
                             AssertFontsUsable(form); Progress(frame, "fonts-usable-before-show");
                             Progress(frame, "before-show"); form.Show(); Progress(frame, "after-show");
                             form.PerformLayout(); Progress(frame, "after-initial-layout"); Pump(); Progress(frame, "after-initial-pump");

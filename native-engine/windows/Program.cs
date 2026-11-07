@@ -652,6 +652,11 @@ namespace Knot.NativePreview
         }
         internal bool FixtureAudioConsentMatches(bool allowed, bool runPresent)
         { return fixtureMode && allowAudio.Checked == allowed && allowAudio.Enabled == !runPresent; }
+        internal bool FixtureAudioStartConsent(bool ownerInitiated)
+        {
+            if (!fixtureMode) throw new InvalidOperationException("Synthetic consent requires the inert fixture.");
+            return PrepareAudioForStart(ownerInitiated);
+        }
         internal bool FixtureAudioConsentFits { get { return !allowAudio.Visible || scroll.ClientRectangle.Contains(BoundsWithin(allowAudio, scroll)); } }
         internal void SetFixtureCertificateCompatibility(bool required)
         {
@@ -813,19 +818,27 @@ namespace Knot.NativePreview
                     return;
                 }
             }
-            StartShare();
+            StartShare(true);
         }
-        private void StartShare()
+        private bool PrepareAudioForStart(bool ownerInitiated)
+        {
+            // A fresh automatic host is a new run. Old registration/resume
+            // authority never opts the owner into playback capture.
+            if (!ownerInitiated) allowAudio.Checked = false;
+            return allowAudio.Checked;
+        }
+        private void StartShare(bool ownerInitiated = false)
         {
             AdapterChoice selected = addresses.SelectedItem as AdapterChoice;
             if (server != null || selected == null) return;
+            bool audioAllowed = PrepareAudioForStart(ownerInitiated);
             shareRequested = true;
             try
             {
                 HostServer run = new HostServer(selected.Address, 48631, new WindowsMediaFactory(SelectedQuality), new WindowsInputSink(), false, null,
                     !legacyMode.Checked, System.Diagnostics.Stopwatch.GetTimestamp, advertisedName,
                     files: allowFiles.Checked ? new FileSharingOptions(fileRootPath) : null,
-                    allowAudio: allowAudio.Checked);
+                    allowAudio: audioAllowed);
                 server = run; rawFileStatus = ""; presentation.Bind(run.Identity); phase = HostViewPhase.Invitation; invitationAvailable = true;
                 run.AudioStatusChanged = delegate(string message)
                 {

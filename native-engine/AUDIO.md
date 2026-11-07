@@ -4,6 +4,8 @@ Native.13 can send the default Windows playback output to the connected Mac. Upd
 
 This is WASAPI render-loopback capture, never microphone capture or a microphone fallback. It shares the default playback mix, with no per-app source selection or volume controls. Protected/DRM playback, every device format and a device change during a session are not guaranteed. The Mac speaker control mutes or restores the local player; it does not change Windows volume. Muting keeps receiving and draining packets.
 
+An automatic registered-device reconnect that starts a fresh Windows share clears playback consent. To include sound again, stop that Windows share, select the playback checkbox and start sharing manually. Reauthenticating the audio connection within the same active share keeps that share's existing permission.
+
 ## Independent authority and transport
 
 - TCP48636 is a separate TLS connection to the authenticated media host's same private IPv4 address, using the same exact certificate pin and strict macOS certificate policy. The Windows service restricts the connection to the current claimed media peer. No trust downgrade or replacement pin is accepted.
