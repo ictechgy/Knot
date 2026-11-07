@@ -37,13 +37,18 @@ namespace Knot.NativePreview
             Reject(delegate { quality.Handle(new Packet(0x20, new byte[] { 0 })); });
             quality.Handle(new Packet(0x33, new byte[] { 1 }));
             quality.Apply(media, 1);
-            Check(media.Applied.Count == 1 && media.Applied[0][0] == 30 && media.Applied[0][1] == 30000000);
+            Check(media.Applied.Count == 1 && media.Applied[0][0] == 30 && media.Applied[0][1] == 40000000);
             quality.Apply(media, Stopwatch.Frequency);
             Check(media.Applied.Count == 1); // cooldown prevents oscillating on every frame.
             long now = 1;
-            for (int i = 0; i < 5; ++i) { now += Stopwatch.Frequency * 2; quality.Apply(media, now); }
+            for (int i = 0; i < 5; ++i) {
+                now += Stopwatch.Frequency * 2; quality.Apply(media, now);
+                if (i < 4) Check(media.Applied.Count == 1); // no immediate30/60 FPS oscillation.
+            }
             status = quality.TakeStatus();
-            Check(NativeProtocol.U32(status, 0) == 60 && NativeProtocol.U32(status, 4) == 32000000);
+            Check(NativeProtocol.U32(status, 0) == 60 && NativeProtocol.U32(status, 4) == 40000000);
+            AlternatingQualityPressureChecks(info, false);
+            AlternatingQualityPressureChecks(info, true);
             // Sustained congestion cannot exceed the configured floor/ceiling.
             for (int i = 0; i < 30; ++i) { quality.ObserveWrite(150); now += Stopwatch.Frequency * 2; quality.Apply(media, now); }
             status = quality.TakeStatus();
@@ -66,6 +71,46 @@ namespace Knot.NativePreview
             NativeQualityController fixedQuality = new NativeQualityController(info);
             fixedQuality.Handle(new Packet(0x32, new byte[] { 1 })); fixedQuality.Apply(fixedMedia, 1);
             Check(fixedQuality.TakeStatus()[8] == 0);
+        }
+        private static void AlternatingQualityPressureChecks(MediaInfo info, bool slowWrites)
+        {
+            AdaptiveQualityFixture media = new AdaptiveQualityFixture(); media.Information = info;
+            NativeQualityController quality = new NativeQualityController(info);
+            quality.TakeStatus();
+            long now = 1;
+            uint lastRate = info.Bitrate;
+            for (int tick = 0; tick < 20; ++tick)
+            {
+                if (tick % 2 == 0)
+                {
+                    // Both signals demand fewer frames. Only measured slow
+                    // writes may additionally reduce the selected bitrate.
+                    quality.Handle(new Packet(0x33, new byte[] { 1 }));
+                    if (slowWrites) quality.ObserveWrite(150);
+                }
+                quality.Apply(media, now);
+                byte[] status = quality.TakeStatus();
+                if (status != null)
+                {
+                    Check(NativeProtocol.U32(status, 0) == 30);
+                    lastRate = NativeProtocol.U32(status, 4);
+                }
+                Check(media.Applied.Count > 0 && media.Applied[media.Applied.Count - 1][0] == 30);
+                Check(slowWrites ? lastRate <= info.Bitrate : lastRate == info.Bitrate);
+                now += Stopwatch.Frequency * 2;
+            }
+            if (slowWrites) Check(lastRate < info.Bitrate);
+            int beforeRecovery = media.Applied.Count;
+            // The final odd tick above is one healthy interval. Four more
+            // complete the same five-interval recovery requirement.
+            for (int healthy = 0; healthy < 4; ++healthy)
+            {
+                quality.Apply(media, now); now += Stopwatch.Frequency * 2;
+                if (healthy < 3) Check(media.Applied.Count == beforeRecovery);
+            }
+            byte[] recovered = quality.TakeStatus();
+            Check(recovered != null && NativeProtocol.U32(recovered, 0) == info.Fps);
+            Check(NativeProtocol.U32(recovered, 4) == (slowWrites ? Math.Min(info.Bitrate, lastRate + 2000000U) : info.Bitrate));
         }
     }
 }

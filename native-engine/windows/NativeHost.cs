@@ -25,6 +25,11 @@ namespace Knot.NativePreview
         private readonly EnrollmentServer enrollment;
         private readonly FileSharingOptions fileOptions;
         private FileServer files;
+        private readonly bool audioAllowed;
+        private readonly IAudioCaptureFactory audioFactory;
+        private NativeAudioServer audio;
+        private byte[] sessionAudioKey;
+        internal Action<string> AudioStatusChanged;
         private TrustedDeviceServer trustedServer;
         private byte[] registrationHash;
         private long registrationDeadline;
@@ -59,6 +64,7 @@ namespace Knot.NativePreview
         internal Action Finished;
         internal Action<string> FileStatusChanged;
         internal int Port { get { return port; } }
+        internal int AudioPort { get { lock (gate) return isStopped || !active || audio == null ? 0 : audio.Port; } }
         internal string Pin { get { return Identity.Pin; } }
         internal string OwnedKeyContainerName { get { return certificate.OwnedKeyContainerName; } }
         internal bool IsActive { get { lock (gate) return active; } }
@@ -74,7 +80,8 @@ namespace Knot.NativePreview
             : this(address, port, mediaFactory, inputSink, syntheticLoopback, invitation, false, Stopwatch.GetTimestamp, null) { }
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback,
                             Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null,
-                            FileSharingOptions files = null, Action<int, int, int> syntheticAfterEnrollment = null)
+                            FileSharingOptions files = null, Action<int, int, int> syntheticAfterEnrollment = null,
+                            bool allowAudio = false, IAudioCaptureFactory audioFactory = null)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
@@ -84,6 +91,7 @@ namespace Knot.NativePreview
             this.enrollmentMode = enrollmentMode; this.clock = clock ?? new Func<long>(Stopwatch.GetTimestamp);
             this.inputClock = inputClock ?? new Func<long>(Stopwatch.GetTimestamp);
             fileOptions = files;
+            audioAllowed = allowAudio; this.audioFactory = audioFactory ?? new WindowsAudioCaptureFactory();
             this.mediaFactory = mediaFactory; this.inputSink = inputSink;
             try
             {
@@ -293,6 +301,28 @@ namespace Knot.NativePreview
                         active = true;
                     }
                     if (preparedFiles != null) { preparedFiles.Start(); ready = FileProtocol.WithOffer(ready, preparedFiles.Token, preparedFiles.RootName); }
+                    if (audioAllowed && sessionAudioKey != null)
+                    {
+                        NativeAudioServer preparedAudio = null;
+                        try
+                        {
+                            preparedAudio = new NativeAudioServer(address, claimedPeer, certificate.Certificate, sessionAudioKey,
+                                delegate { lock (gate) return active && !isStopped; }, audioFactory,
+                                delegate(string message) { Action<string> status = AudioStatusChanged; if (status != null) status(message); }, syntheticLoopback,
+                                syntheticLoopback ? 0 : NativeAudioProtocol.Port);
+                            bool cancelled;
+                            lock (gate) { cancelled = isStopped; if (!cancelled) audio = preparedAudio; }
+                            if (cancelled) { preparedAudio.Dispose(); return; }
+                            preparedAudio.Start();
+                        }
+                        catch (Exception)
+                        {
+                            try { if (preparedAudio != null) preparedAudio.Dispose(); } catch { }
+                            lock (gate) { if (audio == preparedAudio) audio = null; }
+                            Action<string> status = AudioStatusChanged;
+                            try { if (status != null) status("화면 연결은 계속되지만 Windows 재생 소리를 준비하지 못했어요."); } catch { }
+                        }
+                    }
                     NativeProtocol.Write(tls, 2, ready);
                     lock (gate) { if (isStopped) return; }
                     Notify("Sharing with claimed viewer label (UNVERIFIED): " + peerName + ". Stop revokes this temporary session.");
@@ -364,6 +394,7 @@ namespace Knot.NativePreview
                     finally
                     {
                         if (files != null) files.Dispose();
+                        if (audio != null) audio.Dispose();
                         if (clipboard != null) clipboard.Dispose();
                         if (trustedServer != null) trustedServer.Dispose();
                         certificate.Dispose();
@@ -440,6 +471,7 @@ namespace Knot.NativePreview
                                 name != enrollmentName || !observedRemote.Equals(enrollmentPeer))) throw new ProtocolException("auth");
                             if (!budget.TryComplete()) throw new ProtocolException("timeout");
                             claimInvitation.Claim(candidate);
+                            if (audioAllowed) sessionAudioKey = NativeAudioProtocol.DeriveKey(candidate);
                         }
                     }
                     finally { Array.Clear(candidate, 0, candidate.Length); }
@@ -546,6 +578,7 @@ namespace Knot.NativePreview
             InputSession ownedInput;
             TcpClient ownedClient;
             FileServer ownedFiles;
+            NativeAudioServer ownedAudio;
             lock (gate)
             {
                 if (isStopped) return;
@@ -553,12 +586,15 @@ namespace Knot.NativePreview
                 invitation.Revoke(); stopped.Set(); approval.Set();
                 if (enrollmentInvitation != null) enrollmentInvitation.Revoke();
                 if (registrationHash != null) { Array.Clear(registrationHash, 0, registrationHash.Length); registrationHash = null; }
+                if (sessionAudioKey != null) { Array.Clear(sessionAudioKey, 0, sessionAudioKey.Length); sessionAudioKey = null; }
                 ownedInput = input; ownedClient = client; ownedFiles = files;
+                ownedAudio = audio;
             }
             try { listener.Stop(); } catch { }
             if (enrollment != null) enrollment.Stop();
             if (trustedServer != null) trustedServer.Stop();
             if (ownedFiles != null) ownedFiles.Stop();
+            if (ownedAudio != null) ownedAudio.Stop();
             // Closing the socket interrupts TLS reads/writes and their bounded budgets.
             try { if (ownedClient != null) ownedClient.Close(); } catch { }
             if (ownedInput != null) ownedInput.Close();

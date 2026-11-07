@@ -176,19 +176,31 @@ namespace Knot.NativePreview
         protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
+            DrawSurface(e.Graphics);
+        }
+        // ButtonBase is opaque: WM_PAINT can skip OnPaintBackground. Own the
+        // complete client surface, including the pixels outside rounded corners.
+        // Knot's solid panels may be separated by transparent layout wrappers.
+        internal void DrawSurface(Graphics graphics)
+        {
+            Color backdrop = PreviewStyle.Canvas;
+            for (Control ancestor = Parent; ancestor != null; ancestor = ancestor.Parent)
+                if (ancestor.BackColor.A == 255) { backdrop = ancestor.BackColor; break; }
+            // FillRectangle preserves a partial invalidation clip; Clear does not.
+            using (Brush canvas = new SolidBrush(backdrop)) graphics.FillRectangle(canvas, ClientRectangle);
             Color background = Kind == PreviewButtonKind.Primary ? PreviewStyle.Accent : PreviewStyle.Surface;
             Color foreground = Kind == PreviewButtonKind.Primary ? SystemColors.HighlightText : Kind == PreviewButtonKind.Danger ? PreviewStyle.Danger : PreviewStyle.Ink;
             if (Kind == PreviewButtonKind.Navigation) { background = Selected ? PreviewStyle.AccentWash : PreviewStyle.Rail; foreground = Selected ? PreviewStyle.Accent : PreviewStyle.Muted; }
             if (!Enabled) { background = PreviewStyle.Rail; foreground = SystemColors.GrayText; }
             else if (hovered && Kind != PreviewButtonKind.Primary) background = PreviewStyle.AccentWash;
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle rectangle = new Rectangle(0, 0, Math.Max(1, Width - 1), Math.Max(1, Height - 1));
-            using (GraphicsPath path = PreviewStyle.Rounded(rectangle, (int)Math.Round(8 * layoutScale * e.Graphics.DpiX / 96)))
+            using (GraphicsPath path = PreviewStyle.Rounded(rectangle, (int)Math.Round(8 * layoutScale * graphics.DpiX / 96)))
             using (Brush fill = new SolidBrush(background))
-            { e.Graphics.FillPath(fill, path); if (Kind == PreviewButtonKind.Secondary || Kind == PreviewButtonKind.Danger) using (Pen pen = new Pen(PreviewStyle.Border)) e.Graphics.DrawPath(pen, path); }
-            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, foreground,
+            { graphics.FillPath(fill, path); if (Kind == PreviewButtonKind.Secondary || Kind == PreviewButtonKind.Danger) using (Pen pen = new Pen(PreviewStyle.Border)) graphics.DrawPath(pen, path); }
+            TextRenderer.DrawText(graphics, Text, Font, ClientRectangle, foreground,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
-            if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4), foreground, background);
+            if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(graphics, Rectangle.Inflate(ClientRectangle, -4, -4), foreground, background);
         }
     }
 

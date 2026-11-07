@@ -95,6 +95,7 @@ private:
     struct Stamp { LONGLONG sampleTime; uint64_t captureMicros; };
     std::deque<Stamp> stamps_;
     std::vector<uint8_t> parameterSets_;
+    H264Framing outputFraming_ = H264Framing::Unknown;
 };
 
 class DesktopCapture {

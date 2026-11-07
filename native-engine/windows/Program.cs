@@ -35,6 +35,7 @@ namespace Knot.NativePreview
         private readonly ComboBox qualityProfiles = new ComboBox();
         private readonly CheckBox legacyMode = new CheckBox();
         private readonly CheckBox allowFiles = new CheckBox();
+        private readonly CheckBox allowAudio = new CheckBox();
         private readonly PreviewButton chooseFileFolder, openFileFolder;
         private readonly Label fileFolderValue, fileFolderHint;
         private string fileRootPath;
@@ -187,6 +188,13 @@ namespace Knot.NativePreview
 
             actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
             actions.Controls.AddRange(new Control[] { share, copy, approve, decline });
+            allowAudio.Text = "Windows 재생 소리 포함 · 마이크 제외";
+            allowAudio.AutoSize = true; allowAudio.Checked = false;
+            allowAudio.Margin = new Padding(P(8), P(12), 0, 0);
+            allowAudio.AccessibleName = "이번 화면 공유에 Windows 재생 소리 포함, 마이크는 제외";
+            SetOwnedFont(allowAudio, PreviewStyle.Type(9, FontStyle.Regular, scale));
+            actions.Controls.Add(allowAudio);
+            allowAudio.CheckedChanged += delegate { ApplyCurrentPresentation(); };
             taskCard.Content.Controls.Add(actions);
 
             filesCard = new PreviewCard(scale); filesCard.Dock = DockStyle.Top; body.Controls.Add(filesCard);
@@ -393,7 +401,7 @@ namespace Knot.NativePreview
             help.Controls.Add(steps);
             PreviewCard scope = new PreviewCard(scale); scope.Dock = DockStyle.Top;
             Label scopeTitle = MakeLabel("이번 미리보기에서 알아둘 점", 12, FontStyle.Bold); scopeTitle.Margin = new Padding(0, 0, 0, P(10)); scope.Content.Controls.Add(scopeTitle);
-            scope.Content.Controls.Add(MakeLabel("번호는 2분 동안 한 번만 사용할 수 있어요. Mac에서 내 PC로 등록하면 다음에는 번호 없이 연결할 수 있어요.\r\n\r\n로그인된 Windows 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요.\r\n\r\n오디오·무모니터·HDR·잠금/UAC 화면은 아직 지원하지 않아요. 자동 업데이트는 서명된 공개 배포 피드 구성 후 사용할 수 있어요.\r\n\r\n긴 연결코드 복사는 현재 클립보드를 바꾸고 Windows 기록·클라우드 제외를 요청해요. 다른 프로그램의 현재 클립보드 접근까지 막지는 않아요.\r\n\r\n중지는 입력 해제를 요청해요. Windows가 거부하면 제한된 재시도로 해제 성공을 보장할 수는 없어요.", 10, FontStyle.Regular));
+            scope.Content.Controls.Add(MakeLabel("번호는 2분 동안 한 번만 사용할 수 있어요. Mac에서 내 PC로 등록하면 다음에는 번호 없이 연결할 수 있어요.\r\n\r\n로그인된 Windows 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요.\r\n\r\n공유 전 ‘Windows 재생 소리 포함’을 켜면 Mac에서 소리를 들어요. 마이크는 제외해요. 무모니터·HDR·잠금/UAC 화면은 아직 지원하지 않아요. 자동 업데이트는 서명된 공개 배포 피드 구성 후 사용할 수 있어요.\r\n\r\n긴 연결코드 복사는 현재 클립보드를 바꾸고 Windows 기록·클라우드 제외를 요청해요. 다른 프로그램의 현재 클립보드 접근까지 막지는 않아요.\r\n\r\n중지는 입력 해제를 요청해요. Windows가 거부하면 제한된 재시도로 해제 성공을 보장할 수는 없어요.", 10, FontStyle.Regular));
             updateNotice = MakeLabel("서명된 업데이트 배포를 준비하고 있어요.", 10, FontStyle.Regular); scope.Content.Controls.Add(updateNotice);
             updateAction = ActionButton("업데이트 확인", PreviewButtonKind.Secondary);
             updateAction.Click += async delegate { if (updates == null) return; if (updates.Available) InstallUpdate(); else await updates.CheckAsync(); };
@@ -566,6 +574,7 @@ namespace Knot.NativePreview
             bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
             privacy.Text = allowFiles.Checked ? "화면·입력, 표시한 공유 폴더와 직접 끈 탐색기 항목을 허용해요. Mac에서 ‘내 PC로 등록’을 선택하면 이후 번호 없이 접속할 수 있어요. 연결 안내에서 등록을 해제할 수 있어요." :
                 view.EnrollmentMode ? "번호를 아는 Mac과 등록된 Mac의 화면·입력을 허용해요. Mac에서 ‘내 PC로 등록’을 선택하면 이후 번호 없이 접속해요. 연결 안내에서 등록을 해제할 수 있어요." : "허용한 연결에서만 화면과 입력을 공유해요. 중지하면 이번 연결 권한을 종료해요.";
+            if (allowAudio.Checked) privacy.Text += " Windows 재생 소리도 포함해요. 마이크는 공유하지 않아요.";
             badge.Text = "●  " + PreviewCopy.Phase(view.Phase);
             badge.ForeColor = view.Phase == HostViewPhase.Failed ? PreviewStyle.Warning : PreviewStyle.Muted;
             stateStep.Text = view.Phase == HostViewPhase.Failed ? "공유 준비 확인" : idle ? "01  화면 공유" : view.Phase == HostViewPhase.Invitation ? "02  Mac에 코드 보내기" : "03  연결 확인";
@@ -614,8 +623,10 @@ namespace Knot.NativePreview
             qualityProfiles.Enabled = !view.RunPresent;
             SetViewVisible(qualityCard, idle && !view.RunPresent);
             shareScope.Text = allowFiles.Checked ? "화면·입력 + 공유 폴더 ‘" + fileRootName + "’ + 직접 끌어온 탐색기 항목" : "허용 범위: 화면과 입력 · 파일 공유 꺼짐";
+            if (allowAudio.Checked) shareScope.Text += " · Windows 재생 소리 (마이크 제외)";
             SetViewVisible(shareScope, idle);
             allowFiles.Enabled = chooseFileFolder.Enabled = !view.RunPresent;
+            allowAudio.Enabled = !view.RunPresent;
             chooseFileFolder.Visible = !view.RunPresent;
             openFileFolder.Visible = view.RunPresent && view.Phase == HostViewPhase.Sharing && allowFiles.Checked;
             openFileFolder.Enabled = rawFileStatus.Length == 0;
@@ -634,6 +645,14 @@ namespace Knot.NativePreview
             fixture = snapshot; ShowHelp(showHelp); ApplyCurrentPresentation();
         }
         internal bool FixtureMode { get { return fixtureMode; } }
+        internal void SetFixtureAudioConsent(bool allowed)
+        {
+            if (!fixtureMode) throw new InvalidOperationException("Synthetic audio consent requires the inert fixture.");
+            allowAudio.Checked = allowed; ApplyCurrentPresentation();
+        }
+        internal bool FixtureAudioConsentMatches(bool allowed, bool runPresent)
+        { return fixtureMode && allowAudio.Checked == allowed && allowAudio.Enabled == !runPresent; }
+        internal bool FixtureAudioConsentFits { get { return !allowAudio.Visible || scroll.ClientRectangle.Contains(BoundsWithin(allowAudio, scroll)); } }
         internal void SetFixtureCertificateCompatibility(bool required)
         {
             if (!fixtureMode) throw new InvalidOperationException("Synthetic compatibility state requires the inert fixture.");
@@ -805,8 +824,17 @@ namespace Knot.NativePreview
             {
                 HostServer run = new HostServer(selected.Address, 48631, new WindowsMediaFactory(SelectedQuality), new WindowsInputSink(), false, null,
                     !legacyMode.Checked, System.Diagnostics.Stopwatch.GetTimestamp, advertisedName,
-                    files: allowFiles.Checked ? new FileSharingOptions(fileRootPath) : null);
+                    files: allowFiles.Checked ? new FileSharingOptions(fileRootPath) : null,
+                    allowAudio: allowAudio.Checked);
                 server = run; rawFileStatus = ""; presentation.Bind(run.Identity); phase = HostViewPhase.Invitation; invitationAvailable = true;
+                run.AudioStatusChanged = delegate(string message)
+                {
+                    OnUi(delegate
+                    {
+                        if (server != run || !presentation.IsCurrent(run.Identity)) return;
+                        rawStatus = message; ApplyCurrentPresentation();
+                    });
+                };
                 run.FileStatusChanged = delegate(string text)
                 {
                     OnUi(delegate

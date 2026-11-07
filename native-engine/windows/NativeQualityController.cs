@@ -13,7 +13,7 @@ namespace Knot.NativePreview
         private readonly uint maxFps, maxBitrate;
         private uint fps, bitrate;
         private byte preference;
-        private bool pressure, changed = true, supported = true;
+        private bool receiverPressure, writePressure, changed = true, supported = true;
         private long nextChange;
         private int healthy;
         internal NativeQualityController(MediaInfo info) { fps = maxFps = info.Fps; bitrate = maxBitrate = info.Bitrate; }
@@ -28,27 +28,33 @@ namespace Knot.NativePreview
                 throw new ProtocolException("protocol");
             lock (gate) {
                 if (packet.Kind == 0x32) { preference = packet.Payload[0]; nextChange = 0; healthy = 0; }
-                else if (packet.Payload[0] == 1) pressure = true;
+                else if (packet.Payload[0] == 1) receiverPressure = true;
             }
         }
-        internal void ObserveWrite(double milliseconds) { if (milliseconds >= 100) lock (gate) pressure = true; }
+        internal void ObserveWrite(double milliseconds) { if (milliseconds >= 100) lock (gate) writePressure = true; }
         internal void Apply(IMediaSource source) { Apply(source, Stopwatch.GetTimestamp()); }
         internal void Apply(IMediaSource source, long now)
         {
             lock (gate) {
                 if (now < nextChange || !supported) return;
                 nextChange = now + Stopwatch.Frequency * 2;
-                uint desiredFps = preference == 1 ? Math.Min(30U, maxFps) : maxFps;
+                // Auto holds the applied cadence until its healthy window is
+                // complete. A single healthy tick must not undo a pressure cut.
+                uint desiredFps = preference == 0 ? fps : preference == 1 ? Math.Min(30U, maxFps) : maxFps;
                 uint ceiling = preference == 2 ? Math.Min(20000000U, maxBitrate) : maxBitrate;
                 uint desiredRate = Math.Min(bitrate, ceiling);
-                if (preference == 0 && pressure) {
-                    desiredRate = Math.Max(Math.Min(4000000U, ceiling), desiredRate * 3U / 4U);
-                    desiredFps = Math.Min(30U, maxFps); healthy = 0;
+                if (preference == 0 && (receiverPressure || writePressure)) {
+                    // Decoder/presenter overload needs fewer frames, not more
+                    // quantization. Preserve image quality unless writes also
+                    // report pressure on the end-to-end transport path.
+                    if (writePressure) desiredRate = Math.Max(Math.Min(4000000U, ceiling), desiredRate * 3U / 4U);
+                    desiredFps = Math.Min(fps, Math.Min(30U, maxFps)); healthy = 0;
                 } else if (preference != 0 || ++healthy >= 5) {
                     desiredRate = preference == 0 ? Math.Min(ceiling, desiredRate + 2000000U) : ceiling;
+                    desiredFps = preference == 0 ? maxFps : desiredFps;
                     healthy = 0;
                 }
-                pressure = false;
+                receiverPressure = writePressure = false;
                 if (desiredFps == fps && desiredRate == bitrate) return;
                 IAdaptiveMediaSource adaptive = source as IAdaptiveMediaSource;
                 supported = adaptive != null && adaptive.TrySetQuality(desiredFps, desiredRate);

@@ -40,35 +40,63 @@ void Append(std::vector<uint8_t>& out, const uint8_t* p, size_t size) {
     out.insert(out.end(), {0, 0, 0, 1});
     out.insert(out.end(), p, p + size);
 }
-}
-
-bool NormalizeH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
-    out.clear();
-    if (!data || size == 0 || size > kMaxAccessUnit) return false;
+bool AnnexB(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
     std::vector<Nal> nals;
-    if (Prefix(data, size, 0) != 0 && Split(data, size, nals)) {
-        for (const auto& n : nals) Append(out, data + n.begin, n.end - n.begin);
-    } else {
-        size_t at = 0, count = 0;
-        ParameterLimits parameters;
-        while (at < size) {
-            if (size - at < 4 || ++count > kMaxNals) return false;
-            const uint32_t length = (static_cast<uint32_t>(data[at]) << 24U) |
-                (static_cast<uint32_t>(data[at + 1]) << 16U) |
-                (static_cast<uint32_t>(data[at + 2]) << 8U) | data[at + 3];
-            at += 4;
-            if (length == 0 || length > size - at) return false;
-            const uint8_t type = data[at] & 31U;
-            if ((data[at] & 0x80U) != 0 || type == 0 || type >= 24 ||
-                !parameters.Accept(type, length)) return false;
-            Append(out, data + at, length);
-            at += length;
-        }
+    if (!Split(data, size, nals)) return false;
+    for (const auto& n : nals) Append(out, data + n.begin, n.end - n.begin);
+    return !out.empty() && out.size() <= kMaxAccessUnit;
+}
+bool Avcc4(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
+    size_t at = 0, count = 0;
+    ParameterLimits parameters;
+    while (at < size) {
+        if (size - at < 4 || ++count > kMaxNals) return false;
+        const uint32_t length = (static_cast<uint32_t>(data[at]) << 24U) |
+            (static_cast<uint32_t>(data[at + 1]) << 16U) |
+            (static_cast<uint32_t>(data[at + 2]) << 8U) | data[at + 3];
+        at += 4;
+        if (length == 0 || length > size - at) return false;
+        const uint8_t type = data[at] & 31U;
+        if ((data[at] & 0x80U) != 0 || type == 0 || type >= 24 ||
+            !parameters.Accept(type, length)) return false;
+        Append(out, data + at, length);
+        at += length;
     }
     // Length-prefixed input must also satisfy the final AnnexB wire bounds;
     // malformed unescaped payload bytes must not bypass the consumer's count.
     std::vector<Nal> normalized;
     return !out.empty() && out.size() <= kMaxAccessUnit && Split(out.data(), out.size(), normalized);
+}
+}
+
+bool NormalizeH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out,
+    H264Framing& framing) {
+    out.clear();
+    if (!data || size == 0 || size > kMaxAccessUnit) return false;
+    if (framing == H264Framing::AnnexB) {
+        if (AnnexB(data, size, out)) return true;
+    } else if (framing == H264Framing::Avcc4) {
+        if (Avcc4(data, size, out)) return true;
+    } else if (framing == H264Framing::Unknown) {
+        std::vector<uint8_t> normalized;
+        std::vector<uint8_t> avcc;
+        const bool annexValid = AnnexB(data, size, normalized);
+        const bool avccValid = Avcc4(data, size, avcc);
+        // Even byte-identical interpretations (e.g. one-byte AUD) cannot
+        // establish a stream format. Do not guess and corrupt a later P frame.
+        if (annexValid == avccValid) return false;
+        framing = annexValid ? H264Framing::AnnexB : H264Framing::Avcc4;
+        if (avccValid) normalized.swap(avcc);
+        out.swap(normalized);
+        return true;
+    }
+    out.clear();
+    return false;
+}
+
+bool NormalizeH264(const uint8_t* data, size_t size, std::vector<uint8_t>& out) {
+    H264Framing framing = H264Framing::Unknown;
+    return NormalizeH264(data, size, out, framing);
 }
 
 bool AnalyzeH264(const std::vector<uint8_t>& bytes, bool& idr, bool& sps,

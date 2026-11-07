@@ -28,6 +28,7 @@ namespace Knot.NativePreview
             internal float Scale;
             internal bool EnrollmentMode;
             internal bool CertificateCompatibility;
+            internal bool AudioAllowed;
             internal string StatusOverride, ViewerLabelOverride, FileStatusOverride;
             internal Frame(string name, HostViewPhase phase, bool help, int width, int height, float scale)
             { Name = name; Phase = phase; Help = help; Width = width; Height = height; Scale = scale; }
@@ -193,6 +194,9 @@ namespace Knot.NativePreview
                 if (PreviewCopy.DiscoveryName(boundaryName) != boundaryName)
                     throw new InvalidOperationException("The maximum admitted device name must remain unchanged.");
                 string illustrationChecks = IllustrationChecks();
+                currentStage = "button-surfaces";
+                string buttonChecks = PreviewButtonPaintChecks.Run();
+                currentStage = "initialization";
                 List<Frame> frames = new List<Frame>();
                 frames.Add(new Frame("windows-idle.png", HostViewPhase.Idle, false, 1040, 740, 1));
                 frames.Add(new Frame("windows-invitation.png", HostViewPhase.Invitation, false, 1040, 740, 1));
@@ -228,6 +232,10 @@ namespace Knot.NativePreview
                 frames.Add(new Frame("windows-files-unavailable.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true, FileStatusOverride = "파일 공유 폴더를 준비하지 못했어요. 화면 연결은 계속 사용할 수 있어요." });
                 frames.Add(new Frame("windows-certificate-migration.png", HostViewPhase.Idle, false, 1040, 740, 1) { EnrollmentMode = true, CertificateCompatibility = true });
                 frames.Add(new Frame("windows-certificate-migration-compact.png", HostViewPhase.Idle, false, 800, 620, 1) { EnrollmentMode = true, CertificateCompatibility = true });
+                frames.Add(new Frame("windows-audio-ready.png", HostViewPhase.Idle, false, 1040, 740, 1) { EnrollmentMode = true, AudioAllowed = true });
+                frames.Add(new Frame("windows-audio-ready-compact.png", HostViewPhase.Idle, false, 800, 620, 1) { EnrollmentMode = true, AudioAllowed = true });
+                frames.Add(new Frame("windows-audio-sharing.png", HostViewPhase.Sharing, false, 1040, 740, 1) { EnrollmentMode = true, AudioAllowed = true });
+                frames.Add(new Frame("windows-audio-sharing-scale200.png", HostViewPhase.Sharing, false, 1040, 740, 2) { EnrollmentMode = true, AudioAllowed = true });
                 List<string> records = new List<string>();
                 using (Icon icon = new Icon(iconPath, 256, 256))
                 {
@@ -252,6 +260,9 @@ namespace Knot.NativePreview
                             Progress(frame, "before-presentation"); form.SetFixturePresentation(state, frame.Help); Progress(frame, "after-presentation");
                             if (frame.FileStatusOverride != null) form.SetFixtureFileStatus(frame.FileStatusOverride);
                             form.SetFixtureCertificateCompatibility(frame.CertificateCompatibility);
+                            if (!form.FixtureAudioConsentMatches(false, state.RunPresent))
+                                throw new InvalidOperationException("Playback audio must begin disabled and be editable only outside a run.");
+                            form.SetFixtureAudioConsent(frame.AudioAllowed);
                             AssertFontsUsable(form); Progress(frame, "fonts-usable-before-show");
                             Progress(frame, "before-show"); form.Show(); Progress(frame, "after-show");
                             form.PerformLayout(); Progress(frame, "after-initial-layout"); Pump(); Progress(frame, "after-initial-pump");
@@ -323,6 +334,8 @@ namespace Knot.NativePreview
                                 throw new InvalidOperationException("A file-only setup failure must have authored folder guidance without changing screen status.");
                             if (form.FixtureQualityEditable == state.RunPresent)
                                 throw new InvalidOperationException("Quality is selectable only before the sharing run.");
+                            if (!form.FixtureAudioConsentMatches(frame.AudioAllowed, state.RunPresent) || !frame.Help && !form.FixtureAudioConsentFits)
+                                throw new InvalidOperationException("Playback consent must match the owner choice, lock during sharing and fit the viewport.");
                             AssertFontsUsable(form);
                             if (!form.FixtureFooterFits) throw new InvalidOperationException("Fixed status text and stop action must fit the actual client viewport.");
                             if (!form.FixtureEnrollmentCodeFits) throw new InvalidOperationException("The complete short code must fit the actual client viewport.");
@@ -372,6 +385,7 @@ namespace Knot.NativePreview
                     "\"uiExceptionPolicy\":\"ThrowException\"," +
                     "\"scaleScope\":\"layout/font geometry simulation only; actual drawing DPI recorded; not a per-monitor DPI acceptance test\"," +
                     "\"monitorIllustrationChecks\":" + illustrationChecks + "," +
+                    "\"buttonSurfaceChecks\":" + buttonChecks + "," +
                     "\"brandIconSHA256\":" + Q(Digest(iconPath)) + ",\"images\":[" + string.Join(",", records.ToArray()) + "]}";
                 File.WriteAllText(Path.Combine(output, "visual-checks.json"), report + Environment.NewLine, new UTF8Encoding(false));
                 Console.WriteLine(report); return 0;

@@ -3,6 +3,9 @@
 namespace knot {
 HRESULT Encoder::SetBitrate(uint32_t bitrate) {
     if (bitrate < 1000000U || bitrate > 40000000U || !codec_) return E_INVALIDARG;
+    // A capture-FPS-only adaptation must not depend on the codec accepting a
+    // redundant live bitrate assignment (some hardware rejects that setter).
+    if (bitrate == config_.bitrate) return S_OK;
     const HRESULT result = SetUInt(CODECAPI_AVEncCommonMeanBitRate, bitrate, true);
     if (SUCCEEDED(result)) config_.bitrate = bitrate;
     return result;
@@ -45,6 +48,7 @@ void Encoder::Reset() {
     inputReady_ = outputReady_ = inFlight_ = 0;
     peakOutputScratch_ = outputMinimum_ = 0;
     timeline_ = MediaTimeline(1); stamps_.clear(); parameterSets_.clear();
+    outputFraming_ = H264Framing::Unknown;
 }
 HRESULT Encoder::SetUInt(const GUID& key, ULONG value, bool required) {
     if (!codec_) return required ? E_NOINTERFACE : S_OK;
@@ -168,6 +172,8 @@ HRESULT Encoder::ReadSequenceHeader() {
     hr = current->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, header.data(), size, nullptr);
     if (FAILED(hr)) return hr;
     std::vector<uint8_t> normalized;
+    // The sequence-header blob has its own configuration representation. It
+    // does not establish how this MFT frames actual output samples.
     if (!SequenceHeaderH264(header.data(), header.size(), normalized)) return MF_E_INVALIDMEDIATYPE;
     bool idr = false, sps = false, pps = false;
     if (!AnalyzeH264(normalized, idr, sps, pps, &parameterSets_)) return MF_E_INVALIDMEDIATYPE;
@@ -282,6 +288,8 @@ HRESULT Encoder::Receive(AccessUnit& output) {
             width != config_.width || height != config_.height) return MF_E_INVALIDMEDIATYPE;
         hr = transform_->SetOutputType(outputId_, type.Get(), 0);
         if (FAILED(hr)) return hr;
+        outputFraming_ = H264Framing::Unknown;
+        parameterSets_.clear();
         hr = ReadSequenceHeader();
         return FAILED(hr) ? hr : S_FALSE;
     }
@@ -296,7 +304,7 @@ HRESULT Encoder::Receive(AccessUnit& output) {
     hr = buffer->Lock(&data, nullptr, &length);
     if (FAILED(hr)) return hr;
     bool normalized = false;
-    try { normalized = NormalizeH264(data, length, output.bytes); }
+    try { normalized = NormalizeH264(data, length, output.bytes, outputFraming_); }
     catch (...) { buffer->Unlock(); throw; }
     const HRESULT unlock = buffer->Unlock();
     if (FAILED(unlock)) return unlock;

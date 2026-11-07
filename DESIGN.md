@@ -1,5 +1,15 @@
 # Design
 
+## Native.13 playback audio and repaint/pressure contract (2026-11-07)
+
+This supersedes the native preview's earlier audio exclusion only for Windows playback → Mac. Keep the existing connection flow and add **Windows 재생 소리 포함 · 마이크 제외** before Windows sharing, off on every app launch/update. Consent belongs to the current manually started share; an old resume grant cannot enable it. Never capture a microphone. Both apps must be updated. The connected Mac speaker control offers local mute/unmute, with authored unavailable status; an audio failure never stops video.
+
+Audio uses fixed stereo48kHz PCM16 (about1.536Mbps before overhead), independent same-certificate pinned TLS TCP48636, the current media-authorized peer and a domain-separated HMAC session key. Media-v1 Hello/Ready remain unchanged. No per-app volume/source controls, DRM compatibility, precise audiovisual synchronization or measured performance is promised. Tests use only fresh synthetic data and fake capture/output, never existing screen/audio, devices, preferences or user stores. See [native-engine/AUDIO.md](native-engine/AUDIO.md).
+
+Windows rounded buttons repaint their entire client rectangle with the nearest solid parent background before drawing the rounded surface. Transparent layout wrappers must not leave stale/dark corners; preserve clipped repaint, focus, disabled, hover and selected states across supported DPI sizes. Mac quality feedback observes repeated pressure in a bounded recent window, with minimum event thresholds and hysteresis for stable adaptation. Preserve compressed-frame order and bounded decode admission; do not drop frames to implement this feedback. Native.13 also fixes H.264 sample-framing detection while retaining the wire contract. Synthetic checks do not identify a particular GPU's stutter cause or prove real4K performance improvement.
+
+Evidence: `native-engine/windows/Program.cs`, `NativeHost.cs`, `NativeAudioServer.cs`, `PreviewStyle.cs`, `windows/media/h264.cpp`, `windows/media/encoder.cpp`; `native-engine/macos/Sources/KnotNativePreview/NativeAudioSession.swift`, `NativeAudioPlayer.swift`, `ReceiverPressure.swift` and `PreviewWindow.swift`.
+
 ## Native certificate compatibility correction (2026-11-07)
 
 Native.11's five-year persistent TLS leaf is rejected by the Mac SSL policy. Its Framework default RSA factory also does not guarantee an actual2048-bit key when assigned through the inherited KeySize setter. Native.12 must explicitly construct and verify a2048-bit RSA key and issue a365-day total lifetime, including backdating, then test the same production PFX-generation/import path across Windows and Mac. Public-key strength must be checked again after PFX import and in the Windows-produced DER on Mac.

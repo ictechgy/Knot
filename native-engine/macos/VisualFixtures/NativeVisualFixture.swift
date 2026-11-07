@@ -4,7 +4,8 @@ import Foundation
 import Darwin
 import KnotNativeCore
 
-/// Separate entry point. It never enters App.main, creates a channel, or shows a window.
+/// Separate entry point. It never enters App.main, creates a real channel or
+/// audio output, or shows a window. Optional audio uses only in-memory fakes.
 @main
 struct NativeVisualFixture {
     @MainActor static func main() throws {
@@ -76,7 +77,16 @@ struct NativeVisualFixture {
             ("files-error", "files-error", 1200, 760, false),
             ("files-empty", "files-empty", 1200, 760, false),
             ("files-complete", "files-complete", 1200, 760, false),
-            ("files-retry", "files-retry", 1200, 760, false)
+            ("files-retry", "files-retry", 1200, 760, false),
+            ("audio-on", "audio-on", 1200, 760, false),
+            ("audio-muted", "audio-muted", 1200, 760, false),
+            ("audio-unavailable", "audio-unavailable", 1200, 760, false),
+            ("audio-on-compact", "audio-on", 880, 620, false),
+            ("audio-muted-compact", "audio-muted", 880, 620, false),
+            ("audio-unavailable-compact", "audio-unavailable", 880, 620, false),
+            ("fullscreen-audio-on-controls", "audio-on", 1920, 1080, false),
+            ("fullscreen-audio-muted-controls", "audio-muted", 1920, 1080, false),
+            ("fullscreen-audio-unavailable-controls", "audio-unavailable", 1920, 1080, false)
         ]
         var images: [[String: Any]] = []
         var fileAdapterAttempts = 0
@@ -84,6 +94,7 @@ struct NativeVisualFixture {
             let model = try makeModel(state, effects: effects)
             let enrollment = try makeEnrollment(state, effects: effects)
             let files = try makeFiles(state)
+            let audio = try makeAudio(state)
             let convenience = state == "work-tools" ? FixtureConvenienceModels(effects: effects) : nil
             let immersive = name.hasPrefix("fullscreen") || name == "files-fullscreen"
             let revealed = name.hasSuffix("controls")
@@ -99,7 +110,7 @@ struct NativeVisualFixture {
                 else { Color(white: 0.045) }
             })
             let content = root(model: model, enrollment: enrollment, simulated: simulated, help: state == "help", manual: state == "manual-address", fullscreen: immersive,
-                width: width, height: height, dark: dark, files: files, convenience: convenience)
+                width: width, height: height, dark: dark, files: files, convenience: convenience, audio: audio?.session)
             let view = NSHostingView(rootView: content)
             let rect = NSRect(x: 0, y: 0, width: width, height: height)
             let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -155,32 +166,43 @@ struct NativeVisualFixture {
             guard let png = bitmap.representation(using: .png, properties: [:]) else { throw FixtureError.bitmap }
             let file = "mac-" + name + ".png"
             try png.write(to: output.appendingPathComponent(file), options: .atomic)
-            images.append(["name": file, "width": width, "height": height, "state": state, "dark": dark,
-                "immersiveFullscreen": immersive, "controlsRevealed": revealed,
-                "expectedPhase": String(describing: expectedPhase(state)), "observedPhase": String(describing: model.phase),
-                "desktopFrame": frameDictionary(model: model, root: view),
-                "connectionStep": enrollment.selected != nil ? 3 : enrollment.candidates.isEmpty ? 1 : 2,
-                "candidateCount": enrollment.candidates.count, "explicitSelection": enrollment.selected != nil,
-                "codeStageVisible": codeStage, "renderedNumberFields": numberFields,
-                "rememberThisPC": model.rememberThisPC,
-                "savedDeviceCount": model.savedDevices.count,
-                "convenienceActionsVisible": convenience != nil,
-                "convenienceActionsPresentation": convenience == nil ? "native-menu" : "inline-production-action-views",
-                "searchCompleted": enrollment.hasSearched,
-                "filePanelVisible": !filePanels.isEmpty,
-                "renderedFilePanels": filePanels.count,
-                "fileFolderEntryCount": files?.entries.filter(\.isFolder).count ?? 0,
-                "renderedFolderEntries": folderDragViews(view).count,
-                "filePanelFrame": filePanelFrame.map { $0 as Any } ?? NSNull(),
-                "fileInputSuspended": model.fileUIInputSuspended,
-                "fileEntryCount": files?.entries.count ?? 0,
-                "fileCompletedItems": files?.completedItems ?? 0,
-                "fileRetryVisible": files?.canRetryUploads ?? false,
-                "fileRevealVisible": files?.lastReceivedURL != nil,
-                "fileAdaptersInvoked": files?.fixtureOperationAttempts ?? 0,
-                "presenterTransitionChecks": name == "streaming" ? 3 : 0,
-                "stablePresenterAcrossFullscreen": stablePresenter.map { $0 as Any } ?? NSNull()])
+            var imageResult: [String: Any] = ["name": file, "width": width, "height": height, "state": state, "dark": dark]
+            imageResult["immersiveFullscreen"] = immersive
+            imageResult["controlsRevealed"] = revealed
+            imageResult["expectedPhase"] = String(describing: expectedPhase(state))
+            imageResult["observedPhase"] = String(describing: model.phase)
+            imageResult["desktopFrame"] = frameDictionary(model: model, root: view)
+            imageResult["connectionStep"] = enrollment.selected != nil ? 3 : enrollment.candidates.isEmpty ? 1 : 2
+            imageResult["candidateCount"] = enrollment.candidates.count
+            imageResult["explicitSelection"] = enrollment.selected != nil
+            imageResult["codeStageVisible"] = codeStage
+            imageResult["renderedNumberFields"] = numberFields
+            imageResult["rememberThisPC"] = model.rememberThisPC
+            imageResult["savedDeviceCount"] = model.savedDevices.count
+            imageResult["convenienceActionsVisible"] = convenience != nil
+            imageResult["convenienceActionsPresentation"] = convenience == nil ? "native-menu" : "inline-production-action-views"
+            imageResult["audioState"] = audio.map { String(describing: $0.session.state) } ?? "absent"
+            imageResult["audioAvailable"] = audio?.session.isAvailable ?? false
+            imageResult["audioMuted"] = audio?.session.muted ?? false
+            imageResult["audioControlsVisible"] = audio != nil && (!immersive || revealed)
+            imageResult["audioUsesSyntheticAdaptersOnly"] = audio != nil
+            imageResult["searchCompleted"] = enrollment.hasSearched
+            imageResult["filePanelVisible"] = !filePanels.isEmpty
+            imageResult["renderedFilePanels"] = filePanels.count
+            imageResult["fileFolderEntryCount"] = files?.entries.filter(\.isFolder).count ?? 0
+            imageResult["renderedFolderEntries"] = folderDragViews(view).count
+            imageResult["filePanelFrame"] = filePanelFrame.map { $0 as Any } ?? NSNull()
+            imageResult["fileInputSuspended"] = model.fileUIInputSuspended
+            imageResult["fileEntryCount"] = files?.entries.count ?? 0
+            imageResult["fileCompletedItems"] = files?.completedItems ?? 0
+            imageResult["fileRetryVisible"] = files?.canRetryUploads ?? false
+            imageResult["fileRevealVisible"] = files?.lastReceivedURL != nil
+            imageResult["fileAdaptersInvoked"] = files?.fixtureOperationAttempts ?? 0
+            imageResult["presenterTransitionChecks"] = name == "streaming" ? 3 : 0
+            imageResult["stablePresenterAcrossFullscreen"] = stablePresenter.map { $0 as Any } ?? NSNull()
+            images.append(imageResult)
             window.close()
+            audio?.session.stop()
             print("Rendered " + file)
         }
         guard effects.count == 0, effects.mediaCount == 0, effects.convenienceCount == 0 else { throw FixtureError.effects }
@@ -191,6 +213,7 @@ struct NativeVisualFixture {
             "productionEntryInvoked": false, "networkInvoked": effects.count + effects.mediaCount > 0,
             "clipboardInvoked": false, "certificateCreationInvoked": false,
             "captureInvoked": false, "actualInputInvoked": false, "screenCaptureInvoked": false,
+            "audioDeviceInvoked": false, "audioEngineInvoked": false, "audioAdaptersInvoked": 0,
             "freshSyntheticOnly": true, "enrollmentAdaptersInvoked": effects.count,
             "mediaAdaptersInvoked": effects.mediaCount, "fileAdaptersInvoked": fileAdapterAttempts,
             "convenienceAdaptersInvoked": effects.convenienceCount,
@@ -202,12 +225,13 @@ struct NativeVisualFixture {
 
     @MainActor private static func root(model: SessionModel, enrollment: EnrollmentModel, simulated: AnyView, help: Bool,
                                         manual: Bool, fullscreen: Bool, width: Int, height: Int, dark: Bool, files: FileTransferModel? = nil,
-                                        convenience: FixtureConvenienceModels? = nil) -> some View {
+                                        convenience: FixtureConvenienceModels? = nil, audio: NativeAudioSession? = nil) -> some View {
         Group {
             if let convenience { FixtureConvenienceSurface(model: model, clipboard: convenience.clipboard, quality: convenience.quality) }
             else {
                 PreviewWindow(model: model, simulatedDesktop: simulated, initialHelp: help, simulatedFullscreen: fullscreen,
-                    enrollment: enrollment, initialManualAddress: manual, simulatedFiles: files, initialFiles: files != nil)
+                    enrollment: enrollment, initialManualAddress: manual, simulatedFiles: files, initialFiles: files != nil,
+                    simulatedAudio: audio)
             }
         }
             .environment(\.colorScheme, dark ? .dark : .light)
@@ -269,7 +293,7 @@ struct NativeVisualFixture {
         guard model.phase == expectedPhase(state) else { throw FixtureError.phase }
     }
     @MainActor private static func expectedPhase(_ state: String) -> SessionModel.Phase {
-        if state.hasPrefix("files") { return .streaming }
+        if state.hasPrefix("files") || state.hasPrefix("audio-") { return .streaming }
         return switch state {
         case "connecting": .connecting
         case "approval": .approval
@@ -278,6 +302,32 @@ struct NativeVisualFixture {
         case "failed", "certificate-policy", "certificate-pin-mismatch": .failed
         default: .idle
         }
+    }
+    @MainActor private static func makeAudio(_ state: String) throws -> FixtureAudio? {
+        guard state.hasPrefix("audio-") else { return nil }
+        let json: [String: Any] = ["v": 1, "address": "192.168.50.24", "port": 48631,
+            "certificateSHA256": String(repeating: "a", count: 64),
+            "token": Invitation.encodeBase64URL(Data(repeating: 7, count: 32))]
+        let invitation = try Invitation("knot-native:v1:" + Invitation.encodeBase64URL(JSONSerialization.data(withJSONObject: json)))
+        let unavailable = state == "audio-unavailable"
+        let packet = NativeAudioPacket(kind: unavailable ? .error : .ready,
+            payload: Data((unavailable ? #"{"code":"unavailable"}"# :
+                #"{"v":1,"codec":"pcm-s16le","sampleRate":48000,"channels":2}"#).utf8))
+        let channel = FixtureAudioChannel(packet.encoded)
+        let player = FixtureAudioPlayer()
+        let session = try NativeAudioSession(invitation: invitation, makeChannel: { _ in channel }, makePlayer: { player })
+        session.setMuted(state == "audio-muted")
+        session.start()
+        let deadline = Date().addingTimeInterval(2)
+        while session.state == .connecting, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+        }
+        guard session.state == (unavailable ? .unavailable : .playing),
+              session.isAvailable == !unavailable,
+              session.muted == (state == "audio-muted") else {
+            session.stop(); throw FixtureError.audio
+        }
+        return FixtureAudio(session: session)
     }
     @MainActor private static func makeFiles(_ state: String) throws -> FileTransferModel? {
         guard state.hasPrefix("files") else { return nil }
@@ -305,7 +355,7 @@ struct NativeVisualFixture {
             makeTrustedClient: { _, _ in effects.mark(); throw NativeFailure.state }, initialSavedDevices: saved)
         model.viewerLabel = "나의 Mac"
         model.rememberThisPC = state == "number-remembered"
-        if state.hasPrefix("files") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
+        if state.hasPrefix("files") || state.hasPrefix("audio-") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
         switch state {
         case "reviewed", "invalid-name":
             let body: [String: Any] = ["v": 1, "address": "192.168.50.24", "port": 48631,
@@ -358,7 +408,42 @@ struct NativeVisualFixture {
 }
 
 enum FixtureError: Error {
-    case arguments, bitmap, presenter, effects, phase, numberStage, filePanel, geometry(CGRect, CGSize)
+    case arguments, bitmap, presenter, effects, phase, numberStage, filePanel, audio, geometry(CGRect, CGSize)
+}
+
+@MainActor private struct FixtureAudio { let session: NativeAudioSession }
+
+/// These adapters consume only the freshly authored packet above. They cannot
+/// reach Network, AVAudioEngine, a microphone, preferences, or user files.
+private final class FixtureAudioChannel: NativeChannel, @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: Data
+    private var pending: CheckedContinuation<Data, any Error>?
+    private var closed = false
+    init(_ bytes: Data) { self.bytes = bytes }
+    func start() async throws {}
+    func send(_ packet: Packet) async throws {}
+    func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if closed { lock.unlock(); continuation.resume(throwing: NativeFailure.transport) }
+            else if bytes.count >= count {
+                let result = Data(bytes.prefix(count)); bytes.removeFirst(count)
+                lock.unlock(); continuation.resume(returning: result)
+            } else if bytes.isEmpty { pending = continuation; lock.unlock() }
+            else { lock.unlock(); continuation.resume(throwing: NativeFailure.malformed) }
+        }
+    }
+    func close() {
+        lock.lock(); closed = true; let waiting = pending; pending = nil; lock.unlock()
+        waiting?.resume(throwing: NativeFailure.transport)
+    }
+}
+private actor FixtureAudioPlayer: NativeAudioPlaying {
+    func start(muted: Bool) {}
+    func enqueue(_ pcm: NativeAudioPCM) {}
+    func setMuted(_ muted: Bool) {}
+    func stop() {}
 }
 
 private final class FixtureEnrollmentEffects: @unchecked Sendable {

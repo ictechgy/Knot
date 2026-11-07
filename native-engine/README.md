@@ -10,11 +10,20 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 - AppleSilicon macOS26+ viewer; one peer, one display, one window and bounded H.264/TLS-TCP.
 - Windows Share authorizes one holder of the current short code. Advanced legacy invitation mode retains its separate approval step.
 - Native fullscreen, pointer/keyboard input and committed Mac input-method text. Source aspect ratio is preserved.
+- Optional Windows playback sound on Mac, enabled explicitly before the current Windows share. Microphones are never captured. Both apps must use Native.13 for this feature; see [AUDIO.md](AUDIO.md).
 - While the screen session is active, copy regular files and folders through one explicitly shared Windows folder, with Finder drop-to-send, file-panel drag-to-Finder, and current Explorer selections dragged out of the viewer. Files use a separate pinned TLS connection, incremental hashes and bounded transfer work; original files are retained.
 
-**Audio, ambient clipboard synchronization, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Native.11 adds explicit text copy/paste, opt-in trusted devices and reconnect, adaptive quality and signed-update infrastructure. Public update publishing remains unconfigured; see [UPDATES.md](UPDATES.md). Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
+**Microphone forwarding, ambient clipboard synchronization, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Native.11 adds explicit text copy/paste, opt-in trusted devices and reconnect, adaptive quality and signed-update infrastructure. Public update publishing remains unconfigured; see [UPDATES.md](UPDATES.md). Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
 
-## Daily use (native.11)
+## Daily use (native.13)
+
+### Playback sound and receiver fixes (native.13)
+
+Update **both Windows and Mac apps**. Before starting a Windows share, select **Windows 재생 소리 포함 · 마이크 제외** to include the default Windows playback output. The checkbox starts **off on every app launch, including after an update**. Its permission belongs to the current manually started share; an old resume grant never enables it. On Mac, use the connected speaker button to mute or restore sound. Mute affects this Mac's playback and keeps draining the audio connection. Stop/disconnect ends audio with the screen session.
+
+Audio uses fixed stereo48kHz PCM16, about1.536Mbps before transport overhead, on independent pinned TLS TCP48636. It is bound to the current media-authorized peer and a derived session key; the media-v1 Hello/Ready schemas remain unchanged. An older host, declined option, unavailable device or audio error leaves video running. There is no precise audiovisual synchronization or measured performance guarantee. [Audio scope and protocol](AUDIO.md).
+
+Native.13 also corrects ambiguous H.264 sample-framing detection, reports repeated short-window receiver pressure to the existing quality policy with hysteresis, and repaints the solid parent background around Windows rounded buttons. The pressure path preserves compressed-frame order and does not add frame skipping. These changes address source/fixture findings; they do not establish the cause of a particular GPU's4K stutter or prove a hardware performance improvement.
 
 ### Certificate compatibility correction (native.12)
 
@@ -55,7 +64,7 @@ A received frame may reach3840×2160 without upscaling a lower-resolution source
 
 Fullscreen removes reserved toolbar/footer height. Floating controls provide disconnect, native fullscreen exit and actual received dimensions. One desktop/presenter remains mounted; genuine source/viewer ratio differences still letterbox. Ordinary typing uses the Mac input method by default, preserving local Caps Lock language/capitalization behavior. Physical-keyboard fallback is secondary. Focus loss/revocation cancels composition and rejects late commits; physical shortcuts and owned key-ups remain separate from Unicode text.
 
-Normal Windows execution needs no elevation. OS private-network/application-control prompts may apply; the app changes no firewall, forwarding or system-security setting. Media TCP48631, enrollment TCP48632 and discovery UDP48633 remain private-network services. Packages are development previews: Windows unsigned, Mac ad-hoc/unnotarized.
+Normal Windows execution needs no elevation. OS private-network/application-control prompts may apply; the app changes no firewall, forwarding or system-security setting. Media TCP48631, enrollment TCP48632, discovery UDP48633 and optional playback-audio TCP48636 remain private-network services. Packages are development previews: Windows unsigned, Mac ad-hoc/unnotarized.
 
 ## Files while connected
 
@@ -95,7 +104,7 @@ The encoder retains at most two in-flight samples and the decoder three outstand
 
 Runtime packet sizes, input actions and decoder work are capped. A single media writer applies socket backpressure before acquiring the next frame; input travels in the opposite TLS direction. Codec/device operations have application polling budgets but an in-process app cannot preempt a wedged OS/GPU call; hard isolation is future work. TCP is a deliberate first-slice transport with head-of-line/recovery tradeoffs, not a claimed replacement for a tuned real-time media stack.
 
-Full builds also render fresh synthetic UI states from the actual view sources. `native-ui-visual-checks.json` binds the renderer, assets, image hashes and layout checks; the separate `native-macos-ui` and `native-windows-ui` CI artifacts contain those images. These fixtures never enter the production app entry point, connect a host, create certificates, read the clipboard or capture an existing screen. A successful render is not a visual approval: human inspection is recorded separately, and real display/input/DPI behavior still needs device acceptance.
+Full builds also render fresh synthetic UI states from the actual view sources. `native-ui-visual-checks.json` binds the renderer, assets, image hashes and layout checks; the separate `native-macos-ui` and `native-windows-ui` CI artifacts contain those images. These fixtures never enter the production app entry point, connect a host, create certificates, read the clipboard or capture an existing screen. Audio checks use fake capture/output sinks and newly generated PCM/packet fixtures; they never capture or play existing audio. A successful render is not a visual approval: human inspection is recorded separately, and real display/input/DPI/audio behavior still needs device acceptance.
 
 Windows monitor decoration uses one fitted canvas for its screen, centered mark and stand. Six fresh bitmap sizes at six DPIs verify containment, square panes and identical drawing for identical pixel bounds; Windows scenes include initial onboarding, number/help views and150%/200% short-number idle views. The builder requires these checks and rejects linked/reparse/shared output destinations before publishing assets or completion records.
 

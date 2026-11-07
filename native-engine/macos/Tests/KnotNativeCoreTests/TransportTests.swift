@@ -391,10 +391,11 @@ private final class InertPresenter: NativePresenter {
     let json = "{\"v\":1,\"address\":\"10.0.0.1\",\"port\":48631,\"certificateSHA256\":\"\(String(repeating: "a", count: 64))\",\"token\":\"\(token)\"}"
     model.review("knot-native:v1:" + Invitation.encodeBase64URL(Data(json.utf8))); model.connect(); return model
 }
-@MainActor private func approveInert(_ transport: InertChannel, _ model: SessionModel) async throws {
+@MainActor private func approveInert(_ transport: InertChannel, _ model: SessionModel, quality: Bool = false) async throws {
     for _ in 0..<100 { if model.phase == .approval { break }; try await Task.sleep(for: .milliseconds(5)) }
     try #require(model.phase == .approval)
-    let ready = Packet(kind: .ready, payload: Data("{\"v\":1,\"codec\":\"h264-annexb\",\"width\":64,\"height\":64,\"fps\":30,\"bitrate\":1000000,\"hardwareEncoder\":true}".utf8))
+    let feature = quality ? ",\"qualityVersion\":1" : ""
+    let ready = Packet(kind: .ready, payload: Data("{\"v\":1,\"codec\":\"h264-annexb\",\"width\":64,\"height\":64,\"fps\":30,\"bitrate\":1000000,\"hardwareEncoder\":true\(feature)}".utf8))
     transport.feed(Data(ready.encoded.prefix(5))); transport.feed(ready.payload)
     for _ in 0..<100 { if model.phase == .decoding { break }; try await Task.sleep(for: .milliseconds(5)) }
     try #require(model.phase == .decoding)
@@ -432,6 +433,35 @@ private final class PublishedEmissionCounter: @unchecked Sendable {
     #expect(!model.status.contains("Display is behind") && emissions.count == 4)
     for _ in 0..<120 { model.presentDecodedImage(image, now: start + .seconds(4)) }
     #expect(emissions.count == 4)
+}
+
+@Test @MainActor func intermittentPresentationLossReportsQualityPressureWithoutAFalseStallNotice() async throws {
+    let transport = InertChannel(), presenter = InertPresenter([])
+    let model = beginInert(transport, presenter: presenter)
+    try await approveInert(transport, model, quality: true)
+    let image = try syntheticPresentationPixel(), start = ContinuousClock.now
+    defer { model.disconnect() }
+    presenter.results = (0..<120).map { $0 % 2 == 0 ? .backpressure : .presented }
+    for frame in 0..<120 { model.presentDecodedImage(image, now: start + .milliseconds(frame * 16)) }
+    #expect(model.phase == .streaming && !model.status.contains("Display is behind"))
+    model.reportReceiverPressure(now: start + .milliseconds(2100))
+    let firstDeadline = ContinuousClock.now + .seconds(1)
+    while !transport.snapshot().contains(where: { $0.kind == .qualityFeedback }), ContinuousClock.now < firstDeadline {
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(transport.snapshot().filter { $0.kind == .qualityFeedback } == [Packet(kind: .qualityFeedback, payload: Data([1]))])
+    for frame in 0..<180 { model.presentDecodedImage(image, now: start + .milliseconds(2200 + frame * 16)) }
+    model.reportReceiverPressure(now: start + .milliseconds(6200))
+    let healthyDeadline = ContinuousClock.now + .seconds(1)
+    while transport.snapshot().filter({ $0.kind == .qualityFeedback }).count < 2, ContinuousClock.now < healthyDeadline {
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(transport.snapshot().filter { $0.kind == .qualityFeedback } == [
+        Packet(kind: .qualityFeedback, payload: Data([1])), Packet(kind: .qualityFeedback, payload: Data([0]))])
+    model.disconnect()
+    let sent = transport.snapshot()
+    model.reportReceiverPressure(now: start + .seconds(10))
+    #expect(transport.snapshot() == sent && model.quality == nil)
 }
 
 @Test @MainActor func disconnectRevokesBlockedHelloSynchronously() async throws {

@@ -16,6 +16,7 @@ struct PreviewWindow: View {
     var simulatedDesktop: AnyView? = nil
     var simulatedFullscreen: Bool? = nil
     var simulatedFiles: FileTransferModel? = nil
+    var simulatedAudio: NativeAudioSession? = nil
     @StateObject private var windowState: NativeWindowState
     @StateObject private var enrollment: EnrollmentModel
     @State private var secret = ""
@@ -28,7 +29,7 @@ struct PreviewWindow: View {
     @FocusState private var codeFocused: Bool
     @State private var activeTarget: NativeTarget?
 
-    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false, updates: NativeUpdateModel? = nil) {
+    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false, updates: NativeUpdateModel? = nil, simulatedAudio: NativeAudioSession? = nil) {
         self.model = model
         self.updates = updates
         _windowState = StateObject(wrappedValue: windowState ?? NativeWindowState())
@@ -37,6 +38,7 @@ struct PreviewWindow: View {
         self.simulatedDesktop = simulatedDesktop
         self.simulatedFullscreen = simulatedFullscreen
         self.simulatedFiles = simulatedFiles
+        self.simulatedAudio = simulatedAudio
         _showingFiles = State(initialValue: initialFiles)
         _showingHelp = State(initialValue: initialHelp)
         _showingOptions = State(initialValue: model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters.")
@@ -458,7 +460,8 @@ struct PreviewWindow: View {
                 Label("이번 미리보기에서", systemImage: "info.circle").font(.system(size: 15, weight: .semibold))
                 Text("로그인된 Windows 11의 기본 SDR 가로 화면과 하드웨어 H.264 인코더가 필요해요. Mac은 Apple Silicon · macOS 26 이상을 지원해요.")
                 Text("연결 중 ‘파일’에서 파일·폴더를 주고받으세요. Finder 항목을 원격 화면에 놓으면 Windows 공유 폴더로 복사돼요. Windows 탐색기 항목은 버튼을 누른 채 화면 밖 Finder로 끌어오세요. Mac 쪽 아이콘이 나타난 뒤 놓으면 돼요. 목록의 ‘받기’도 사용할 수 있어요. 원본과 기존 파일은 유지하며 앱 패키지·링크·클립보드 동기화는 지원하지 않아요.")
-                Text("오디오·무모니터·잠금/UAC 화면·HDR·다중 모니터는 아직 지원하지 않아요. 자동 업데이트는 서명된 공개 배포 피드 구성 후 사용할 수 있어요.")
+                Text("Windows에서 공유 시작 전에 ‘Windows 재생 소리 포함’을 켜면 이 Mac에서 소리를 들을 수 있어요. 마이크는 공유하지 않아요. 연결 제어의 스피커 버튼으로 음소거할 수 있어요.")
+                Text("무모니터·잠금/UAC 화면·HDR·다중 모니터는 아직 지원하지 않아요. 자동 업데이트는 서명된 공개 배포 피드 구성 후 사용할 수 있어요.")
                 Text("8자리 번호는 2분·1회용이며 실패 횟수가 제한돼요. 내 PC로 등록하면 키체인에 기기 자격 증명을 저장하고 다음에는 새 인증으로 접속해요. 등록하지 않은 기기는 새 번호가 필요해요. 긴 코드는 지문 확인과 Windows의 별도 승인이 필요한 호환 모드예요.")
                 Text("기본 Mac 입력기로 한글·영문을 입력해요. 한/영 전환은 Caps Lock 등 이 Mac에 설정된 키를 그대로 사용하세요. 일반적인 Windows 복사·붙여넣기는 Control+C/V를 사용해요. 물리 키 입력에서 Command는 Windows 키에 해당해요.")
             }.font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -581,6 +584,9 @@ struct PreviewWindow: View {
                 NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: model.clipboard, quality: model.quality)
             } label: { Label("작업 도구", systemImage: "slider.horizontal.3") }.menuStyle(.borderlessButton).fixedSize()
                 .onChange(of: model.macShortcuts) { _, _ in model.releaseInput() }
+            if let audio = simulatedAudio ?? model.audio {
+                NativeAudioControls(audio: audio, beforeAction: { model.releaseInput() })
+            }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
                 Text(NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod)).font(.system(size: 12)).foregroundStyle(.secondary)
@@ -598,5 +604,19 @@ struct PreviewWindow: View {
         guard !secret.isEmpty else { return }
         let draft = secret; secret = ""; enrollment.cancel()
         model.review(draft)
+    }
+}
+
+private struct NativeAudioControls: View {
+    @ObservedObject var audio: NativeAudioSession
+    let beforeAction: () -> Void
+    var body: some View {
+        Button { beforeAction(); audio.toggleMuted() } label: {
+            Label(audio.isAvailable ? (audio.muted ? "소리 켜기" : "음소거") : "소리 없음",
+                  systemImage: audio.isAvailable && !audio.muted ? "speaker.wave.2" : "speaker.slash")
+        }.buttonStyle(.borderless).disabled(!audio.isAvailable)
+            .help(audio.isAvailable ? audio.status : "Windows에서 공유 시작 전에 ‘Windows 재생 소리 포함’을 켜주세요. 두 앱을 최신 버전으로 업데이트하고 Windows 방화벽에서 Knot의 개인 네트워크 연결도 허용해주세요.")
+            .accessibilityLabel(audio.status)
+            .fixedSize()
     }
 }

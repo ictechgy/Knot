@@ -23,13 +23,21 @@ from build_snapshot import source_snapshot, validate_corresponding_source
 from native_updates import build_resource as native_update_resource
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.12"
+VERSION = "0.1.0-native.13"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def validate_audio_conversion(value):
+    if (value.get("status") != "passed" or value.get("freshSyntheticOnly") is not True or
+            value.get("actualAudioCapture") is not False or value.get("actualAudioPlayback") is not False or
+            type(value.get("audioConversionFixtures")) is not int or value["audioConversionFixtures"] < 15 or
+            type(value.get("assertions")) is not int or value["assertions"] < 542):
+        raise ValueError("Audio conversion requires bounded fresh synthetic evidence without device access")
 
 
 def validate_native_file_vectors(path):
@@ -378,7 +386,7 @@ class Builder:
                      "native-cpp-checks.json", "native-host-checks.json", "native-installer-metadata.json",
                      "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
                      "synthetic-codec.json", "synthetic-codec-4k.json", "synthetic-4k60.json",
-                     "native-wait-checks.json"]:
+                     "native-wait-checks.json", "native-audio-conversion-checks.json"]:
             path = self.output / name
             info = output_stat(path)
             if info is not None and stat.S_ISDIR(info.st_mode) and not linked_output(info):
@@ -481,9 +489,25 @@ class Builder:
                          "sameBoundsDpiPixelIdentity", "degenerateBoundsSkipped"]) or
                     not isinstance(monitor.get("scope"), str) or not monitor["scope"].strip()):
                 raise ValueError("Windows monitor illustration needs fresh measured geometry and DPI raster checks")
+            buttons = report.get("buttonSurfaceChecks")
+            if (not isinstance(buttons, dict) or buttons.get("status") != "PASS" or
+                    any(type(buttons.get(key)) is not int or buttons[key] != value for key, value in
+                        {"rasterCases": 600, "repaintCases": 20, "partialClipCases": 20,
+                         "minimumDpi": 96, "maximumDpi": 288, "buttonKinds": 4}.items()) or
+                    any(buttons.get(key) is not True for key in
+                        ["opaqueCorners", "parentBackdrop", "transparentAncestors", "partialClipPreserved",
+                         "actualGraphicsDpi", "allPixelsInitialized", "freshSyntheticOnly"]) or
+                    type(buttons.get("inheritedOpaqueObserved")) is not bool or
+                    any(buttons.get(key) is not False for key in
+                        ["productionEntryInvoked", "actualInputInvoked", "screenCaptureInvoked"])):
+                raise ValueError("Windows buttons need complete-surface, parent-background and clipped-repaint pixel checks")
         rows = report.get("images")
         if self.platform == "macos" and (type(report.get("fileAdaptersInvoked")) is not int or report["fileAdaptersInvoked"] != 0):
             raise ValueError("Mac UI checks must measure zero file adapter invocations")
+        if self.platform == "macos" and (report.get("audioDeviceInvoked") is not False or
+                report.get("audioEngineInvoked") is not False or type(report.get("audioAdaptersInvoked")) is not int or
+                report["audioAdaptersInvoked"] != 0):
+            raise ValueError("Mac audio UI fixtures must never invoke audio devices or output engines")
         if not isinstance(rows, list) or not 7 <= len(rows) <= 64:
             raise ValueError("UI fixture state coverage is missing or excessive")
         names = set()
@@ -507,12 +531,15 @@ class Builder:
                       "searching", "empty", "nearby", "number", "number-working", "number-error",
                       "nearby-compact", "number-compact", "number-dark", "help-compact",
                       "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
-                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch"]}
+                      "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch",
+                      "audio-on", "audio-muted", "audio-unavailable", "audio-on-compact", "audio-muted-compact", "audio-unavailable-compact",
+                      "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
                      ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
                       "short-idle", "short-code", "short-code-compact", "short-help-compact",
-                      "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable", "certificate-migration", "certificate-migration-compact"]})
+                      "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable", "certificate-migration", "certificate-migration-compact",
+                      "audio-ready", "audio-ready-compact", "audio-sharing", "audio-sharing-scale200"]})
         if not required.issubset(names):
             raise ValueError("UI fixture omitted a required task state")
         bound_sources = {self.input(path).relative_to(ROOT).as_posix(): digest(path) for path in source_inputs}
@@ -636,6 +663,12 @@ class Builder:
                  "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                  self.input(media / "media_activation_test.cpp"), "-o", activation_checks])
         self.run("native-activation-checks", [activation_checks], timeout=60)
+        audio_checks = self.output / "KnotNativeAudioConversionChecks"
+        self.input(media / "audio_convert.h")
+        self.run("compile-native-audio-conversion-checks", ["/usr/bin/clang++", "-std=c++17", "-O1", "-g",
+                 "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                 self.input(media / "audio_convert_test.cpp"), "-o", audio_checks])
+        self.record_audio_conversion(audio_checks)
         cpp_record = self.record_cpp_checks()
         self.run("swift-version", ["/usr/bin/swift", "--version"])
         self.run("swift-build", ["/usr/bin/swift", "build", "--package-path", package,
@@ -695,16 +728,21 @@ class Builder:
         self.run("native-dmg", ["/usr/bin/hdiutil", "create", "-ov", "-format", "UDZO", "-volname",
                                 "Knot Native Preview", "-srcfolder", image_root, dmg])
         self.run("verify-native-dmg", ["/usr/bin/hdiutil", "verify", dmg])
-        return [zip_path, dmg, cpp_record, visual_record, *crypto_products]
+        return [zip_path, dmg, cpp_record, self.output / "native-audio-conversion-checks.json", visual_record, *crypto_products]
 
     def record_cpp_checks(self):
         path = self.output / "native-cpp-checks.json"
         path.write_text(json.dumps({"schema": 1, "status": "passed", "platform": self.platform,
-            "invocationLabels": ["native-parser-checks", "native-pacing-checks", "native-activation-checks"],
+            "invocationLabels": ["native-parser-checks", "native-pacing-checks", "native-activation-checks", "native-audio-conversion-checks"],
             "sanitizers": "address,undefined" if self.platform == "macos" else "none",
-            "scope": "Fresh portable parser/pacing/activation ownership checks; no desktop capture, hardware encoder or input"
+            "scope": "Fresh portable parser/pacing/activation/audio conversion checks; no capture, audio playback, hardware encoder or input"
         }, indent=2) + "\n")
         return path
+
+    def record_audio_conversion(self, executable):
+        value = json.loads(self.run("native-audio-conversion-checks", [executable], timeout=60).decode("utf-8-sig"))
+        validate_audio_conversion(value)
+        (self.output / "native-audio-conversion-checks.json").write_text(json.dumps(value, indent=2) + "\n")
 
     def msvc(self, label, arguments):
         installer = Path(os.environ["ProgramFiles(x86)"]) / "Microsoft Visual Studio/Installer/vswhere.exe"
@@ -777,6 +815,12 @@ class Builder:
         self.msvc("compile-native-activation-checks", [*common, self.input(media / "media_activation_test.cpp"),
                   "/Fe:" + str(activation_checks)])
         self.run("native-activation-checks", [activation_checks], timeout=60)
+        self.input(media / "audio_convert.h")
+        self.input(media / "kn_audio.h")
+        audio_checks = self.output / "KnotNativeAudioConversionChecks.exe"
+        self.msvc("compile-native-audio-conversion-checks", [*common, self.input(media / "audio_convert_test.cpp"),
+                  "/Fe:" + str(audio_checks)])
+        self.record_audio_conversion(audio_checks)
         wait_checks = self.output / "KnotNativeWaitChecks.exe"
         self.msvc("compile-native-wait-checks", [*common, self.input(media / "media_wait_test.cpp"),
                   "/Fe:" + str(wait_checks)])
@@ -784,7 +828,7 @@ class Builder:
         self.run("native-wait-checks", [wait_checks, "--json", wait_record], timeout=60)
         validate_wait_measurement(json.loads(wait_record.read_text()))
         cpp_record = self.record_cpp_checks()
-        cpp = [media / n for n in ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp"]]
+        cpp = [media / n for n in ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "audio.cpp"]]
         self.msvc("compile-native-media", [*common, "/LD", "/DKN_MEDIA_EXPORTS", *map(self.input, cpp),
                   "/Fe:" + str(self.output / "KnotNativeMedia.dll"), "/link", *libs])
         self.msvc("compile-native-codec-checks", [*common, *map(self.input, [media / "synthetic_codec_test.cpp",
@@ -809,7 +853,7 @@ class Builder:
         validate_four_k_fixture(json.loads(fixture_record_4k60.read_text()), fixture_4k60, 60, 12)
         if self.media_only:
             return [self.output / "KnotNativeMedia.dll", fixture, fixture_record, fixture_4k, fixture_record_4k,
-                    fixture_4k60, fixture_record_4k60, wait_record, cpp_record]
+                    fixture_4k60, fixture_record_4k60, wait_record, cpp_record, self.output / "native-audio-conversion-checks.json"]
         sources = sorted((ROOT / "native-engine/windows").glob("*.cs"))
         executable = self.csharp("Knot-Native-Preview", sources, "Knot.NativePreview.Program", "winexe")
         managed_crypto = self.csharp("KnotNativePairingBridgeChecks",
@@ -842,11 +886,14 @@ class Builder:
                           timeout=300).decode("utf-8-sig").strip()
         parsed = json.loads(result)
         if (parsed.get("status") != "passed" or parsed.get("freshSyntheticOnly") is not True or
-                parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False):
+                parsed.get("actualCapture") is not False or parsed.get("actualSendInput") is not False or
+                parsed.get("actualAudioCapture") is not False or parsed.get("actualAudioPlayback") is not False):
             raise ValueError("Native host checks must prove their fresh/inert capture and input scope")
         for key, minimum in [("actualFreshExplorerInputFixtures", 1), ("actualFreshExplorerOleFixtures", 1),
                              ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28), ("actualPersistentCertificateFixtures", 3),
-                             ("actualCrossProcessCertificateLeaseFixtures", 1)]:
+                             ("actualCrossProcessCertificateLeaseFixtures", 1), ("actualFreshAudioFixtures", 11),
+                             ("actualFreshAudioTlsFixtures", 6), ("actualSyntheticAudioCaptureFixtures", 4),
+                             ("actualFreshAudioHostFixtures", 3)]:
             if type(parsed.get(key)) is not int or parsed[key] < minimum:
                 raise ValueError("Native host folder/Explorer checks incomplete: " + key)
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")
@@ -857,10 +904,11 @@ class Builder:
         validate_native_file_vectors(file_vectors)
         visuals = self.visual_directory()
         visual_fixture = ROOT / "native-engine/windows/tests/NativeVisualFixtures.cs"
-        visual_checks = self.csharp("KnotNativeVisualFixtures", sources + [visual_fixture],
+        button_checks = ROOT / "native-engine/windows/tests/PreviewButtonPaintChecks.cs"
+        visual_checks = self.csharp("KnotNativeVisualFixtures", sources + [visual_fixture, button_checks],
                                     "Knot.NativePreview.NativeVisualFixtures", "exe")
         brand_icon = self.input(ROOT / "Assets/Brand/AppIcon.ico")
-        visual_inputs = [*sources, visual_fixture, brand_icon]
+        visual_inputs = [*sources, visual_fixture, button_checks, brand_icon]
         self.run("native-ui-visual-checks", [visual_checks, "--output", visuals, "--brand-icon", brand_icon],
                  timeout=180, command_inputs=[self.input(path) for path in visual_inputs])
         visual_record = self.record_visual_checks(visuals, visual_inputs)
@@ -893,7 +941,7 @@ class Builder:
             raise ValueError("Native installer version metadata differs from the checked preview version")
         installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
         return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record, fixture_4k, fixture_record_4k,
-                fixture_4k60, fixture_record_4k60, wait_record,
+                fixture_4k60, fixture_record_4k60, wait_record, self.output / "native-audio-conversion-checks.json",
                 self.output / "native-host-checks.json", public_certificate, public_pin, persistent_certificate, persistent_pin, file_vectors, cpp_record, installer_metadata,
                 visual_record, managed_record, *crypto_products]
 
@@ -910,6 +958,7 @@ class Builder:
                   "products": {p.name: {"sha256": digest(p), "bytes": p.stat().st_size} for p in files},
                   "scope": "Compiled independent engine plus fresh synthetic/TLS/codec checks; no production capture or input",
                   "acceptance": {"hardwareCaptureTested": False, "hardwareEncodeTested": False,
+                                 "actualAudioCaptureTested": False, "actualAudioPlaybackTested": False,
                                  "realWindowsHomeTested": False, "twoDeviceStreamingTested": False,
                                  "trustedSigning": False, "productionFallbackModified": False}}
         (self.output / "NATIVE-BUILD.json").write_text(json.dumps(record, indent=2) + "\n")

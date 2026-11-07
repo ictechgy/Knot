@@ -102,11 +102,13 @@ def main():
 
     rendered = json.loads((output / "render-result.json").read_text())
     effects = ["productionEntryInvoked", "networkInvoked", "clipboardInvoked", "certificateCreationInvoked",
-               "captureInvoked", "actualInputInvoked", "screenCaptureInvoked", "syntheticWindowsShown", "existingUserUIRead"]
+               "captureInvoked", "actualInputInvoked", "screenCaptureInvoked", "syntheticWindowsShown", "existingUserUIRead",
+               "audioDeviceInvoked", "audioEngineInvoked"]
     if rendered.get("freshSyntheticOnly") is not True or any(rendered.get(key) is not False for key in effects):
         raise SystemExit("Visual fixture effect contract failed")
     if (type(rendered.get("mediaAdaptersInvoked")) is not int or rendered["mediaAdaptersInvoked"] != 0 or
             type(rendered.get("fileAdaptersInvoked")) is not int or rendered["fileAdaptersInvoked"] != 0 or
+            type(rendered.get("audioAdaptersInvoked")) is not int or rendered["audioAdaptersInvoked"] != 0 or
             type(rendered.get("modelPhaseChecks")) is not int or rendered["modelPhaseChecks"] != len(rendered["images"])):
         raise SystemExit("Visual fixture did not measure adapter attempts and intended model phases")
     for row in rendered["images"]:

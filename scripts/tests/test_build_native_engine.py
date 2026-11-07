@@ -113,10 +113,11 @@ class NativeRebuildTests(unittest.TestCase):
                      "native-engine/pairing/tests/ManagedCryptoChecks.cs",
                      "native-engine/windows/MonitorGeometry.cs",
                      "native-engine/windows/tests/NativeVisualFixtures.cs",
+                     "native-engine/windows/tests/PreviewButtonPaintChecks.cs",
                      *["native-engine/windows/media/" + name for name in
                        ["media.cpp", "capture.cpp", "encoder.cpp", "h264.cpp", "synthetic_codec_test.cpp",
                         "h264_parser_test.cpp", "media_pacing_test.cpp", "media_activation_test.cpp", "media_limits.h",
-                        "media_wait.h", "media_wait_test.cpp"]]]:
+                        "media_wait.h", "media_wait_test.cpp", "audio.cpp", "audio_convert.h", "kn_audio.h", "audio_convert_test.cpp"]]]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("build/\n" if name == ".gitignore" else "Fresh inert fixture\n")
@@ -192,10 +193,12 @@ class NativeRebuildTests(unittest.TestCase):
                 with (self.output / "native-file-vectors.json").open("x") as fixture:
                     json.dump(inert_file_vectors(), fixture)
                 return json.dumps(dict(status="passed", freshSyntheticOnly=True,
-                                       actualCapture=False, actualSendInput=False,
+                                       actualCapture=False, actualSendInput=False, actualAudioCapture=False, actualAudioPlayback=False,
                                        actualFreshExplorerInputFixtures=1, actualFreshExplorerOleFixtures=1,
                                        actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28, actualPersistentCertificateFixtures=3,
-                                       actualCrossProcessCertificateLeaseFixtures=1)).encode()
+                                       actualCrossProcessCertificateLeaseFixtures=1, actualFreshAudioFixtures=11,
+                                       actualFreshAudioTlsFixtures=6, actualSyntheticAudioCaptureFixtures=4,
+                                       actualFreshAudioHostFixtures=3)).encode()
             elif label == "native-pairing-managed-checks":
                 return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,
                     networkInvoked=False, captureInvoked=False, actualInputInvoked=False)).encode()
@@ -221,7 +224,8 @@ class NativeRebuildTests(unittest.TestCase):
                 rows = []
                 for state in ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
                               "short-idle", "short-code", "short-code-compact", "short-help-compact",
-                              "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable", "certificate-migration", "certificate-migration-compact"]:
+                              "short-idle-scale150", "short-idle-scale200", "files-sharing", "files-sharing-compact", "files-unavailable", "certificate-migration", "certificate-migration-compact",
+                              "audio-ready", "audio-ready-compact", "audio-sharing", "audio-sharing-scale200"]:
                     image = visual_output / ("windows-" + state + ".png")
                     image.write_bytes(data)
                     rows.append(dict(name=image.name, sha256=native.digest(image), bytes=len(data), width=640, height=480))
@@ -234,6 +238,11 @@ class NativeRebuildTests(unittest.TestCase):
                         minimumDpi=96, maximumDpi=288, centered=True, paneAspectPreserved=True,
                         panesContained=True, sameBoundsDpiPixelIdentity=True, degenerateBoundsSkipped=True,
                         scope="INERT geometry evidence substitute; no Windows renderer executed"),
+                    buttonSurfaceChecks=dict(status="PASS", rasterCases=600, repaintCases=20, partialClipCases=20,
+                        minimumDpi=96, maximumDpi=288, buttonKinds=4, opaqueCorners=True, parentBackdrop=True,
+                        transparentAncestors=True, partialClipPreserved=True, actualGraphicsDpi=True,
+                        allPixelsInitialized=True, inheritedOpaqueObserved=True, freshSyntheticOnly=True,
+                        productionEntryInvoked=False, actualInputInvoked=False, screenCaptureInvoked=False),
                     fileAdaptersInvoked=0, renderMethod="INERT lifecycle test substitute; no native UI rendered")
                 if invalid_visual == "effects": report["networkInvoked"] = True
                 elif invalid_visual == "shown-synthetic": report["syntheticWindowsShown"] = True
@@ -244,9 +253,15 @@ class NativeRebuildTests(unittest.TestCase):
                 elif invalid_visual == "monitor-count": report["monitorIllustrationChecks"]["rasterCases"] = 35
                 elif invalid_visual == "monitor-bool": report["monitorIllustrationChecks"]["boundsCases"] = True
                 elif invalid_visual == "monitor-scale-state": rows.pop()
+                elif invalid_visual == "button-missing": del report["buttonSurfaceChecks"]
+                elif invalid_visual == "button-corners": report["buttonSurfaceChecks"]["opaqueCorners"] = False
+                elif invalid_visual == "button-count": report["buttonSurfaceChecks"]["rasterCases"] = 599
                 (visual_output / "visual-checks.json").write_text(json.dumps(report) + "\n")
             elif label in ["native-parser-checks", "native-pacing-checks", "native-activation-checks"]:
                 return b"INERT external-tool substitute for lifecycle checks only\n"
+            elif label == "native-audio-conversion-checks":
+                return json.dumps(dict(status="passed", freshSyntheticOnly=True, actualAudioCapture=False,
+                    actualAudioPlayback=False, audioConversionFixtures=15, assertions=542)).encode()
             else:
                 return actual_run(label, argv, **kwargs)
             return b""
@@ -370,6 +385,14 @@ class NativeRebuildTests(unittest.TestCase):
             self.build_with_inert_tools(invalid_visual="monitor-scale-state")
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
+
+    def test_windows_button_corner_evidence_is_required(self):
+        for invalid in ["button-missing", "button-corners", "button-count"]:
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "complete-surface"):
+                    self.build_with_inert_tools(invalid_visual=invalid)
+                self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+                self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
 
     def test_four_k_fixture_must_have_actual_four_k_dimensions(self):
         self.build_with_inert_tools()
@@ -743,3 +766,14 @@ class NativeFileVectorTests(unittest.TestCase):
             path.write_bytes(b" " * (1024 * 1024 + 1))
             with self.assertRaisesRegex(ValueError, "bounded"):
                 native.validate_native_file_vectors(path)
+
+
+class AudioConversionEvidenceTests(unittest.TestCase):
+    def test_requires_synthetic_conversion_and_rejects_device_access(self):
+        valid = dict(status="passed", freshSyntheticOnly=True, actualAudioCapture=False,
+                     actualAudioPlayback=False, audioConversionFixtures=15, assertions=542)
+        native.validate_audio_conversion(valid)
+        for delta in [dict(actualAudioCapture=True), dict(actualAudioPlayback=True),
+                      dict(audioConversionFixtures=True), dict(audioConversionFixtures=14), dict(assertions=541)]:
+            with self.subTest(delta=delta), self.assertRaises(ValueError):
+                native.validate_audio_conversion(dict(valid, **delta))

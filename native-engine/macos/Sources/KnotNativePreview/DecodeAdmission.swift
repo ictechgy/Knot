@@ -8,11 +8,15 @@ import KnotNativeCore
 final class DecodeAdmission {
     static let capacity = 3
     private var tickets: Set<UUID> = []
-    private var waiter: (id: UUID, exclusive: Bool, continuation: CheckedContinuation<UUID, any Error>)?
+    private var waiter: (id: UUID, exclusive: Bool, began: ContinuousClock.Instant, continuation: CheckedContinuation<UUID, any Error>)?
+    private let now: () -> ContinuousClock.Instant
+    var onWait: ((Duration) -> Void)?
     private var stopped = false
     private(set) var peak = 0
     var count: Int { tickets.count }
     var waiting: Bool { waiter != nil }
+
+    init(now: @escaping () -> ContinuousClock.Instant = { .now }) { self.now = now }
 
     func acquire(exclusive: Bool = false) async throws -> UUID {
         try Task.checkCancellation()
@@ -23,7 +27,7 @@ final class DecodeAdmission {
                 guard !Task.isCancelled, !stopped else { continuation.resume(throwing: CancellationError()); return }
                 guard waiter == nil else { continuation.resume(throwing: NativeFailure.state); return }
                 if eligible(exclusive) { admit(id); continuation.resume(returning: id) }
-                else { waiter = (id, exclusive, continuation) }
+                else { waiter = (id, exclusive, now(), continuation) }
             }
         } onCancel: { [weak self] in
             Task { @MainActor in self?.cancel(id) }
@@ -33,14 +37,17 @@ final class DecodeAdmission {
     private func admit(_ id: UUID) { tickets.insert(id); peak = max(peak, tickets.count) }
     func release(_ id: UUID) {
         guard tickets.remove(id) != nil, !stopped, let pending = waiter, eligible(pending.exclusive) else { return }
-        waiter = nil; admit(pending.id); pending.continuation.resume(returning: pending.id)
+        waiter = nil; admit(pending.id)
+        let elapsed = max(.zero, now() - pending.began)
+        pending.continuation.resume(returning: pending.id)
+        onWait?(elapsed)
     }
     private func cancel(_ id: UUID) {
         guard waiter?.id == id else { return }
         let pending = waiter; waiter = nil; pending?.continuation.resume(throwing: CancellationError())
     }
     func stop() {
-        stopped = true; let pending = waiter; waiter = nil
+        stopped = true; onWait = nil; let pending = waiter; waiter = nil
         pending?.continuation.resume(throwing: CancellationError())
     }
 }
@@ -57,10 +64,11 @@ enum DecodeCompletion: Equatable {
 @MainActor
 enum DecodeDelivery {
     static func finish(ticket: UUID, admission: DecodeAdmission, status: Int32, frameDropped: Bool,
-                       image: CVPixelBuffer?, width: Int, height: Int, onImage: (CVPixelBuffer) -> Void, onFailure: () -> Void) {
+                       image: CVPixelBuffer?, width: Int, height: Int, onImage: (CVPixelBuffer) -> Void, onFailure: () -> Void,
+                       onCompletion: (Bool) -> Void = { _ in }) {
         defer { admission.release(ticket) }
         switch DecodeCompletion.classify(status: status, frameDropped: frameDropped, hasImage: image != nil) {
-        case .dropped: break
+        case .dropped: onCompletion(true)
         case .failure: onFailure()
         case .image:
             // A format-description match does not authorize an unexpected
@@ -68,6 +76,7 @@ enum DecodeDelivery {
             guard let image, CVPixelBufferGetWidth(image) == width, CVPixelBufferGetHeight(image) == height else {
                 onFailure(); return
             }
+            onCompletion(false)
             onImage(image)
         }
     }

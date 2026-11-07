@@ -7,7 +7,7 @@ import AppKit
 
 @main
 struct KnotNativePreviewApp: App {
-    @StateObject private var model = SessionModel()
+    @StateObject private var model = SessionModel(makeAudioSession: { try NativeAudioSession(invitation: $0) })
     @StateObject private var windowState = NativeWindowState()
     @StateObject private var preferences = NativePreferences()
     @StateObject private var quick = NativeQuickActivation()

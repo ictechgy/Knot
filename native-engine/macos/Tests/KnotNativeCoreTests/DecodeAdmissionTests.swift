@@ -48,14 +48,14 @@ import KnotNativeCore
     let a = try await gate.acquire(), b = try await gate.acquire(), c = try await gate.acquire()
     let waiting = Task { try await gate.acquire() }
     for _ in 0..<20 { if gate.waiting { break }; await Task.yield() }
-    var failed = false, image = false
+    var failed = false, image = false, completions: [Bool] = []
     DecodeDelivery.finish(ticket: a, admission: gate, status: 0, frameDropped: true, image: nil, width: 64, height: 64,
-        onImage: { _ in image = true }, onFailure: { failed = true })
+        onImage: { _ in image = true }, onFailure: { failed = true }, onCompletion: { completions.append($0) })
     let next = try await waiting.value
-    #expect(!failed && !image && gate.count == 3 && gate.peak == 3)
+    #expect(!failed && !image && gate.count == 3 && gate.peak == 3 && completions == [true])
     DecodeDelivery.finish(ticket: next, admission: gate, status: 0, frameDropped: false, image: nil, width: 64, height: 64,
-        onImage: { _ in image = true }, onFailure: { failed = true })
-    #expect(failed && !image && gate.count == 2)
+        onImage: { _ in image = true }, onFailure: { failed = true }, onCompletion: { completions.append($0) })
+    #expect(failed && !image && gate.count == 2 && completions == [true])
     gate.release(b); gate.release(c)
     let token = DecodeCallbackToken(); #expect(token.claim()); #expect(!token.claim())
 }

@@ -20,6 +20,8 @@ final class SessionModel: ObservableObject {
     @Published private(set) var savedDevices: [SavedNativeDevice] = []
     @Published private(set) var clipboard: ClipboardModel?
     @Published private(set) var quality: QualityModel?
+    @Published private(set) var audio: NativeAudioSession?
+    private let makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)?
     private var selectedTrustedDevice: SavedNativeDevice?
     private var pendingRegistration: Invitation?
     private var trustedClient: (any NativeTrustedConnecting)?
@@ -63,6 +65,7 @@ final class SessionModel: ObservableObject {
     var inputRevision: UInt64 { inputEpoch }
     private var presentationBackpressureSince: ContinuousClock.Instant?
     private var displayBehind = false
+    private var receiverPressure = ReceiverPressureWindow()
     var active: Bool { [.connecting, .approval, .decoding, .streaming].contains(phase) }
 
     init(makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) },
@@ -71,8 +74,10 @@ final class SessionModel: ObservableObject {
          },
          makeTrustedClient: @escaping @Sendable (SavedNativeDevice, String) throws -> any NativeTrustedConnecting = { try NativeTrustedClient(device: $0, viewerName: $1) },
          waitForReconnect: @escaping @MainActor @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
-         initialSavedDevices: [SavedNativeDevice] = [], initialRegisteredDevice: SavedNativeDevice? = nil) {
+         initialSavedDevices: [SavedNativeDevice] = [], initialRegisteredDevice: SavedNativeDevice? = nil,
+         makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)? = nil) {
         self.makeChannel = makeChannel
+        self.makeAudioSession = makeAudioSession
         self.waitForInputDeadline = waitForInputDeadline
         self.makeTrustedClient = makeTrustedClient; self.waitForReconnect = waitForReconnect
         // Explicit fixture inputs; initialization never opens Keychain/network.
@@ -234,7 +239,7 @@ final class SessionModel: ObservableObject {
         guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
         let id = UUID(); identity = id; phase = .connecting; status = "Checking the secure connection…"
         input = InputBuffer(); inputRecovery = false
-        presentationBackpressureSince = nil; displayBehind = false
+        presentationBackpressureSince = nil; displayBehind = false; receiverPressure.reset()
         connectedAt = .now; lastIncoming = .now; lastHeartbeat = .now
         reader = Task { [weak self] in
             guard let self, !Task.isCancelled, self.identity == id else { return }
@@ -271,6 +276,10 @@ final class SessionModel: ObservableObject {
                         }
                         self.videoSize = CGSize(width: ready.width, height: ready.height)
                         let decoder = NativeDecoder(width: ready.width, height: ready.height)
+                        decoder.onPerformanceEvent = { [weak self] event in
+                            guard let self, self.identity == id, [.decoding, .streaming].contains(self.phase) else { return }
+                            self.receiverPressure.decode(event, at: .now)
+                        }
                         decoder.onImage = { [weak self] image in
                             guard let self, self.identity == id else { return }
                             self.presentDecodedImage(image)
@@ -283,6 +292,12 @@ final class SessionModel: ObservableObject {
                         self.armPresentationFailure()
                         self.readyAt = .now
                         self.status = "Host approved and encoder ready. Waiting for the first decoded image…"
+                        // Optional child service: audio failure never tears down video.
+                        // Tests have no default audio factory and cannot open audio IO.
+                        if let makeAudioSession = self.makeAudioSession {
+                            self.audio = try? makeAudioSession(invitation)
+                            self.audio?.start()
+                        }
                     case .video(let video): try await self.decoder?.decode(video.accessUnit)
                     case .error(let code):
                         self.fail(Self.message(code)); return
@@ -302,6 +317,7 @@ final class SessionModel: ObservableObject {
         guard [.decoding, .streaming].contains(phase) else { return }
         switch surface?.display(image) ?? .backpressure {
         case .presented:
+            receiverPressure.presentation(accepted: true, at: now)
             let statusChanged = phase != .streaming || displayBehind
             presentationBackpressureSince = nil; displayBehind = false
             if phase != .streaming {
@@ -311,6 +327,7 @@ final class SessionModel: ObservableObject {
             }
             if statusChanged { updateStreamingStatus() }
         case .backpressure:
+            receiverPressure.presentation(accepted: false, at: now)
             let began = presentationBackpressureSince ?? now
             presentationBackpressureSince = began
             if phase == .streaming, !displayBehind, now - began >= .seconds(2) {
@@ -354,9 +371,15 @@ final class SessionModel: ObservableObject {
                 guard let self, self.identity == id, !Task.isCancelled else { return }
                 let now = ContinuousClock.now
                 guard self.checkDeadlines(now: now) else { return }
-                if now - self.lastHeartbeat >= .seconds(2) { self.quality?.reportPressure(self.displayBehind); self.pumpWriter() }
+                if now - self.lastHeartbeat >= .seconds(2) { self.reportReceiverPressure(now: now); self.pumpWriter() }
             }
         }
+    }
+    /// The feedback interval is separate from the UI's continuous-stall notice.
+    /// Keeping the existing one-byte protocol avoids changing stream schemas.
+    func reportReceiverPressure(now: ContinuousClock.Instant = .now) {
+        guard phase == .streaming else { return }
+        quality?.reportPressure(displayBehind || receiverPressure.isOverloaded(at: now), now: now)
     }
     /// Shared by the real ticker and inert lifecycle tests; host activity cannot
     /// indefinitely extend approval or the first decoded-image deadline.
@@ -504,6 +527,7 @@ final class SessionModel: ObservableObject {
         trustedTask?.cancel(); trustedTask = nil; trustedClient?.close(); trustedClient = nil
         registrationTask?.cancel(); registrationTask = nil; pendingRegistration = nil
         clipboard?.cancel(); clipboard = nil; quality = nil
+        audio?.onChange = nil; audio?.stop(); audio = nil
         files?.close(); files = nil
         fileUIInputSuspended = false
         input = InputBuffer()
@@ -517,7 +541,7 @@ final class SessionModel: ObservableObject {
         invitation = nil; input = InputBuffer(); inputRecovery = false
         showFullscreenControls = false
         numberAuthorized = false
-        presentationBackpressureSince = nil; displayBehind = false
+        presentationBackpressureSince = nil; displayBehind = false; receiverPressure.reset()
         phase = failed ? .failed : .idle; status = message
     }
 }

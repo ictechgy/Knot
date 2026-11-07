@@ -18,11 +18,16 @@ final class NativeDecoder {
     var outstanding: Int { admission.count }
     var onImage: ((CVPixelBuffer) -> Void)?
     var onFailure: (() -> Void)?
+    var onPerformanceEvent: ((DecodePerformanceEvent) -> Void)?
 
-    init(width: Int, height: Int) { dimensions = (width, height) }
+    init(width: Int, height: Int) {
+        dimensions = (width, height)
+        admission.onWait = { [weak self] duration in self?.onPerformanceEvent?(.admissionWait(duration)) }
+    }
     func stop() {
         generation &+= 1
         stopped = true
+        onPerformanceEvent = nil
         admission.stop()
         if let session { VTDecompressionSessionInvalidate(session) }
         session = nil; format = nil; sps = []; pps = []; waitingForIDR = true
@@ -70,7 +75,8 @@ final class NativeDecoder {
                 guard let self, self.generation == expectedGeneration else { admission.release(ticket); return }
                 DecodeDelivery.finish(ticket: ticket, admission: admission, status: status, frameDropped: flags.contains(.frameDropped),
                     image: transferred?.buffer, width: self.dimensions.0, height: self.dimensions.1,
-                    onImage: { self.onImage?($0) }, onFailure: { self.onFailure?() })
+                    onImage: { self.onImage?($0) }, onFailure: { self.onFailure?() },
+                    onCompletion: { self.onPerformanceEvent?(.completed(dropped: $0)) })
             }
         }
         guard status == noErr else { throw NativeFailure.decoder }

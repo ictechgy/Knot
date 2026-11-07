@@ -100,8 +100,51 @@ bool VideoSliceChecks() {
     return knot::AnalyzeH264(aud, idr, sps, pps, nullptr, &hasSlice) && !hasSlice &&
         knot::AnalyzeH264(sei, idr, sps, pps, nullptr, &hasSlice) && !hasSlice;
 }
+bool StreamFramingChecks() {
+    using knot::H264Framing;
+    std::vector<uint8_t> output;
+    H264Framing avcc = H264Framing::Unknown, annex = H264Framing::Unknown;
+    const auto firstAvcc = Nals(1, 5, true), firstAnnex = Nals(1, 5);
+    if (!knot::NormalizeH264(firstAvcc.data(), firstAvcc.size(), output, avcc) || avcc != H264Framing::Avcc4 ||
+        !knot::NormalizeH264(firstAnnex.data(), firstAnnex.size(), output, annex) || annex != H264Framing::AnnexB)
+        return false;
+    for (const size_t length : {257U, 289U, 321U, 353U}) {
+        auto sample = Nals(1, 1, true, length);
+        sample[4] = 0x41; // An actual P-slice, after the four-byte AVCC length.
+        auto expected = Nals(1, 1, false, length); expected[4] = 0x41;
+        H264Framing unknown = H264Framing::Unknown;
+        if (knot::NormalizeH264(sample.data(), sample.size(), output, unknown) ||
+            unknown != H264Framing::Unknown || !output.empty() ||
+            knot::NormalizeH264(sample.data(), sample.size(), output)) return false;
+        // Once the stream has established AVCC, the low byte of its NAL length
+        // must never become a spurious NAL header in the outgoing AnnexB frame.
+        if (!knot::NormalizeH264(sample.data(), sample.size(), output, avcc) ||
+            avcc != H264Framing::Avcc4 || output != expected || output.size() != length + 4U)
+            return false;
+        bool idr = false, sps = false, pps = false, slice = false;
+        if (!knot::AnalyzeH264(output, idr, sps, pps, nullptr, &slice) || idr || !slice) return false;
+    }
+    // Byte-identical interpretations still cannot identify a stream layout.
+    const std::vector<uint8_t> oneByteAud{0, 0, 0, 1, 9};
+    H264Framing unknown = H264Framing::Unknown;
+    if (knot::NormalizeH264(oneByteAud.data(), oneByteAud.size(), output, unknown) ||
+        unknown != H264Framing::Unknown || !output.empty()) return false;
+    if (!knot::NormalizeH264(oneByteAud.data(), oneByteAud.size(), output, avcc) || output != oneByteAud ||
+        !knot::NormalizeH264(oneByteAud.data(), oneByteAud.size(), output, annex) || output != oneByteAud)
+        return false;
+    // A sample cannot silently switch an already established stream layout.
+    if (knot::NormalizeH264(firstAnnex.data(), firstAnnex.size(), output, avcc) ||
+        avcc != H264Framing::Avcc4 || !output.empty() ||
+        knot::NormalizeH264(firstAvcc.data(), firstAvcc.size(), output, annex) ||
+        annex != H264Framing::AnnexB || !output.empty()) return false;
+    // Canonicalizing a three-byte prefix must not exceed the final wire cap.
+    std::vector<uint8_t> maximum(knot::kMaxAccessUnit, 0x80);
+    maximum[0] = maximum[1] = 0; maximum[2] = 1; maximum[3] = 0x41;
+    if (knot::NormalizeH264(maximum.data(), maximum.size(), output, annex) || !output.empty()) return false;
+    return true;
+}
 bool Checks() {
-    if (!SharedLimitChecks() || !VideoSliceChecks()) return false;
+    if (!SharedLimitChecks() || !VideoSliceChecks() || !StreamFramingChecks()) return false;
     std::vector<uint8_t> output;
     bool idr = false, sps = false, pps = false;
     const std::vector<uint8_t> annex{0, 0, 1, 0x67, 0x80, 0, 0, 0, 1, 0x68, 0x80, 0, 0, 1, 0x65, 0x80};
@@ -145,6 +188,6 @@ bool Checks() {
 }
 int main() {
     if (!Checks()) { std::cerr << "H264 parser checks failed\n"; return 1; }
-    std::cout << "PASS: H264 shared 128/129 NAL, 8/9 SPS/PPS, 65536/65537-byte boundaries, framing and 20000 synthetic hostile inputs\n";
+    std::cout << "PASS: H264 shared NAL/parameter bounds, AVCC257/289/321/353 ambiguity, fixed per-stream framing, output bounds and 20000 synthetic hostile inputs\n";
     return 0;
 }

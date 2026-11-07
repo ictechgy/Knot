@@ -48,6 +48,7 @@ namespace Knot.NativePreview
                 stage = "folder-trees"; TreeChecks();
                 stage = "media-quality-bounds"; MediaQualityChecks();
                 stage = "adaptive-quality"; QualityChecks();
+                stage = "optional-playback-audio"; AudioChecks();
                 stage = "explicit-clipboard"; ClipboardChecks();
                 stage = "native-updates"; UpdateChecks();
                 stage = "native-update-resume-scope"; NativePreferencesChecks();
@@ -65,7 +66,7 @@ namespace Knot.NativePreview
                 stage = "tls-release-failure-stop"; TlsReleaseFailureStopsInput();
                 stage = "short-code-enrollment"; EnrollmentChecks();
                 stage = "native-file-transfer"; FileChecks();
-                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"actualCrossProcessCertificateLeaseFixtures\":" + actualCrossProcessCertificateLeaseFixtures + ",\"actualPersistentCertificateFixtures\":" + actualPersistentCertificateFixtures + ",\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures + ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshFileEnrollmentFixtures\":" + fileEnrollmentFixtures + ",\"actualFreshFileDiscoveryFixtures\":" + fileDiscoveryFixtures + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + ",\"freshGeneratedCertificateKeysOnly\":true}");
+                Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualAudioCapture\":false,\"actualAudioPlayback\":false,\"actualSendInput\":false,\"actualCrossProcessCertificateLeaseFixtures\":" + actualCrossProcessCertificateLeaseFixtures + ",\"actualPersistentCertificateFixtures\":" + actualPersistentCertificateFixtures + ",\"actualFreshAudioHostFixtures\":" + audioHostFixtures + ",\"actualFreshAudioFixtures\":" + audioFixtures + ",\"actualFreshAudioTlsFixtures\":" + audioTlsFixtures + ",\"actualSyntheticAudioCaptureFixtures\":" + audioCaptureFixtures + ",\"actualFreshTlsFixtures\":" + tlsFixtures + ",\"actualFreshEnrollmentFixtures\":" + enrollmentFixtures + ",\"actualFreshDiscoveryFixtures\":" + discoveryFixtures + ",\"actualFreshFileFixtures\":" + fileFixtures + ",\"actualFreshFileTlsFixtures\":" + fileTlsFixtures + ",\"actualFreshFileMediaTlsFixtures\":" + fileMediaTlsFixtures + ",\"actualFreshFileEnrollmentFixtures\":" + fileEnrollmentFixtures + ",\"actualFreshFileDiscoveryFixtures\":" + fileDiscoveryFixtures + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + ",\"freshGeneratedCertificateKeysOnly\":true}");
                 return 0;
             }
             catch (Exception failure)
@@ -78,7 +79,7 @@ namespace Knot.NativePreview
                 string fileDiagnostic = file == null ? "" : ",\"fileApiCategory\":" + StrictJson.Quote(file.Operation) + ",\"fileNativeError\":" + file.NativeError;
                 if (file != null && file.NativeNtStatus.HasValue && file.NativeIoStatus.HasValue)
                     fileDiagnostic += ",\"fileNtStatus\":" + file.NativeNtStatus.Value + ",\"fileIoStatus\":" + file.NativeIoStatus.Value;
-                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"exceptionType\":" + StrictJson.Quote(kind) + ",\"exceptionHResult\":" + failure.HResult + fileDiagnostic + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + "}");
+                Console.WriteLine("{\"status\":\"failed\",\"freshSyntheticOnly\":true,\"actualCapture\":false,\"actualAudioCapture\":false,\"actualAudioPlayback\":false,\"actualSendInput\":false,\"stage\":\"" + stage + "\",\"exceptionType\":" + StrictJson.Quote(kind) + ",\"exceptionHResult\":" + failure.HResult + fileDiagnostic + ",\"actualFreshExplorerInputFixtures\":" + explorerInputFixtures + ",\"actualFreshExplorerOleFixtures\":" + explorerOleFixtures + ",\"actualFreshTreeFixtures\":" + treeFixtures + ",\"actualFreshTreeTlsFixtures\":" + treeTlsFixtures + ",\"assertions\":" + assertions + "}");
                 return 1;
             }
         }
