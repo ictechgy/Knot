@@ -892,11 +892,10 @@ namespace Knot.NativePreview
                     OnUi(delegate
                     {
                         if (server != run) return;
-                        bool resume = !closing && shareRequested && run.MayResumeRegisteredConnection;
                         presentation.Clear(run.Identity); run.Dispose(); server = null; lifecycleTimer.Stop();
                         phase = HostViewPhase.Stopped; invitationAvailable = false;
                         ApplyCurrentPresentation();
-                        if (resume) StartShare();
+                        RegisteredConnectionResume.TryResume(shareRequested, closing, run.MayResumeRegisteredConnection, StartShare);
                     });
                 };
                 rawStatus = run.UsesEnrollment ? EnrollmentGuidance.Ready : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";

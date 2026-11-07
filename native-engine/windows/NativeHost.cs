@@ -358,8 +358,12 @@ namespace Knot.NativePreview
                         uint written, flags;
                         ulong timestamp;
                         int status = media.Read(encoded, out written, out flags, out timestamp);
-                        if (Stopping) return;
+                        // An in-flight read can finish after transport teardown.
+                        // Preserve a real media failure before honoring Stop so
+                        // it cannot be reclassified as resumable transport loss.
                         if (status < 0) throw NativeMediaErrors.ForStatus(status);
+                        if (status != 0 && status != 1) throw new ProtocolException("capture");
+                        if (Stopping) return;
                         if (status == 0)
                         {
                             if (written == 0 || written > encoded.Length || sequence == ulong.MaxValue) throw new ProtocolException("encoder");
@@ -370,7 +374,6 @@ namespace Knot.NativePreview
                             NativeProtocol.Write(tls, 3, payload, (int)written + 17);
                             if (quality != null) quality.ObserveWrite((Stopwatch.GetTimestamp() - writeStart) * 1000.0 / Stopwatch.Frequency);
                         }
-                        else if (status != 1) throw new ProtocolException("capture");
                         if (Stopwatch.GetTimestamp() - lastHeartbeat >= 2L * Stopwatch.Frequency)
                         {
                             NativeProtocol.Write(tls, 4, new byte[0]); lastHeartbeat = Stopwatch.GetTimestamp();

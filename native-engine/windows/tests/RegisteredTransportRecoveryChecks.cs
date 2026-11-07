@@ -89,6 +89,13 @@ namespace Knot.NativePreview
                         Check(server.MayResumeRegisteredConnection == (saved && transport));
                         Check(media.Closed == 1 && sink.Events.Contains("key:30:up"));
                         Check(!server.IsActive && !server.IsRegisteredSession && server.EnrollmentCode == "");
+                        if (!transport)
+                        {
+                            int reads = 0, constructions = 0;
+                            Check(!RegisteredConnectionResume.TryResume(ending != NumberConnectionEnd.OwnerStop, false,
+                                server.MayResumeRegisteredConnection, delegate { ++constructions; }, delegate { ++reads; return true; }));
+                            Check(reads == 0 && constructions == 0);
+                        }
                     }
                 }
                 finally { media.Continue.Set(); }
