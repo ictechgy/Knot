@@ -363,11 +363,14 @@ namespace Knot.NativePreview
                         // it cannot be reclassified as resumable transport loss.
                         if (status < 0) throw NativeMediaErrors.ForStatus(status);
                         if (status != 0 && status != 1) throw new ProtocolException("capture");
-                        if (Stopping) return;
                         if (status == 0)
                         {
                             if (written == 0 || written > encoded.Length || sequence == ulong.MaxValue) throw new ProtocolException("encoder");
                             AnnexB.Validate(encoded, (int)written, flags);
+                        }
+                        if (Stopping) return;
+                        if (status == 0)
+                        {
                             NativeProtocol.Put64(payload, 0, ++sequence); NativeProtocol.Put64(payload, 8, timestamp); payload[16] = (byte)flags;
                             Buffer.BlockCopy(encoded, 0, payload, 17, (int)written);
                             long writeStart = Stopwatch.GetTimestamp();
