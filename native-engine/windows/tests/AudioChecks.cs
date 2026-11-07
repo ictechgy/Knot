@@ -22,9 +22,35 @@ namespace Knot.NativePreview
         }
         private static void AudioChecks()
         {
-            AudioProtocolChecks(); AudioAuthenticatedCapture(); AudioSilenceHeartbeat();
-            AudioWrongAuthentication(); AudioWrongPeer(); AudioStoppedBeforeAuthentication(); AudioRevokedBeforeHello();
-            AudioServerStartLifecycle(); AudioHostConsent(false); AudioHostConsent(true); AudioHostApprovalCancelled();
+            AudioStage("protocol"); AudioProtocolChecks();
+            AudioStage("authenticated-capture"); AudioAuthenticatedCapture();
+            AudioStage("silence-heartbeat"); AudioSilenceHeartbeat();
+            AudioStage("wrong-authentication"); AudioWrongAuthentication();
+            AudioStage("wrong-peer"); AudioWrongPeer();
+            AudioStage("stopped-before-authentication"); AudioStoppedBeforeAuthentication();
+            AudioStage("revoked-before-hello"); AudioRevokedBeforeHello();
+            AudioStage("start-lifecycle"); AudioServerStartLifecycle();
+            AudioStage("host-consent-disabled"); AudioHostConsent(false);
+            AudioStage("host-consent-enabled"); AudioHostConsent(true);
+            AudioStage("host-approval-cancelled"); AudioHostApprovalCancelled();
+        }
+        // Callers pass only authored literals; diagnostics never include a
+        // token, certificate, endpoint, OS error text or captured data.
+        private static void AudioStage(string substage) { stage = "optional-playback-audio/" + substage; }
+        private static void WriteSyntheticAudioHello(Stream stream, byte[] key)
+        {
+            byte[] payload = NativeAudioProtocol.Hello(key);
+            try
+            {
+                if (payload.Length < 1 || payload.Length > 256) throw new NativeAudioException("protocol");
+                // NativeProtocol.Write is host-to-viewer only and deliberately
+                // rejects kind1. This independent client writes its bounded
+                // Hello envelope without widening the main writer allowlist.
+                byte[] header = new byte[5]; header[0] = 1;
+                NativeProtocol.Put32(header, 1, (uint)payload.Length);
+                stream.Write(header, 0, header.Length); stream.Write(payload, 0, payload.Length);
+            }
+            finally { Array.Clear(payload, 0, payload.Length); }
         }
         private static void AudioProtocolChecks()
         {
@@ -32,6 +58,17 @@ namespace Knot.NativePreview
             byte[] key = NativeAudioProtocol.DeriveKey(media);
             Check(NativeProtocol.Base64Url(key) == "EXzCDp5VzgU5ELME1HJ5wjXGir85QbvzSypBhAW_Yrs");
             Check(NativeAudioProtocol.Authenticate(NativeAudioProtocol.Hello(key), key));
+            using (MemoryStream helloFrame = new MemoryStream())
+            {
+                WriteSyntheticAudioHello(helloFrame, key); byte[] envelope = helloFrame.ToArray();
+                byte[] payload = NativeAudioProtocol.Hello(key);
+                Check(envelope[0] == 1 && NativeProtocol.U32(envelope, 1) == payload.Length && envelope.Length == payload.Length + 5);
+                for (int i = 0; i < payload.Length; ++i) Check(envelope[i + 5] == payload[i]);
+                helloFrame.Position = 0; Packet decoded = NativeAudioProtocol.ReadHello(helloFrame);
+                Check(decoded.Kind == 1 && NativeAudioProtocol.Authenticate(decoded.Payload, key) && helloFrame.Position == helloFrame.Length);
+                // Preserve the existing main-stream writer's direction limit.
+                Reject(delegate { NativeProtocol.Write(new MemoryStream(), 1, payload); });
+            }
             byte[] wrong = (byte[])key.Clone(); wrong[0] ^= 1;
             Check(!NativeAudioProtocol.Authenticate(NativeAudioProtocol.Hello(wrong), key));
             string token = NativeProtocol.Base64Url(key);
@@ -119,7 +156,7 @@ namespace Knot.NativePreview
                 }
                 catch { Client.Close(); throw; }
             }
-            internal void Hello(byte[] key) { NativeProtocol.Write(Stream, 1, NativeAudioProtocol.Hello(key)); }
+            internal void Hello(byte[] key) { WriteSyntheticAudioHello(Stream, key); }
             internal Packet Read()
             {
                 byte[] header = NativeProtocol.ReadExactly(Stream, 5); uint size = NativeProtocol.U32(header, 1);
@@ -149,9 +186,12 @@ namespace Knot.NativePreview
             {
                 for (int connection = 1; connection <= 2; ++connection)
                 {
+                    AudioStage(connection == 1 ? "capture-first-tls" : "capture-reconnect-tls");
                     using (AudioTlsClient client = new AudioTlsClient(server.Port, certificate.Pin))
                     {
+                        AudioStage(connection == 1 ? "capture-first-hello" : "capture-reconnect-hello");
                         Check(factory.Opens == connection - 1); client.Hello(key);
+                        AudioStage(connection == 1 ? "capture-first-ready" : "capture-reconnect-ready");
                         Packet ready = client.Read(); Check(ready.Kind == 2);
                         StrictJson.Parse(ready.Payload, "v", "codec", "sampleRate", "channels");
                         Packet pcm = client.Read(); Check(pcm.Kind == 3);
@@ -159,9 +199,11 @@ namespace Knot.NativePreview
                         Check(NativeAudioProtocol.U64(pcm.Payload, 8) == 400 && pcm.Payload[20] == 0 && pcm.Payload[21] == 1);
                         if (connection == 2)
                         {
+                            AudioStage("capture-revocation-disposal");
                             Interlocked.Exchange(ref active, 0); WaitAudio(delegate { return factory.Closes == 2; });
                         }
                     }
+                    AudioStage(connection == 1 ? "capture-first-disposal" : "capture-reconnect-disposal");
                     WaitAudio(delegate { return factory.Closes == connection; });
                 }
                 Check(factory.Opens == 2 && factory.OwnerMismatch == 0); audioCaptureFixtures += factory.Closes;
