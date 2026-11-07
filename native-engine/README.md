@@ -15,7 +15,7 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 
 **Microphone forwarding, ambient clipboard synchronization, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Native.11 adds explicit text copy/paste, opt-in trusted devices and reconnect, adaptive quality and signed-update infrastructure. Public update publishing remains unconfigured; see [UPDATES.md](UPDATES.md). Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
 
-## Daily use (native.14)
+## Daily use (native.15)
 
 Native.14 starts a short audio burst after a bounded prebuffer deadline, coalesces rapid mute changes and lets **소리 다시 연결** retry unavailable audio without disconnecting video. Connecting has its own visible state. Successful audio authentication clears earlier failures; eight consecutive failures still stop that listener with an authored notice. Both apps should be updated for these improvements. No precise AV-sync or physical performance guarantee is implied.
 

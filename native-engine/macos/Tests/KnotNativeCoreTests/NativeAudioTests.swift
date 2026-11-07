@@ -135,7 +135,7 @@ private final class AudioFixtureChannel: NativeChannel, @unchecked Sendable {
     private var bytes: Data
     private let holdAtEnd: Bool
     private let startFailure: Bool
-    private var pending: CheckedContinuation<Data, any Error>?
+    private var pending: (count: Int, continuation: CheckedContinuation<Data, any Error>)?
     private var writes: [Packet] = []
     private var requests: [(Int, Duration)] = []
     private var closed = false
@@ -149,14 +149,23 @@ private final class AudioFixtureChannel: NativeChannel, @unchecked Sendable {
             if closed { lock.unlock(); continuation.resume(throwing: NativeFailure.transport) }
             else if bytes.count >= count {
                 let data = Data(bytes.prefix(count)); bytes.removeFirst(count); lock.unlock(); continuation.resume(returning: data)
-            } else if bytes.isEmpty && holdAtEnd { pending = continuation; lock.unlock() }
+            } else if bytes.isEmpty && holdAtEnd { pending = (count, continuation); lock.unlock() }
             else { lock.unlock(); continuation.resume(throwing: NativeFailure.transport) }
         }
     }
     func send(_ packet: Packet) async throws { lock.withLock { writes.append(packet) } }
+    func supply(_ data: Data) {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        bytes.append(data)
+        if let waiting = pending, bytes.count >= waiting.count {
+            let result = Data(bytes.prefix(waiting.count)); bytes.removeFirst(waiting.count)
+            pending = nil; lock.unlock(); waiting.continuation.resume(returning: result)
+        } else { lock.unlock() }
+    }
     func close() {
         lock.lock(); closed = true; let waiting = pending; pending = nil; lock.unlock()
-        waiting?.resume(throwing: NativeFailure.transport)
+        waiting?.continuation.resume(throwing: NativeFailure.transport)
     }
     func snapshot() -> (writes: [Packet], requests: [(Int, Duration)], closed: Bool, waiting: Bool) {
         lock.withLock { (writes, requests, closed, pending != nil) }
@@ -196,7 +205,7 @@ private final class AudioFixtureFactory: @unchecked Sendable {
 }
 
 @Test @MainActor func audioSessionAuthenticatesBeforeCreatingOutputAndMuteKeepsDraining() async throws {
-    let channel = AudioFixtureChannel(try audioFixtureReady().encoded + audioFixturePCM().encoded + NativeAudioPacket(kind: .heartbeat).encoded)
+    let channel = AudioFixtureChannel(Data())
     let factory = AudioFixtureFactory()
     let session = try NativeAudioSession(invitation: audioFixtureInvitation(), makeChannel: { _ in channel }, makePlayer: { factory.make() })
     defer { session.stop() }
@@ -205,6 +214,11 @@ private final class AudioFixtureFactory: @unchecked Sendable {
     let task = try #require(session.start())
     #expect(session.start() == nil)
     try #require(await audioEventually { channel.snapshot().waiting })
+    let authenticating = channel.snapshot()
+    #expect(authenticating.writes.count == 1 && authenticating.writes[0].kind == .hello)
+    #expect(factory.creations == 0 && session.state == .connecting && !session.isAvailable)
+    channel.supply(try audioFixtureReady().encoded + audioFixturePCM().encoded + NativeAudioPacket(kind: .heartbeat).encoded)
+    try #require(await audioEventually { channel.snapshot().waiting && session.state == .playing })
     let output = await factory.player.snapshot()
     #expect(session.state == .playing && session.isAvailable && session.muted)
     #expect(output.starts == 1 && output.frames == 960 && output.muted)

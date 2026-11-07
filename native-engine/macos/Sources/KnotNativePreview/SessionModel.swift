@@ -59,6 +59,9 @@ final class SessionModel: ObservableObject {
     private let waitForReconnect: @MainActor @Sendable (Duration) async throws -> Void
     private let waitForWakeReadiness: @MainActor @Sendable () async throws -> Void
     private let removeSavedDevice: @MainActor @Sendable (String) throws -> Void
+    private let loadSavedDevices: @MainActor @Sendable () throws -> [SavedNativeDevice]
+    private let saveSavedDevices: @MainActor @Sendable ([SavedNativeDevice]) throws -> Void
+    private let registerDevice: @MainActor @Sendable (SavedNativeDevice, String, Invitation) async throws -> Void
     @Published var showFullscreenControls = false
     @Published private(set) var numberAuthorized = false
     @Published private(set) var files: FileTransferModel?
@@ -103,12 +106,18 @@ final class SessionModel: ObservableObject {
          waitForWakeReadiness: @escaping @MainActor @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(2)) },
          initialSavedDevices: [SavedNativeDevice] = [], initialRegisteredDevice: SavedNativeDevice? = nil,
          removeSavedDevice: @escaping @MainActor @Sendable (String) throws -> Void = { try NativeDeviceKeychain.remove($0) },
+         loadSavedDevices: @escaping @MainActor @Sendable () throws -> [SavedNativeDevice] = { try NativeDeviceKeychain.load() },
+         saveSavedDevices: @escaping @MainActor @Sendable ([SavedNativeDevice]) throws -> Void = { try NativeDeviceKeychain.save($0) },
+         registerDevice: @escaping @MainActor @Sendable (SavedNativeDevice, String, Invitation) async throws -> Void = { device, name, invitation in
+             try await NativeTrustedClient(device: device, viewerName: name).register(invitation: invitation)
+         },
          makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)? = nil) {
         self.makeChannel = makeChannel
         self.makeAudioSession = makeAudioSession
         self.waitForInputDeadline = waitForInputDeadline
         self.makeTrustedClient = makeTrustedClient; self.waitForReconnect = waitForReconnect
         self.waitForWakeReadiness = waitForWakeReadiness; self.removeSavedDevice = removeSavedDevice
+        self.loadSavedDevices = loadSavedDevices; self.saveSavedDevices = saveSavedDevices; self.registerDevice = registerDevice
         // Explicit fixture inputs; initialization never opens Keychain/network.
         savedDevices = Array(initialSavedDevices.prefix(16))
         selectedTrustedDevice = initialRegisteredDevice
@@ -197,18 +206,22 @@ final class SessionModel: ObservableObject {
         guard rememberThisPC, numberAuthorized, selectedTrustedDevice == nil else { return }
         pendingRegistration = nil
         do {
-            let existing = try NativeDeviceKeychain.load().first { $0.certificateSHA256 == invitation.certificateSHA256 && $0.address == invitation.address }
+            let stored = try loadSavedDevices()
+            let existing = stored.first { $0.certificateSHA256 == invitation.certificateSHA256 && $0.address == invitation.address }
+            guard existing != nil || stored.count < 16 else {
+                status = "등록된 PC는 16대까지 저장할 수 있어요. 기존 PC 등록을 해제한 뒤 다시 시도하세요."
+                return
+            }
             let device = try existing ?? NativeTrustedClient.newDevice(invitation: invitation, name: savedDeviceLabel)
-            let client = try NativeTrustedClient(device: device, viewerName: viewerLabel)
             let run = identity
-            registrationTask = Task { [weak self] in
+            registrationTask = Task { [weak self, registerDevice, viewerLabel] in
                 do {
-                    try await client.register(invitation: invitation)
+                    try await registerDevice(device, viewerLabel, invitation)
                     guard let self, self.identity == run, !Task.isCancelled else { return }
-                    var devices = try NativeDeviceKeychain.load()
+                    var devices = try self.loadSavedDevices()
                     devices.removeAll { $0.id == device.id }
                     guard devices.count < 16 else { throw NativeFailure.state }
-                    devices.append(device); try NativeDeviceKeychain.save(devices)
+                    devices.append(device); try self.saveSavedDevices(devices)
                     self.savedDevices = devices; self.selectedTrustedDevice = device; self.registrationTask = nil
                     self.registeredRecovery = self.autoReconnect ? .current(device) : nil
                     self.updateStreamingStatus()
@@ -417,14 +430,15 @@ final class SessionModel: ObservableObject {
         switch surface?.display(image) ?? .backpressure {
         case .presented:
             receiverPressure.presentation(accepted: true, at: now)
-            let statusChanged = phase != .streaming || displayBehind
+            let beganStreaming = phase != .streaming
+            let statusChanged = beganStreaming || displayBehind
             presentationBackpressureSince = nil; displayBehind = false
-            if phase != .streaming {
+            if beganStreaming {
                 phase = .streaming
                 if selectedTrustedDevice != nil { reconnectAttempt = 0 }
-                if let pending = pendingRegistration { registerConnectedDevice(pending) }
             }
             if statusChanged { updateStreamingStatus() }
+            if beganStreaming, let pending = pendingRegistration { registerConnectedDevice(pending) }
         case .backpressure:
             receiverPressure.presentation(accepted: false, at: now)
             let began = presentationBackpressureSince ?? now
@@ -498,17 +512,23 @@ final class SessionModel: ObservableObject {
     @discardableResult func sendControl(_ packet: Packet) -> Bool {
         guard phase == .streaming, !fileUIInputSuspended else { return false }
         do { try input.append(packet); pumpWriter(); return true }
-        catch { return false }
+        catch {
+            if input.needsRecovery { inputQueueSaturated() }
+            return false
+        }
     }
     @discardableResult func send(_ packet: Packet) -> Bool {
         guard phase == .streaming, !inputRecovery, !fileUIInputSuspended else { return false }
         do { try input.append(packet); pumpWriter(); return true }
         catch {
-            inputEpoch &+= 1
-            surface?.forgetHeldKeys()
-            inputRecovery = true; status = "Input paused after queue saturation. Click the desktop to resume."; pumpWriter()
+            inputQueueSaturated()
             return false
         }
+    }
+    private func inputQueueSaturated() {
+        inputEpoch &+= 1
+        surface?.forgetHeldKeys()
+        inputRecovery = true; status = "Input paused after queue saturation. Click the desktop to resume."; pumpWriter()
     }
     func captureExplorerDrag(nonce: Data) async throws -> [NativeFileEntry] {
         guard nonce.count == 16, phase == .streaming, let files, !files.isBusy,

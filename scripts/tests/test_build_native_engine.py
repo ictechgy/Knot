@@ -456,7 +456,19 @@ class NativeRebuildTests(unittest.TestCase):
             builder.record_visual_checks(self.output / "visuals", [])
         report["syntheticWindowsShown"] = False
         report.update(audioDeviceInvoked=False, audioEngineInvoked=False, audioAdaptersInvoked=0)
-        report_path.write_text(json.dumps(report))
+        baseline = copy.deepcopy(report)
+        accepted_record = self.output / "native-ui-visual-checks.json"
+        self.assertFalse(accepted_record.exists())
+        for delta in [dict(audioDeviceInvoked=True), dict(audioEngineInvoked=True),
+                      dict(audioAdaptersInvoked=1)]:
+            with self.subTest(delta=delta):
+                invalid_report = copy.deepcopy(baseline)
+                invalid_report.update(delta)
+                report_path.write_text(json.dumps(invalid_report))
+                with self.assertRaisesRegex(ValueError, "must never invoke audio devices or output engines"):
+                    builder.record_visual_checks(self.output / "visuals", [])
+                self.assertFalse(accepted_record.exists())
+        report_path.write_text(json.dumps(baseline))
         self.assertTrue(builder.record_visual_checks(self.output / "visuals", []).is_file())
 
     def test_rebuild_refuses_unsafe_owned_evidence_directory(self):

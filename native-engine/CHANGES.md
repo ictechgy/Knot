@@ -1,5 +1,12 @@
 # Native preview changes
 
+## 0.1.0-native.15
+
+- Reject a new saved-PC registration before contacting Windows when the Mac's saved-PC list is already full. Keep the second capacity check after registration to handle concurrent local changes.
+- Enter visible input recovery immediately if a quality-control message saturates the bounded input queue. Preserve queue limits, release ordering and benign clipboard rejection.
+- Strengthen fresh synthetic checks for audio output admission, remote closure, revocation and build-fixture audio isolation. Timeouts and stalled peers cannot serve as successful remote-close evidence.
+- Advance installers to `0.1.0-native.15`, numeric PE version `0.1.0.15` and Mac bundle revision `15`. These checks do not measure physical-device streaming performance or audio quality.
+
 ## 0.1.0-native.10
 
 - Continue actual Windows Explorer file/folder selections as native Mac Finder promises through a short-lived, session-owned OLE target and ordered input nonce. Update visible Windows consent; no clipboard, Explorer selection enumeration or arbitrary remote paths.

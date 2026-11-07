@@ -83,6 +83,10 @@ namespace Knot.NativePreview
                 AudioReject(delegate { NativeAudioProtocol.Authenticate(Bytes(invalid), key); });
             AudioReject(delegate { NativeAudioProtocol.ReadHello(new MemoryStream(new byte[] { 1, 0xff, 0xff, 0xff, 0xff })); });
             AudioReject(delegate { NativeAudioProtocol.ReadHello(new MemoryStream(new byte[] { 2, 0, 0, 0, 1, 0 })); });
+            AudioReject(delegate {
+                using (MemoryStream emptyHello = new MemoryStream(new byte[] { 1, 0, 0, 0, 0 }))
+                    NativeAudioProtocol.ReadHello(emptyHello);
+            });
             byte[] pcm = new byte[NativeAudioProtocol.MaximumPcmBytes]; pcm[0] = 0xff; pcm[1] = 0x7f;
             byte[] first = NativeAudioProtocol.Pcm(1, 400, pcm, 960);
             NativeAudioProtocol.ValidatePcm(first, 0, 0); Check(first.Length == 3860 && first[20] == 0xff && first[21] == 0x7f);
@@ -142,21 +146,26 @@ namespace Knot.NativePreview
         {
             internal readonly TcpClient Client;
             internal readonly SslStream Stream;
-            internal AudioTlsClient(int port, string pin, IPAddress source = null)
+            internal readonly ConnectionDeadline CloseWitnessBudget;
+            internal AudioTlsClient(int port, string pin, IPAddress source = null, bool observeRemoteClose = false)
             {
                 Client = new TcpClient(AddressFamily.InterNetwork);
-                if (source != null) Client.Client.Bind(new IPEndPoint(source, 0));
                 try
                 {
+                    if (source != null) Client.Client.Bind(new IPEndPoint(source, 0));
+                    // Start before TCP/TLS, so the server's later five-second
+                    // Hello deadline cannot masquerade as prompt revocation.
+                    if (observeRemoteClose) CloseWitnessBudget = new ConnectionDeadline(4000, Client.Close);
                     Client.Connect(IPAddress.Loopback, port); Client.NoDelay = true;
-                    Client.SendTimeout = Client.ReceiveTimeout = 4000;
+                    int ioTimeout = observeRemoteClose ? 6000 : 4000;
+                    Client.SendTimeout = Client.ReceiveTimeout = ioTimeout;
                     Stream = new SslStream(Client.GetStream(), false, delegate(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors)
                     { return RunCertificate.VerifyPinned(cert, errors, pin); });
-                    Stream.ReadTimeout = Stream.WriteTimeout = 4000;
+                    Stream.ReadTimeout = Stream.WriteTimeout = ioTimeout;
                     Stream.AuthenticateAsClient("knot-native", new X509CertificateCollection(), SslProtocols.Tls12, false);
                     ++audioTlsFixtures;
                 }
-                catch { Client.Close(); throw; }
+                catch { try { Dispose(); } catch { } throw; }
             }
             internal void Hello(byte[] key) { WriteSyntheticAudioHello(Stream, key); }
             internal Packet Read()
@@ -165,7 +174,11 @@ namespace Knot.NativePreview
                 if (size > NativeAudioProtocol.MaximumPayload) throw new NativeAudioException("protocol");
                 return new Packet(header[0], NativeProtocol.ReadExactly(Stream, (int)size));
             }
-            public void Dispose() { try { if (Stream != null) Stream.Dispose(); } finally { Client.Close(); } }
+            public void Dispose()
+            {
+                try { if (CloseWitnessBudget != null) CloseWitnessBudget.Dispose(); }
+                finally { try { if (Stream != null) Stream.Dispose(); } finally { Client.Close(); } }
+            }
         }
         private static NativeAudioServer NewAudioServer(RunCertificate certificate, byte[] key, Func<bool> active, SyntheticAudioFactory factory)
         {
@@ -179,6 +192,41 @@ namespace Knot.NativePreview
             while (!done() && clock.ElapsedMilliseconds < 4000) Thread.Sleep(10);
             Check(done());
         }
+        private static bool AudioConnectionReset(Exception failure)
+        {
+            for (Exception current = failure; current != null; current = current.InnerException)
+            {
+                SocketException socket = current as SocketException;
+                if (socket != null && (socket.SocketErrorCode == SocketError.ConnectionReset ||
+                    socket.SocketErrorCode == SocketError.ConnectionAborted))
+                    return true;
+            }
+            return false;
+        }
+        private static bool AudioRemoteClosed(Stream stream, ConnectionDeadline budget, Action beforeRead = null)
+        {
+            bool closed = false;
+            try
+            {
+                if (beforeRead != null) beforeRead();
+                // Revocation can race a completed write. Drain only a bounded
+                // amount of previously buffered PCM/heartbeat/error bytes;
+                // receiving data alone does not prove that the peer closed.
+                byte[] buffered = new byte[4096]; int remaining = 64 * 1024;
+                while (remaining > 0)
+                {
+                    int count = stream.Read(buffered, 0, Math.Min(buffered.Length, remaining));
+                    if (count == 0) { closed = true; break; }
+                    remaining -= count;
+                }
+            }
+            catch (IOException failure) { closed = AudioConnectionReset(failure); }
+            catch (SocketException failure) { closed = AudioConnectionReset(failure); }
+            catch (ObjectDisposedException) { closed = false; }
+            // A queued expiry callback and local read timeout are never peer
+            // closure evidence. The atomic winner must still own the budget.
+            return budget.TryComplete() && closed;
+        }
         private static void AudioAuthenticatedCapture()
         {
             int active = 1; byte[] key = NativeAudioProtocol.DeriveKey(new byte[32]);
@@ -189,7 +237,7 @@ namespace Knot.NativePreview
                 for (int connection = 1; connection <= 2; ++connection)
                 {
                     AudioStage(connection == 1 ? "capture-first-tls" : "capture-reconnect-tls");
-                    using (AudioTlsClient client = new AudioTlsClient(server.Port, certificate.Pin))
+                    using (AudioTlsClient client = new AudioTlsClient(server.Port, certificate.Pin, observeRemoteClose: connection == 2))
                     {
                         AudioStage(connection == 1 ? "capture-first-hello" : "capture-reconnect-hello");
                         Check(factory.Opens == connection - 1); client.Hello(key);
@@ -202,7 +250,10 @@ namespace Knot.NativePreview
                         if (connection == 2)
                         {
                             AudioStage("capture-revocation-disposal");
-                            Interlocked.Exchange(ref active, 0); WaitAudio(delegate { return factory.Closes == 2; });
+                            Check(Interlocked.CompareExchange(ref factory.Closes, 0, 0) == 1);
+                            Interlocked.Exchange(ref active, 0);
+                            Check(AudioRemoteClosed(client.Stream, client.CloseWitnessBudget));
+                            WaitAudio(delegate { return Interlocked.CompareExchange(ref factory.Closes, 0, 0) == 2; });
                         }
                     }
                     AudioStage(connection == 1 ? "capture-first-disposal" : "capture-reconnect-disposal");
@@ -294,10 +345,18 @@ namespace Knot.NativePreview
             using (RunCertificate certificate = new RunCertificate())
             using (NativeAudioServer server = NewAudioServer(certificate, new byte[32], delegate { return true; }, factory))
             {
-                bool rejected = false;
-                try { using (AudioTlsClient client = new AudioTlsClient(server.Port, certificate.Pin, IPAddress.Parse("127.0.0.2"))) { } }
-                catch (IOException) { rejected = true; } catch (AuthenticationException) { rejected = true; }
-                Check(rejected && factory.Opens == 0);
+                // First prove that this fresh listener accepts pinned TLS
+                // from its admitted source; no audio Hello or capture follows.
+                using (AudioTlsClient admitted = new AudioTlsClient(server.Port, certificate.Pin))
+                    Check(factory.Opens == 0);
+                using (TcpClient rejected = new TcpClient(AddressFamily.InterNetwork))
+                using (ConnectionDeadline budget = new ConnectionDeadline(4000, rejected.Close))
+                {
+                    rejected.Client.Bind(new IPEndPoint(IPAddress.Parse("127.0.0.2"), 0));
+                    rejected.ReceiveTimeout = 6000;
+                    rejected.Connect(IPAddress.Loopback, server.Port);
+                    Check(AudioRemoteClosed(rejected.GetStream(), budget) && factory.Opens == 0);
+                }
             }
             ++audioFixtures;
         }
@@ -306,12 +365,13 @@ namespace Knot.NativePreview
             SyntheticAudioFactory factory = new SyntheticAudioFactory();
             using (RunCertificate certificate = new RunCertificate())
             using (NativeAudioServer server = NewAudioServer(certificate, new byte[32], delegate { return true; }, factory))
-            using (TcpClient raw = new TcpClient())
+            using (AudioTlsClient client = new AudioTlsClient(server.Port, certificate.Pin, observeRemoteClose: true))
             {
-                raw.Connect(IPAddress.Loopback, server.Port); Thread.Sleep(50);
-                Stopwatch clock = Stopwatch.StartNew(); server.Stop(); raw.ReceiveTimeout = 1000;
-                bool closed = false; try { closed = raw.GetStream().ReadByte() == -1; } catch (IOException) { closed = true; }
-                Check(closed && clock.ElapsedMilliseconds < 1500 && factory.Opens == 0);
+                // Completed pinned TLS proves server acceptance/current-client
+                // ownership while audio Hello is still pending. This does not
+                // claim coverage of a TLS-handshake-in-progress cancellation.
+                server.Stop();
+                Check(AudioRemoteClosed(client.Stream, client.CloseWitnessBudget) && factory.Opens == 0);
             }
             ++audioFixtures;
         }
@@ -320,11 +380,11 @@ namespace Knot.NativePreview
             int active = 1; SyntheticAudioFactory factory = new SyntheticAudioFactory();
             using (RunCertificate certificate = new RunCertificate())
             using (NativeAudioServer server = NewAudioServer(certificate, new byte[32], delegate { return Interlocked.CompareExchange(ref active, 0, 0) == 1; }, factory))
-            using (AudioTlsClient client = new AudioTlsClient(server.Port, certificate.Pin))
+            using (AudioTlsClient client = new AudioTlsClient(server.Port, certificate.Pin, observeRemoteClose: true))
             {
-                Interlocked.Exchange(ref active, 0); client.Hello(new byte[32]);
-                bool closed = false; try { closed = client.Stream.ReadByte() == -1; } catch (IOException) { closed = true; }
-                Check(closed && factory.Opens == 0);
+                Interlocked.Exchange(ref active, 0);
+                Check(AudioRemoteClosed(client.Stream, client.CloseWitnessBudget,
+                    delegate { client.Hello(new byte[32]); }) && factory.Opens == 0);
             }
             ++audioFixtures;
         }

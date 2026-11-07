@@ -110,9 +110,10 @@ private final class InputPacingFixture {
 @MainActor
 private final class WriterFixturePresenter: NativePresenter {
     var onFailure: (() -> Void)?
+    private(set) var forgottenKeys = 0
     func display(_ image: CVPixelBuffer) -> PresentationResult { .presented }
     func clear() {}
-    func forgetHeldKeys() {}
+    func forgetHeldKeys() { forgottenKeys += 1 }
 }
 
 @MainActor
@@ -163,6 +164,53 @@ private func streamingWriterFixture(_ channel: WriterFixtureChannel, presenter: 
     try #require(model.phase == .streaming)
     try await waitForWriter { channel.readerIsBlocked }
     return model
+}
+
+@Test @MainActor func qualityControlSaturationImmediatelyRequiresInputRecovery() async throws {
+    for kind in [Kind.qualityPreference, .qualityFeedback] {
+        let channel = WriterFixtureChannel(), presenter = WriterFixturePresenter()
+        let model = try await streamingWriterFixture(channel, presenter: presenter)
+        defer { model.disconnect() }
+        let down = try Input.key(down: true, scan: 0x1e, extended: false)
+        let up = try Input.key(down: false, scan: 0x1e, extended: false)
+        try #require(model.send(down))
+        try await waitForWriter { channel.writeIsBlocked }
+        for _ in 0..<256 { try #require(model.send(down)) }
+        let revision = model.inputRevision, forgotten = presenter.forgottenKeys
+        #expect(!model.sendControl(Packet(kind: kind, payload: Data([1]))))
+        #expect(model.inputRecovery && model.inputRevision == revision + 1)
+        #expect(presenter.forgottenKeys == forgotten + 1)
+        #expect(model.status == "Input paused after queue saturation. Click the desktop to resume.")
+        #expect(!model.send(up))
+        channel.releaseWrite()
+        try await waitForWriter { channel.inputSnapshot().contains { $0.kind == .releaseAll } }
+        #expect(channel.inputSnapshot() == [down, Packet(kind: .releaseAll)])
+        model.recoverInput()
+        try #require(model.send(up))
+        try await waitForWriter { channel.inputSnapshot().count >= 3 }
+        #expect(channel.inputSnapshot() == [down, Packet(kind: .releaseAll), up])
+        #expect(model.phase == .streaming && !model.inputRecovery)
+    }
+}
+
+@Test @MainActor func duplicateClipboardControlRejectionDoesNotRevokeInput() async throws {
+    let channel = WriterFixtureChannel(), presenter = WriterFixturePresenter()
+    let model = try await streamingWriterFixture(channel, presenter: presenter)
+    defer { model.disconnect() }
+    let down = try Input.key(down: true, scan: 0x1e, extended: false)
+    let up = try Input.key(down: false, scan: 0x1e, extended: false)
+    try #require(model.send(down))
+    try await waitForWriter { channel.writeIsBlocked }
+    let request = try ClipboardProtocol.request(.copy, nonce: Data(repeating: 4, count: 16), text: "")
+    try #require(model.sendControl(request))
+    let revision = model.inputRevision, forgotten = presenter.forgottenKeys, status = model.status
+    #expect(!model.sendControl(request))
+    #expect(!model.inputRecovery && model.inputRevision == revision)
+    #expect(presenter.forgottenKeys == forgotten && model.status == status)
+    try #require(model.send(up))
+    channel.releaseWrite()
+    try await waitForWriter { channel.inputSnapshot().count >= 3 }
+    #expect(channel.inputSnapshot() == [down, request, up])
 }
 
 @Test @MainActor func writerSelectsNewestDragAfterPacingWait() async throws {
