@@ -610,13 +610,35 @@ struct PreviewWindow: View {
 private struct NativeAudioControls: View {
     @ObservedObject var audio: NativeAudioSession
     let beforeAction: () -> Void
+    private var title: String {
+        switch audio.state {
+        case .idle: "소리 준비 중"
+        case .connecting: "소리 연결 중"
+        case .playing: audio.muted ? "소리 켜기" : "음소거"
+        case .unavailable: "소리 다시 연결"
+        case .stopped: "소리 꺼짐"
+        }
+    }
+    private var symbol: String {
+        switch audio.state {
+        case .idle, .connecting: "clock"
+        case .unavailable: "arrow.clockwise"
+        case .playing: audio.muted ? "speaker.slash" : "speaker.wave.2"
+        case .stopped: "speaker.slash"
+        }
+    }
+    private var guidance: String {
+        audio.state == .unavailable ? "눌러서 Windows 소리만 다시 연결해요. Windows에서 ‘Windows 재생 소리 포함 · 마이크 제외’를 켜고 직접 공유를 시작했는지 확인해주세요. 두 앱을 최신 버전으로 업데이트하고 Windows 방화벽에서 Knot의 개인 네트워크 연결도 허용해주세요." : audio.status
+    }
     var body: some View {
-        Button { beforeAction(); audio.toggleMuted() } label: {
-            Label(audio.isAvailable ? (audio.muted ? "소리 켜기" : "음소거") : "소리 없음",
-                  systemImage: audio.isAvailable && !audio.muted ? "speaker.wave.2" : "speaker.slash")
-        }.buttonStyle(.borderless).disabled(!audio.isAvailable)
-            .help(audio.isAvailable ? audio.status : "Windows에서 공유 시작 전에 ‘Windows 재생 소리 포함’을 켜주세요. 두 앱을 최신 버전으로 업데이트하고 Windows 방화벽에서 Knot의 개인 네트워크 연결도 허용해주세요.")
-            .accessibilityLabel(audio.status)
+        Button {
+            beforeAction()
+            if audio.state == .unavailable { audio.retry() }
+            else { audio.toggleMuted() }
+        } label: { Label(title, systemImage: symbol) }
+            .buttonStyle(.borderless).disabled(audio.state != .playing && audio.state != .unavailable)
+            .help(guidance)
+            .accessibilityLabel(title).accessibilityHint(guidance)
             .fixedSize()
     }
 }

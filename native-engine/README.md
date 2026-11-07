@@ -10,12 +10,14 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 - AppleSilicon macOS26+ viewer; one peer, one display, one window and bounded H.264/TLS-TCP.
 - Windows Share authorizes one holder of the current short code. Advanced legacy invitation mode retains its separate approval step.
 - Native fullscreen, pointer/keyboard input and committed Mac input-method text. Source aspect ratio is preserved.
-- Optional Windows playback sound on Mac, enabled explicitly before the current Windows share. Microphones are never captured. Both apps must use Native.13 for this feature; see [AUDIO.md](AUDIO.md).
+- Optional Windows playback sound on Mac, enabled explicitly before the current Windows share. Microphones are never captured. Both apps need Native.13 or later; Native.14 adds short-sound playback and audio-only retry. See [AUDIO.md](AUDIO.md).
 - While the screen session is active, copy regular files and folders through one explicitly shared Windows folder, with Finder drop-to-send, file-panel drag-to-Finder, and current Explorer selections dragged out of the viewer. Files use a separate pinned TLS connection, incremental hashes and bounded transfer work; original files are retained.
 
 **Microphone forwarding, ambient clipboard synchronization, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Native.11 adds explicit text copy/paste, opt-in trusted devices and reconnect, adaptive quality and signed-update infrastructure. Public update publishing remains unconfigured; see [UPDATES.md](UPDATES.md). Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
 
-## Daily use (native.13)
+## Daily use (native.14)
+
+Native.14 starts a short audio burst after a bounded prebuffer deadline, coalesces rapid mute changes and lets **소리 다시 연결** retry unavailable audio without disconnecting video. Connecting has its own visible state. Successful audio authentication clears earlier failures; eight consecutive failures still stop that listener with an authored notice. Both apps should be updated for these improvements. No precise AV-sync or physical performance guarantee is implied.
 
 ### Playback sound and receiver fixes (native.13)
 

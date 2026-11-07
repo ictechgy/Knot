@@ -1,4 +1,12 @@
-# Native.13 playback audio
+# Native playback audio
+
+## Native.14 recovery and short sounds
+
+Playback starts after either the 960-frame prebuffer fills or its 20ms deadline expires. A shorter valid burst does not wait indefinitely for another PCM packet. Only one priming timer may be active; queue generations and timer identities reject callbacks after flush, stop or replacement.
+
+The Mac control distinguishes connecting from unavailable. **소리 다시 연결** retries audio alone using the same active share's address, exact pin and derived authority; it never grants Windows playback permission or reconnects a stopped parent session. Rapid mute changes coalesce into one delivery worker, which converges on the latest selected value. Stop and retry invalidate older workers and children.
+
+Windows counts consecutive unauthenticated attempts, resetting that budget after a successful authenticated connection. Eight consecutive failures stop only the audio listener and produce an authored Windows notice; no capture starts for a failed authentication. Restart the Windows share with explicit audio consent if that listener has stopped. Device-route autorecovery and precise audiovisual synchronization remain outside the scope.
 
 Native.13 can send the default Windows playback output to the connected Mac. Update both apps. Before starting a Windows share, explicitly select **Windows 재생 소리 포함 · 마이크 제외**. The checkbox is off on every app launch, including a relaunch after an update. Consent belongs to the current manually started share; a previous run's resume grant cannot enable audio. Stop/disconnect revokes audio with media.
 

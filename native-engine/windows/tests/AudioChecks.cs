@@ -24,6 +24,8 @@ namespace Knot.NativePreview
         {
             AudioStage("protocol"); AudioProtocolChecks();
             AudioStage("authenticated-capture"); AudioAuthenticatedCapture();
+            AudioStage("authentication-budget-reset"); AudioAuthenticationBudgetResetsAfterSuccess();
+            AudioStage("authentication-budget-retirement"); AudioAuthenticationBudgetReportsRetirement();
             AudioStage("silence-heartbeat"); AudioSilenceHeartbeat();
             AudioStage("wrong-authentication"); AudioWrongAuthentication();
             AudioStage("wrong-peer"); AudioWrongPeer();
@@ -207,6 +209,51 @@ namespace Knot.NativePreview
                     WaitAudio(delegate { return factory.Closes == connection; });
                 }
                 Check(factory.Opens == 2 && factory.OwnerMismatch == 0); audioCaptureFixtures += factory.Closes;
+            }
+            ++audioFixtures;
+        }
+        private static void AudioAuthenticationBudgetResetsAfterSuccess()
+        {
+            byte[] key = new byte[32], wrong = new byte[32]; wrong[0] = 1;
+            SyntheticAudioFactory factory = new SyntheticAudioFactory();
+            using (RunCertificate certificate = new RunCertificate())
+            using (NativeAudioServer server = NewAudioServer(certificate, key, delegate { return true; }, factory))
+            {
+                for (int cycle = 1; cycle <= 2; ++cycle)
+                {
+                    for (int attempt = 0; attempt < 7; ++attempt)
+                    {
+                        using (AudioTlsClient denied = new AudioTlsClient(server.Port, certificate.Pin))
+                        { denied.Hello(wrong); Check(denied.Read().Kind == 127 && factory.Opens == cycle - 1); }
+                    }
+                    using (AudioTlsClient allowed = new AudioTlsClient(server.Port, certificate.Pin))
+                    {
+                        allowed.Hello(key); Check(allowed.Read().Kind == 2); Check(allowed.Read().Kind == 3);
+                        Check(factory.Opens == cycle);
+                    }
+                    WaitAudio(delegate { return factory.Closes == cycle; });
+                }
+                Check(factory.OwnerMismatch == 0); audioCaptureFixtures += factory.Closes;
+            }
+            ++audioFixtures;
+        }
+        private static void AudioAuthenticationBudgetReportsRetirement()
+        {
+            byte[] key = new byte[32], wrong = new byte[32]; wrong[0] = 1;
+            SyntheticAudioFactory factory = new SyntheticAudioFactory(); int notices = 0;
+            using (RunCertificate certificate = new RunCertificate())
+            using (NativeAudioServer server = new NativeAudioServer(IPAddress.Loopback, IPAddress.Loopback,
+                certificate.Certificate, key, delegate { return true; }, factory,
+                delegate(string message) { Interlocked.Increment(ref notices); }, true, 0))
+            {
+                server.Start();
+                for (int attempt = 0; attempt < 8; ++attempt)
+                {
+                    using (AudioTlsClient denied = new AudioTlsClient(server.Port, certificate.Pin))
+                    { denied.Hello(wrong); Check(denied.Read().Kind == 127); }
+                }
+                WaitAudio(delegate { return Interlocked.CompareExchange(ref notices, 0, 0) == 1; });
+                Check(factory.Opens == 0 && factory.Reads == 0 && factory.Closes == 0);
             }
             ++audioFixtures;
         }

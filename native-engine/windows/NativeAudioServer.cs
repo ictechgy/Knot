@@ -91,12 +91,21 @@ namespace Knot.NativePreview
                         current = accepted;
                     }
                     bool authenticated = Serve(accepted);
-                    if (!authenticated) ++failures;
+                    // Bound consecutive unauthenticated attempts. A successful
+                    // current-session authentication rehabilitates the peer;
+                    // transient failures must not accumulate for the run's life.
+                    if (authenticated) failures = 0;
+                    else ++failures;
                     lock (gate) { if (current == accepted) current = null; }
                 }
             }
             catch { }
-            finally { Stop(); stopped.Dispose(); }
+            finally
+            {
+                if (failures >= 8 && !isStopped)
+                    Notify("소리 연결 인증을 여러 번 확인하지 못해 소리 공유를 중지했어요. 화면은 계속 사용할 수 있어요. Windows에서 공유를 중지한 뒤 소리 옵션을 켜고 다시 시작하세요.");
+                Stop(); stopped.Dispose();
+            }
         }
         private bool Serve(TcpClient accepted)
         {

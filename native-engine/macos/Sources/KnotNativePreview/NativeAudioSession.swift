@@ -22,6 +22,7 @@ enum NativeAudioSessionState: Sendable, Equatable {
     private let makeChannel: ChannelFactory
     private let makePlayer: PlayerFactory
     private var operation: Task<Void, Never>?
+    private var muteDelivery: Task<Void, Never>?
     private var generation = UUID()
     private var channel: (any NativeChannel)?
     private var player: (any NativeAudioPlaying)?
@@ -48,6 +49,18 @@ enum NativeAudioSessionState: Sendable, Equatable {
         return operation
     }
 
+    /// An explicit user action retries only this optional sidecar using the
+    /// same active media session's endpoint and derived audio authority.
+    @discardableResult func retry() -> Task<Void, Never>? {
+        guard state == .unavailable else { return nil }
+        generation = UUID(); operation?.cancel(); operation = nil
+        cancelMuteDelivery()
+        channel?.close(); channel = nil
+        if let player { Task { await player.stop() } }
+        player = nil; state = .idle
+        return start()
+    }
+
     private func run(generation current: UUID) async {
         var ownedPlayer: (any NativeAudioPlaying)?
         var ownedChannel: (any NativeChannel)?
@@ -69,9 +82,11 @@ enum NativeAudioSessionState: Sendable, Equatable {
                     switch try receiver.accept(packet) {
                     case .ready:
                         let player = makePlayer(); ownedPlayer = player; self.player = player
-                        try await player.start(muted: muted)
+                        let initialMuted = muted
+                        try await player.start(muted: initialMuted)
                         guard current == generation else { await player.stop(); return }
                         isAvailable = true; state = .playing; refreshStatus(); onChange?()
+                        if muted != initialMuted { deliverLatestMute() }
                     case .pcm(let pcm):
                         guard let player = ownedPlayer else { throw NativeFailure.state }
                         try await player.enqueue(pcm)
@@ -82,11 +97,12 @@ enum NativeAudioSessionState: Sendable, Equatable {
             } onCancel: { channel.close() }
         } catch {
             if current == generation {
+                cancelMuteDelivery()
                 isAvailable = false; state = .unavailable
                 status = (error as? AudioPeerFailure)?.code == "auth"
                     ? "Windows 소리 연결을 인증할 수 없습니다."
                     : "Windows 소리를 사용할 수 없습니다."
-                self.channel = nil; self.player = nil; onChange?()
+                self.channel?.close(); self.channel = nil; self.player = nil; onChange?()
             }
         }
         if let ownedPlayer { await ownedPlayer.stop() }
@@ -107,13 +123,36 @@ enum NativeAudioSessionState: Sendable, Equatable {
     func setMuted(_ value: Bool) {
         guard state != .stopped else { return }
         muted = value; refreshStatus(); onChange?()
-        if let player { Task { await player.setMuted(value) } }
+        deliverLatestMute()
     }
     func toggleMuted() { setMuted(!muted) }
+
+    /// Coalesce input while the one player call is suspended. A new desired
+    /// value is read only after that call finishes, so stale calls cannot race
+    /// a newer mute delivery and rapid input cannot build a task queue.
+    private func deliverLatestMute() {
+        guard state == .playing, muteDelivery == nil, let player else { return }
+        let current = generation
+        muteDelivery = Task { [weak self] in
+            guard let self else { return }
+            defer { if current == self.generation { self.muteDelivery = nil } }
+            while current == self.generation && !Task.isCancelled && self.state == .playing {
+                let desired = self.muted
+                await player.setMuted(desired)
+                guard current == self.generation, !Task.isCancelled, self.state == .playing else { return }
+                if self.muted == desired { return }
+            }
+        }
+    }
+
+    private func cancelMuteDelivery() {
+        muteDelivery?.cancel(); muteDelivery = nil
+    }
 
     func stop() {
         guard state != .stopped else { return }
         generation = UUID(); operation?.cancel(); operation = nil
+        cancelMuteDelivery()
         channel?.close(); channel = nil
         if let player { Task { await player.stop() } }
         player = nil; state = .stopped; isAvailable = false

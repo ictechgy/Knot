@@ -23,7 +23,7 @@ from build_snapshot import source_snapshot, validate_corresponding_source
 from native_updates import build_resource as native_update_resource
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.13"
+VERSION = "0.1.0-native.14"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -533,6 +533,7 @@ class Builder:
                       "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
                       "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch",
                       "audio-on", "audio-muted", "audio-unavailable", "audio-on-compact", "audio-muted-compact", "audio-unavailable-compact",
+                      "audio-connecting", "audio-connecting-compact", "fullscreen-audio-connecting-controls",
                       "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
@@ -891,8 +892,8 @@ class Builder:
             raise ValueError("Native host checks must prove their fresh/inert capture and input scope")
         for key, minimum in [("actualFreshExplorerInputFixtures", 1), ("actualFreshExplorerOleFixtures", 1),
                              ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28), ("actualPersistentCertificateFixtures", 3),
-                             ("actualCrossProcessCertificateLeaseFixtures", 1), ("actualFreshAudioFixtures", 11),
-                             ("actualFreshAudioTlsFixtures", 6), ("actualSyntheticAudioCaptureFixtures", 4),
+                             ("actualCrossProcessCertificateLeaseFixtures", 1), ("actualFreshAudioFixtures", 13),
+                             ("actualFreshAudioTlsFixtures", 30), ("actualSyntheticAudioCaptureFixtures", 6),
                              ("actualFreshAudioHostFixtures", 3)]:
             if type(parsed.get(key)) is not int or parsed[key] < minimum:
                 raise ValueError("Native host folder/Explorer checks incomplete: " + key)

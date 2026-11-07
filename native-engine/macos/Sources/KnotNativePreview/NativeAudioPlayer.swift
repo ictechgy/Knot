@@ -39,18 +39,42 @@ struct NativeAudioQueue: Sendable {
     }
 }
 
-/// This actor creates an output graph only after the audio server has passed
-/// TLS authentication and its ready schema. It never accesses inputNode.
-actor NativeAudioPlayer: NativeAudioPlaying {
+/// Accessed synchronously by NativeAudioPlayer's actor. Test sinks never create
+/// an AVAudioEngine or touch an output device.
+protocol NativeAudioOutputSink: AnyObject {
+    func start(muted: Bool) throws
+    func schedule(_ pcm: NativeAudioPCM, completion: @escaping @Sendable () async -> Void) throws
+    func play()
+    func pause()
+    func flush()
+    func setMuted(_ muted: Bool)
+    func stop()
+}
+
+protocol NativeAudioPrebufferClock: Sendable {
+    /// The returned cancellation is idempotent; a callback already dispatched
+    /// may still arrive, so the player also checks its identity and generation.
+    func schedule(after delay: Duration, _ action: @escaping @Sendable () async -> Void) -> @Sendable () -> Void
+}
+
+private struct NativeAudioSystemPrebufferClock: NativeAudioPrebufferClock {
+    func schedule(after delay: Duration, _ action: @escaping @Sendable () async -> Void) -> @Sendable () -> Void {
+        let task = Task {
+            do { try await Task.sleep(for: delay) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            await action()
+        }
+        return { task.cancel() }
+    }
+}
+
+private final class NativeAVAudioOutputSink: NativeAudioOutputSink {
     private var engine: AVAudioEngine?
     private var node: AVAudioPlayerNode?
     private var format: AVAudioFormat?
-    private var queue = NativeAudioQueue()
-    private var playing = false
-    private var stopped = false
 
     func start(muted: Bool) throws {
-        guard engine == nil, !stopped else { throw NativeFailure.state }
         guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(NativeAudioWire.sampleRate), channels: 2) else { throw NativeFailure.unsupported }
         let engine = AVAudioEngine(), node = AVAudioPlayerNode()
         engine.attach(node)
@@ -62,8 +86,8 @@ actor NativeAudioPlayer: NativeAudioPlaying {
         self.format = format; self.node = node; self.engine = engine
     }
 
-    func enqueue(_ pcm: NativeAudioPCM) throws {
-        guard !stopped, let node, let format,
+    func schedule(_ pcm: NativeAudioPCM, completion: @escaping @Sendable () async -> Void) throws {
+        guard let node, let format,
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.frames)),
               let channels = buffer.floatChannelData else { throw NativeFailure.state }
         buffer.frameLength = AVAudioFrameCount(pcm.frames)
@@ -71,25 +95,101 @@ actor NativeAudioPlayer: NativeAudioPlaying {
             channels[0][frame] = pcm.sample(frame: frame, channel: 0)
             channels[1][frame] = pcm.sample(frame: frame, channel: 1)
         }
-        let admission = queue.reserve(frames: pcm.frames, sampleGap: pcm.hasSampleGap)
-        if admission.flushed { node.stop(); playing = false }
-        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            Task { await self?.completed(admission.ticket) }
+        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+            Task { await completion() }
         }
-        if !playing && queue.queuedFrames >= NativeAudioQueue.prebufferFrames { node.play(); playing = true }
+    }
+
+    func play() { node?.play() }
+    func pause() { node?.pause() }
+    func flush() { node?.stop() }
+    func setMuted(_ muted: Bool) { node?.volume = muted ? 0 : 1 }
+    func stop() {
+        node?.stop(); engine?.stop()
+        node = nil; engine = nil; format = nil
+    }
+}
+
+/// This actor creates an output graph only after the audio server has passed
+/// TLS authentication and its ready schema. It never accesses inputNode.
+actor NativeAudioPlayer: NativeAudioPlaying {
+    static let prebufferDelay: Duration = .milliseconds(20)
+    private let makeOutput: @Sendable () -> any NativeAudioOutputSink
+    private let prebufferClock: any NativeAudioPrebufferClock
+    private var output: (any NativeAudioOutputSink)?
+    private var queue = NativeAudioQueue()
+    private var playing = false
+    private var stopped = false
+    private var prebufferID: UUID?
+    private var cancelPrebuffer: (@Sendable () -> Void)?
+
+    init(makeOutput: @escaping @Sendable () -> any NativeAudioOutputSink = { NativeAVAudioOutputSink() },
+         prebufferClock: any NativeAudioPrebufferClock = NativeAudioSystemPrebufferClock()) {
+        self.makeOutput = makeOutput; self.prebufferClock = prebufferClock
+    }
+
+    func start(muted: Bool) throws {
+        guard output == nil, !stopped else { throw NativeFailure.state }
+        let output = makeOutput()
+        do { try output.start(muted: muted) }
+        catch { output.stop(); throw error }
+        self.output = output
+    }
+
+    func enqueue(_ pcm: NativeAudioPCM) throws {
+        guard !stopped, let output else { throw NativeFailure.state }
+        let admission = queue.reserve(frames: pcm.frames, sampleGap: pcm.hasSampleGap)
+        if admission.flushed {
+            cancelPrebufferWait(); output.flush(); playing = false
+        }
+        do {
+            try output.schedule(pcm) { [weak self] in await self?.completed(admission.ticket) }
+        } catch {
+            queue.flush(); cancelPrebufferWait(); output.flush(); playing = false
+            throw error
+        }
+        guard !playing else { return }
+        if queue.queuedFrames >= NativeAudioQueue.prebufferFrames {
+            cancelPrebufferWait(); output.play(); playing = true
+        } else if prebufferID == nil {
+            // The protocol permits a final short PCM burst followed only by
+            // heartbeats. Its first frame must not wait for another packet.
+            let id = UUID(), generation = queue.generation
+            prebufferID = id
+            cancelPrebuffer = prebufferClock.schedule(after: Self.prebufferDelay) { [weak self] in
+                await self?.prebufferExpired(id: id, generation: generation)
+            }
+        }
+    }
+
+    private func prebufferExpired(id: UUID, generation: UUID) {
+        guard !stopped, prebufferID == id, generation == queue.generation,
+              !playing, queue.queuedFrames > 0, let output else { return }
+        cancelPrebufferWait(); output.play(); playing = true
+    }
+
+    private func cancelPrebufferWait() {
+        prebufferID = nil
+        let cancel = cancelPrebuffer; cancelPrebuffer = nil
+        cancel?()
     }
 
     private func completed(_ ticket: NativeAudioQueue.Ticket) {
         guard !stopped, ticket.generation == queue.generation else { return }
         queue.complete(ticket)
-        if queue.queuedFrames == 0 { node?.pause(); playing = false }
+        if queue.queuedFrames == 0 {
+            cancelPrebufferWait(); output?.pause(); playing = false
+        }
     }
 
-    func setMuted(_ muted: Bool) { node?.volume = muted ? 0 : 1 }
+    func setMuted(_ muted: Bool) {
+        guard !stopped else { return }
+        output?.setMuted(muted)
+    }
 
     func stop() {
-        stopped = true; queue.flush(); playing = false
-        node?.stop(); engine?.stop()
-        node = nil; engine = nil; format = nil
+        guard !stopped else { return }
+        stopped = true; queue.flush(); playing = false; cancelPrebufferWait()
+        output?.stop(); output = nil
     }
 }

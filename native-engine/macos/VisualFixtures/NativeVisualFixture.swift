@@ -79,6 +79,9 @@ struct NativeVisualFixture {
             ("files-complete", "files-complete", 1200, 760, false),
             ("files-retry", "files-retry", 1200, 760, false),
             ("audio-on", "audio-on", 1200, 760, false),
+            ("audio-connecting", "audio-connecting", 1200, 760, false),
+            ("audio-connecting-compact", "audio-connecting", 880, 620, false),
+            ("fullscreen-audio-connecting-controls", "audio-connecting", 1920, 1080, false),
             ("audio-muted", "audio-muted", 1200, 760, false),
             ("audio-unavailable", "audio-unavailable", 1200, 760, false),
             ("audio-on-compact", "audio-on", 880, 620, false),
@@ -309,15 +312,19 @@ struct NativeVisualFixture {
             "certificateSHA256": String(repeating: "a", count: 64),
             "token": Invitation.encodeBase64URL(Data(repeating: 7, count: 32))]
         let invitation = try Invitation("knot-native:v1:" + Invitation.encodeBase64URL(JSONSerialization.data(withJSONObject: json)))
-        let unavailable = state == "audio-unavailable"
+        let unavailable = state == "audio-unavailable", connecting = state == "audio-connecting"
         let packet = NativeAudioPacket(kind: unavailable ? .error : .ready,
             payload: Data((unavailable ? #"{"code":"unavailable"}"# :
                 #"{"v":1,"codec":"pcm-s16le","sampleRate":48000,"channels":2}"#).utf8))
-        let channel = FixtureAudioChannel(packet.encoded)
+        let channel = FixtureAudioChannel(connecting ? Data() : packet.encoded)
         let player = FixtureAudioPlayer()
         let session = try NativeAudioSession(invitation: invitation, makeChannel: { _ in channel }, makePlayer: { player })
         session.setMuted(state == "audio-muted")
         session.start()
+        if connecting {
+            guard session.state == .connecting, !session.isAvailable else { session.stop(); throw FixtureError.audio }
+            return FixtureAudio(session: session)
+        }
         let deadline = Date().addingTimeInterval(2)
         while session.state == .connecting, Date() < deadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.005))

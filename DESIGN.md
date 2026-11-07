@@ -1,5 +1,13 @@
 # Design
 
+## Native.14 audio review follow-up (2026-11-07)
+
+Keep the current Windows owner-consent boundary. Same-share audio retry may reuse only the existing exact host pin/address and derived key; stop is terminal, and a new automatic Windows host still clears audio consent. Display connecting separately from unavailable, expose audio-only retry in the same speaker control, and release remote input before either action.
+
+Short valid PCM bursts must begin after the 960-frame threshold or a bounded20ms priming deadline. Keep one timer, queue-generation and timer-identity guards, the4,800-frame cap, and stop/flush cancellation. Coalesce mute delivery into one worker so slow callbacks cannot override the latest UI choice. Windows may reset consecutive authentication failures after a successful authenticated connection; eight consecutive failures still retire only audio and produce an authored notice. Never relax authentication or revive an old grant.
+
+The fail-closed H.264 ambiguity policy remains: do not guess a packing interpretation or drop compressed predictive frames to avoid an encoder error. Real-driver compatibility, physical audio and AV synchronization remain separate acceptance boundaries.
+
 ## Native.13 playback audio and repaint/pressure contract (2026-11-07)
 
 This supersedes the native preview's earlier audio exclusion only for Windows playback → Mac. Keep the existing connection flow and add **Windows 재생 소리 포함 · 마이크 제외** before Windows sharing, off on every app launch/update. Consent belongs to the current manually started share; an old resume grant cannot enable it. Never capture a microphone. Both apps must be updated. The connected Mac speaker control offers local mute/unmute, with authored unavailable status; an audio failure never stops video.

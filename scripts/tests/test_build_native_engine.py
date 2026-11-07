@@ -196,8 +196,8 @@ class NativeRebuildTests(unittest.TestCase):
                                        actualCapture=False, actualSendInput=False, actualAudioCapture=False, actualAudioPlayback=False,
                                        actualFreshExplorerInputFixtures=1, actualFreshExplorerOleFixtures=1,
                                        actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28, actualPersistentCertificateFixtures=3,
-                                       actualCrossProcessCertificateLeaseFixtures=1, actualFreshAudioFixtures=11,
-                                       actualFreshAudioTlsFixtures=6, actualSyntheticAudioCaptureFixtures=4,
+                                       actualCrossProcessCertificateLeaseFixtures=1, actualFreshAudioFixtures=13,
+                                       actualFreshAudioTlsFixtures=30, actualSyntheticAudioCaptureFixtures=6,
                                        actualFreshAudioHostFixtures=3)).encode()
             elif label == "native-pairing-managed-checks":
                 return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,
@@ -443,6 +443,7 @@ class NativeRebuildTests(unittest.TestCase):
                       "files", "files-compact", "files-fullscreen", "files-working", "files-error", "files-empty",
                       "saved-devices", "saved-devices-compact", "number-remembered", "work-tools", "files-complete", "files-retry", "certificate-policy", "certificate-pin-mismatch",
                       "audio-on", "audio-muted", "audio-unavailable", "audio-on-compact", "audio-muted-compact", "audio-unavailable-compact",
+                      "audio-connecting", "audio-connecting-compact", "fullscreen-audio-connecting-controls",
                       "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
