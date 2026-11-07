@@ -23,7 +23,10 @@ enum NativeCopy {
             return source.contains("Input paused") ? "화면 표시가 지연되고 있어요. 입력을 다시 시작하려면 화면을 클릭하세요." : "화면은 수신 중이지만 표시가 지연되고 있어요."
         }
         if source.hasPrefix("Receiving the host desktop.") {
-            return source.contains("Input paused") ? "입력이 일시 중지됐어요. 화면을 클릭하면 다시 시작해요." : "Windows 화면을 수신하고 있어요. 이번 연결만 허용돼요."
+            if source.contains("Input paused") { return "입력이 일시 중지됐어요. 화면을 클릭하면 다시 시작해요." }
+            return source.contains("Registered device; encrypted connection.")
+                ? "Windows 화면을 수신하고 있어요. 등록된 PC와 암호화해 연결됐어요."
+                : "Windows 화면을 수신하고 있어요. 이번 연결만 허용돼요."
         }
         // The lifecycle owns meaning. Unknown authored guidance stays visible;
         // translation never becomes an authentication or readiness predicate.

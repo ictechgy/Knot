@@ -38,7 +38,8 @@ namespace Knot.NativePreview
         private NativeQualityController quality;
         internal bool IsRegisteredSession { get { lock (gate) return registeredSession; } }
         internal bool HasRegisteredDevices { get { lock (gate) return registeredAvailable; } }
-        internal bool MayResumeRegisteredConnection { get; private set; }
+        private bool mayResumeRegisteredConnection, terminalFailure;
+        internal bool MayResumeRegisteredConnection { get { lock (gate) return mayResumeRegisteredConnection; } }
         private bool enrollmentAllowsFiles, claimedFiles;
         private IPAddress claimedPeer;
         private Invitation enrollmentInvitation;
@@ -81,12 +82,14 @@ namespace Knot.NativePreview
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback,
                             Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null,
                             FileSharingOptions files = null, Action<int, int, int> syntheticAfterEnrollment = null,
-                            bool allowAudio = false, IAudioCaptureFactory audioFactory = null)
+                            bool allowAudio = false, IAudioCaptureFactory audioFactory = null, bool syntheticRegisteredDevices = false)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
             if (syntheticAfterEnrollment != null && (!syntheticLoopback || !enrollmentMode))
                 throw new ArgumentException("Construction fault injection requires an owned synthetic enrollment fixture.");
+            if (syntheticRegisteredDevices && (!syntheticLoopback || !enrollmentMode))
+                throw new ArgumentException("Synthetic registered state requires an owned synthetic enrollment fixture.");
             this.address = address; this.syntheticLoopback = syntheticLoopback;
             this.enrollmentMode = enrollmentMode; this.clock = clock ?? new Func<long>(Stopwatch.GetTimestamp);
             this.inputClock = inputClock ?? new Func<long>(Stopwatch.GetTimestamp);
@@ -99,7 +102,7 @@ namespace Knot.NativePreview
                 this.invitation = invitation ?? new Invitation(this.clock);
                 certificate = enrollmentMode && !syntheticLoopback ? RunCertificate.Persistent() : new RunCertificate();
                 Identity = new RunIdentity(certificate.Pin);
-                registeredAvailable = enrollmentMode && !syntheticLoopback && NativeTrustedDevices.List().Count != 0;
+                registeredAvailable = syntheticLoopback ? syntheticRegisteredDevices : enrollmentMode && NativeTrustedDevices.List().Count != 0;
                 listener = new TcpListener(address, port);
                 listener.Start(1);
                 this.port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -287,7 +290,7 @@ namespace Knot.NativePreview
                     {
                         if (isStopped) { if (preparedFiles != null) preparedFiles.Dispose(); return; }
                         input = new InputSession(inputSink, media.Info.Rectangle);
-                        input.ExplorerReleaseFailed = Stop;
+                        input.ExplorerReleaseFailed = delegate { RecordTerminalFailure(); Stop(); };
                         if (inputSink is WindowsInputSink)
                         {
                             clipboard = new ClipboardBridge(delegate(byte operation) {
@@ -331,7 +334,7 @@ namespace Knot.NativePreview
                     {
                         if (inputClock() - Interlocked.Read(ref lastRead) >= 10L * Stopwatch.Frequency)
                         {
-                            if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(Guidance("timeout")); }
+                            NotifyTransportEnded(Guidance("timeout"));
                             Stop();
                         }
                     }, null, 250, 250);
@@ -375,12 +378,12 @@ namespace Knot.NativePreview
                     }
                 }
             }
-            catch (ProtocolException error) { if (!Stopping) { SendError(error.Code); Notify(Guidance(error.GuidanceCategory)); } }
-            catch (AuthenticationException) { if (!Stopping) Notify("TLS authentication failed. Create a new invitation."); }
-            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } }
-            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } }
+            catch (ProtocolException error) { RecordTerminalFailure(error.Code); if (!Stopping) { SendError(error.Code); Notify(Guidance(error.GuidanceCategory)); } }
+            catch (AuthenticationException) { RecordTerminalFailure(); if (!Stopping) Notify("TLS authentication failed. Create a new invitation."); }
+            catch (IOException) { NotifyTransportEnded(); }
+            catch (SocketException) { NotifyTransportEnded(); }
             catch (ObjectDisposedException) { }
-            catch (Exception) { if (!Stopping) { SendError("capture"); Notify("Native preview could not start. Check the bundled media engine and supported SDR display."); } }
+            catch (Exception) { RecordTerminalFailure(); if (!Stopping) { SendError("capture"); Notify("Native preview could not start. Check the bundled media engine and supported SDR display."); } }
             finally
             {
                 Stop();
@@ -524,10 +527,36 @@ namespace Knot.NativePreview
                     else { if (packet.Kind == 0x24 && clipboard != null) clipboard.Cancel(); input.Accept(packet); }
                 }
             }
-            catch (ProtocolException error) { if (!Stopping) Notify(Guidance(error.GuidanceCategory)); Stop(); }
-            catch (IOException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } Stop(); }
-            catch (SocketException) { if (!Stopping) { MayResumeRegisteredConnection = registeredSession || registrationUsed; Notify(MayResumeRegisteredConnection ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."); } Stop(); }
-            catch (Exception) { if (!Stopping) Notify("Session stopped. Check the host before reconnecting."); Stop(); }
+            catch (ProtocolException error) { RecordTerminalFailure(error.Code); if (!Stopping) Notify(Guidance(error.GuidanceCategory)); Stop(); }
+            catch (IOException) { NotifyTransportEnded(); Stop(); }
+            catch (SocketException) { NotifyTransportEnded(); Stop(); }
+            catch (ObjectDisposedException) { Stop(); }
+            catch (Exception) { RecordTerminalFailure(); if (!Stopping) Notify("Session stopped. Check the host before reconnecting."); Stop(); }
+        }
+        private void RecordTerminalFailure(string code = null)
+        {
+            lock (gate)
+            {
+                // Stop may make an already-read input packet observe "closed".
+                // Every other terminal failure wins over concurrent socket IO,
+                // including IO caused by its own notification/teardown window.
+                if (code == "closed" && isStopped) return;
+                terminalFailure = true; mayResumeRegisteredConnection = false;
+            }
+        }
+        private void NotifyTransportEnded(string guidance = null)
+        {
+            bool resume;
+            lock (gate)
+            {
+                if (isStopped || terminalFailure) return;
+                // A fresh number claim is temporary even when this host has
+                // older saved devices. Keep their listener eligible to resume;
+                // the owner must still want sharing and every reconnect must
+                // authenticate a fresh trusted-device challenge and pinned TLS.
+                resume = mayResumeRegisteredConnection = registeredSession || registrationUsed || registeredAvailable;
+            }
+            Notify(guidance ?? (resume ? "Connection ended. Waiting to reconnect a registered device." : "Connection ended. Create a new invitation."));
         }
         private string[] CaptureExplorerDrag(string nonce)
         {

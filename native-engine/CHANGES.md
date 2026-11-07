@@ -4,6 +4,8 @@
 
 - Reject a new saved-PC registration before contacting Windows when the Mac's saved-PC list is already full. Keep the second capacity check after registration to handle concurrent local changes.
 - Enter visible input recovery immediately if a quality-control message saturates the bounded input queue. Preserve queue limits, release ordering and benign clipboard rejection.
+- Preserve an existing saved connection when its exact address and certificate match a newly authenticated eight-digit connection. Resume the Windows trusted listener after transport loss when saved credentials remain; require a fresh registered-device proof before granting another session. Never restore revoked trust or change a certificate automatically.
+- Distinguish registered and temporary connections in the Mac's active status guidance.
 - Strengthen fresh synthetic checks for audio output admission, remote closure, revocation and build-fixture audio isolation. Timeouts and stalled peers cannot serve as successful remote-close evidence.
 - Advance installers to `0.1.0-native.15`, numeric PE version `0.1.0.15` and Mac bundle revision `15`. These checks do not measure physical-device streaming performance or audio quality.
 

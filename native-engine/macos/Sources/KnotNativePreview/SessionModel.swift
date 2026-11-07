@@ -249,7 +249,11 @@ final class SessionModel: ObservableObject {
     }
     private func transportFailed() {
         let device = recoveryDevice
-        close(message: device == nil ? "The network connection stopped. Check Windows sharing and the network before reconnecting." : "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인하세요.", failed: true)
+        let message: String
+        if device != nil { message = "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인하세요." }
+        else if selectedTrustedDevice != nil { message = "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인한 뒤 등록된 PC를 선택해 다시 연결하세요." }
+        else { message = "The network connection stopped. Check Windows sharing and the network before reconnecting." }
+        close(message: message, failed: true)
         if let device, !isSystemSleeping { registeredRecovery = .transient(device); scheduleReconnect(device) }
     }
     private var recoveryDevice: SavedNativeDevice? {
@@ -336,9 +340,17 @@ final class SessionModel: ObservableObject {
         guard ContinuousClock.now < enrollment.expiresAt, Invitation.validViewerLabel(enrollment.viewerName) else {
             close(message: "Invitation was rejected or expired. Create a new invitation.", failed: true, numberConnection: true); return
         }
-        selectedTrustedDevice = nil; reconnectAttempt = 0
-        pendingRegistration = rememberThisPC ? enrollment.offer.invitation : nil
-        invitation = enrollment.offer.invitation
+        let authenticatedInvitation = enrollment.offer.invitation
+        // A fresh number authenticates this host, but must not recreate or
+        // rotate a saved key that Windows may have revoked. Reconnect will
+        // still require a fresh proof using that exact existing credential.
+        selectedTrustedDevice = rememberThisPC ? nil : savedDevices.first {
+            $0.address == authenticatedInvitation.address && $0.certificateSHA256 == authenticatedInvitation.certificateSHA256
+        }
+        registeredRecovery = autoReconnect ? selectedTrustedDevice.map(RegisteredRecovery.current) : nil
+        reconnectAttempt = 0
+        pendingRegistration = rememberThisPC ? authenticatedInvitation : nil
+        invitation = authenticatedInvitation
         viewerLabel = enrollment.viewerName
         numberAuthorized = true
         startConnection()
