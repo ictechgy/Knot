@@ -445,6 +445,7 @@ class NativeRebuildTests(unittest.TestCase):
                       "audio-on", "audio-muted", "audio-unavailable", "audio-on-compact", "audio-muted-compact", "audio-unavailable-compact",
                       "audio-connecting", "audio-connecting-compact", "fullscreen-audio-connecting-controls",
                       "wake-reconnect", "wake-reconnect-compact",
+                      "sleep-recovery-compact",
                       "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())

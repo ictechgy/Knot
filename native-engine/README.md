@@ -21,6 +21,8 @@ Native.14 starts a short audio burst after a bounded prebuffer deadline, coalesc
 
 When Mac sleeps during a registered connection or its transient recovery, it closes the old session and pauses retries. On wake, with automatic reconnect enabled, it waits briefly for networking and starts fresh pinned authentication with a renewed six-attempt budget. Duplicate wake notifications cannot start parallel connections. Idle saved PCs, manual disconnect, forgetting a PC, choosing another target and terminal trust/protocol failures never authorize wake reconnect. A new Windows share still clears playback-sound consent.
 
+The pending recovery card remains visible from the sleep notification through the wake delay. Connection and target-selection actions during sleep cannot erase its intent; **재연결 취소** still stops recovery. Forgetting a device also stops its active recovery when local credential removal fails; the device remains listed with an error until removal succeeds.
+
 ### Playback sound and receiver fixes (native.13)
 
 Update **both Windows and Mac apps**. Before starting a Windows share, select **Windows 재생 소리 포함 · 마이크 제외** to include the default Windows playback output. The checkbox starts **off on every app launch, including after an update**. Its permission belongs to the current manually started share; an old resume grant never enables it. On Mac, use the connected speaker button to mute or restore sound. Mute affects this Mac's playback and keeps draining the audio connection. Stop/disconnect ends audio with the screen session.

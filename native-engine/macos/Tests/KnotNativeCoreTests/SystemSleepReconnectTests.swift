@@ -26,6 +26,18 @@ private func sleepSecret(_ byte: UInt8 = 3) throws -> String {
         "token": Invitation.encodeBase64URL(Data(repeating: byte, count: 32))]
     return "knot-native:v1:" + Invitation.encodeBase64URL(try JSONSerialization.data(withJSONObject: fields))
 }
+private func sleepEnrollment() throws -> AuthenticatedEnrollment {
+    let candidate = try EnrollmentCandidate(address: "192.168.50.22", port: 48632,
+        slot: Data(repeating: 5, count: 16), name: "Other synthetic PC")
+    let invitation = try JSONSerialization.data(withJSONObject: ["v": 1, "address": candidate.address, "port": 48631,
+        "certificateSHA256": String(repeating: "b", count: 64),
+        "token": Invitation.encodeBase64URL(Data(repeating: 6, count: 32))])
+    let fields: [String: Any] = ["v": 2, "slot": Invitation.encodeBase64URL(candidate.slot),
+        "grant": Invitation.encodeBase64URL(Data(repeating: 7, count: 16)),
+        "invitation": "knot-native:v1:" + Invitation.encodeBase64URL(invitation), "ttlMs": 30000]
+    return AuthenticatedEnrollment(offer: try EnrollmentOffer(JSONSerialization.data(withJSONObject: fields), candidate: candidate),
+        viewerName: "Other synthetic Mac", expiresAt: .now + .seconds(30))
+}
 private final class SleepGate: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [CheckedContinuation<Void, any Error>] = []
@@ -150,7 +162,7 @@ struct SystemSleepReconnectTests {
         model.phase = .streaming
         let revision = model.inputRevision
         model.systemWillSleep()
-        #expect(model.isSystemSleeping && !model.active && !model.hasPendingReconnect)
+        #expect(model.isSystemSleeping && !model.active && model.hasPendingReconnect)
         #expect(channels.channels.first?.closeCount == 1)
         #expect(presenter.cleared == 1 && presenter.forgotten == 1 && model.inputRevision > revision)
         #expect(model.invitation == nil && model.files == nil && model.audio == nil && model.clipboard == nil)
@@ -188,7 +200,7 @@ struct SystemSleepReconnectTests {
         model.connectSaved(device.id)
         #expect(await sleepEventually { retry.count == 1 })
         model.systemWillSleep(); retry.advance(); await sleepDrain()
-        #expect(factory.normalCalls == 1 && !model.hasPendingReconnect)
+        #expect(factory.normalCalls == 1 && model.hasPendingReconnect)
         model.systemDidWake()
         #expect(await sleepEventually { wake.count == 1 })
         #expect(factory.normalCalls == 1)
@@ -212,6 +224,89 @@ struct SystemSleepReconnectTests {
         wake.advance()
         #expect(await sleepEventually { factory.normalCalls == 8 && challenge.count == 1 })
         #expect(model.active && model.reconnectAttemptCount == 0)
+    }
+
+    @Test(arguments: ["savedCurrent", "savedOther", "review", "invalidReview", "connect", "authenticated", "newTarget"])
+    @MainActor func connectionActionsDuringSleepPreserveTheSuspendedTarget(_ action: String) async throws {
+        let device = try sleepDevice(), other = try sleepDevice(2)
+        let first = try sleepInvitation(3), fresh = try sleepInvitation(4)
+        let factory = SleepTrustedFactory([.success(first), .success(fresh)]), channels = SleepChannels(), wake = SleepGate()
+        let model = SessionModel(makeChannel: { channels.make($0) }, makeTrustedClient: { device, _ in factory.make(device) },
+            waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device, other])
+        defer { model.disconnect(); wake.releaseAll() }
+        model.connectSaved(device.id)
+        #expect(await sleepEventually { model.phase == .approval })
+        model.phase = .streaming; model.systemWillSleep()
+        let status = model.status, revision = model.inputRevision
+        #expect(model.isSystemSleeping && model.hasPendingReconnect && !model.active)
+        switch action {
+        case "savedCurrent": model.connectSaved(device.id)
+        case "savedOther": model.connectSaved(other.id)
+        case "review": model.review(try sleepSecret(8))
+        case "invalidReview": model.review("invalid")
+        case "connect": model.connect()
+        case "authenticated": model.connectAuthenticated(try sleepEnrollment())
+        default: model.prepareForNewTarget()
+        }
+        await sleepDrain()
+        #expect(model.isSystemSleeping && model.hasPendingReconnect && !model.active)
+        #expect(model.status == status && model.inputRevision == revision)
+        #expect(model.invitation == nil && !model.numberAuthorized && model.viewerLabel == "My Mac")
+        #expect(factory.normalCalls == 1 && wake.count == 0 && channels.invitations == [first.token])
+        model.systemDidWake()
+        #expect(await sleepEventually { wake.count == 1 })
+        wake.advance()
+        #expect(await sleepEventually { factory.normalCalls == 2 && model.phase == .approval })
+        #expect(factory.deviceIDs == [device.id, device.id] && channels.invitations == [first.token, fresh.token])
+    }
+
+    @Test @MainActor func unregisteredSleepDoesNotInventPendingRecovery() async throws {
+        let factory = SleepTrustedFactory([.failure(.transport)]), wake = SleepGate()
+        let model = SessionModel(makeTrustedClient: { device, _ in factory.make(device) }, waitForWakeReadiness: { try await wake.wait() })
+        defer { model.disconnect(); wake.releaseAll() }
+        model.phase = .streaming; model.systemWillSleep()
+        #expect(model.isSystemSleeping && !model.active && !model.hasPendingReconnect)
+        model.systemDidWake(); await sleepDrain()
+        #expect(!model.isSystemSleeping && !model.hasPendingReconnect && factory.normalCalls == 0 && wake.count == 0)
+    }
+
+    @Test(arguments: ["disconnect", "disabled", "forget"])
+    @MainActor func cancellationWhileAsleepRevokesTheSuspendedConnection(_ action: String) async throws {
+        let device = try sleepDevice(), factory = SleepTrustedFactory([.failure(.transport)]), wake = SleepGate()
+        let model = SessionModel(makeTrustedClient: { device, _ in factory.make(device) },
+            waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device], initialRegisteredDevice: device,
+            removeSavedDevice: { _ in })
+        defer { model.disconnect(); wake.releaseAll() }
+        model.phase = .streaming; model.systemWillSleep()
+        #expect(model.hasPendingReconnect)
+        switch action {
+        case "disconnect": model.disconnect()
+        case "disabled": model.autoReconnect = false
+        default: model.forgetSaved(device.id)
+        }
+        #expect(model.isSystemSleeping && !model.hasPendingReconnect)
+        model.systemDidWake(); await sleepDrain()
+        #expect(!model.hasPendingReconnect && factory.normalCalls == 0 && wake.count == 0)
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func failedCredentialRemovalStillRevokesConnectionAndRecovery(_ whileSleeping: Bool) async throws {
+        let device = try sleepDevice(), factory = SleepTrustedFactory([.success(try sleepInvitation())])
+        let channels = SleepChannels(), wake = SleepGate()
+        let model = SessionModel(makeChannel: { channels.make($0) }, makeTrustedClient: { device, _ in factory.make(device) },
+            waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device], removeSavedDevice: { _ in throw NativeFailure.state })
+        defer { model.disconnect(); wake.releaseAll() }
+        model.connectSaved(device.id)
+        #expect(await sleepEventually { model.phase == .approval && channels.channels.first?.isReading == true })
+        model.phase = .streaming
+        if whileSleeping { model.systemWillSleep(); #expect(model.hasPendingReconnect) }
+        model.forgetSaved(device.id)
+        #expect(model.phase == .failed && !model.hasPendingReconnect && model.savedDevices == [device])
+        #expect(model.status == "연결은 종료했지만 키체인에서 PC 등록을 해제하지 못했어요. 다시 시도하세요.")
+        #expect(channels.channels.first?.closeCount == 1)
+        if !whileSleeping { model.systemWillSleep() }
+        model.systemDidWake(); await sleepDrain()
+        #expect(factory.normalCalls == 1 && wake.count == 0 && !model.hasPendingReconnect)
     }
 
     @Test @MainActor func terminalFailuresNeverAcquireWakeRecoveryFromSelection() async throws {

@@ -184,7 +184,10 @@ struct PreviewWindow: View {
                 HStack {
                     VStack(alignment: .leading) { Text(device.name); Text(device.address).font(.caption).foregroundStyle(.secondary) }
                     Spacer()
-                    Button("연결") { enrollment.cancel(); model.connectSaved(device.id) }.buttonStyle(.borderedProminent)
+                    Button("연결") {
+                        guard !model.active, !model.isSystemSleeping else { return }
+                        enrollment.cancel(); model.connectSaved(device.id)
+                    }.buttonStyle(.borderedProminent)
                     Button("등록 해제") { model.forgetSaved(device.id) }
                 }
             }
@@ -238,6 +241,7 @@ struct PreviewWindow: View {
                 VStack(spacing: 8) {
                     ForEach(enrollment.candidates) { candidate in
                         Button {
+                            guard !model.active, !model.isSystemSleeping else { return }
                             model.prepareForNewTarget()
                             secret = ""; model.invitation = nil; activeTarget = nil
                             enrollment.select(candidate.id)
@@ -356,21 +360,21 @@ struct PreviewWindow: View {
             .disabled(enrollment.busy).padding(16).nativePanel()
     }
     private func findPC(manual: Bool = false) {
-        guard !model.active else { return }
+        guard !model.active, !model.isSystemSleeping else { return }
         model.prepareForNewTarget()
         secret = ""; model.invitation = nil; activeTarget = nil
         codeFocused = false
         enrollment.find(manual: manual)
     }
     private func connectNumber() {
-        guard !model.active else { return }
+        guard !model.active, !model.isSystemSleeping else { return }
         guard Invitation.validViewerLabel(model.viewerLabel) else {
             enrollment.code = ""; model.status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; showingOptions = true; return
         }
         codeFocused = false
         secret = ""; model.invitation = nil
         enrollment.connect(name: model.viewerLabel) { result in
-            guard !model.active else { return }
+            guard !model.active, !model.isSystemSleeping else { return }
             let value = result.offer.invitation
             model.savedDeviceLabel = enrollment.selected?.name ?? "Windows PC"
             activeTarget = NativeTarget(address: value.address, port: value.port, pin: value.certificateSHA256)
@@ -433,6 +437,7 @@ struct PreviewWindow: View {
                 Button("다른 코드 입력") { model.invitation = nil }
                 Spacer()
                 Button {
+                    guard !model.active, !model.isSystemSleeping else { return }
                     guard Invitation.validViewerLabel(model.viewerLabel) else {
                         model.status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."
                         showingOptions = true
@@ -614,6 +619,7 @@ struct PreviewWindow: View {
         showingFiles = value
     }
     private func review() {
+        guard !model.active, !model.isSystemSleeping else { return }
         guard !secret.isEmpty else { return }
         let draft = secret; secret = ""; enrollment.cancel()
         model.review(draft)

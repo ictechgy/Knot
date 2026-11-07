@@ -4,6 +4,8 @@
 
 Observe Mac sleep/wake through an app-owned power adapter. Keep an explicit in-memory recovery intent for the current registered target, separate from UI selection. Sleep synchronously revokes the old connection, input and child sessions and pauses retries. Wake waits briefly for network readiness, resets the bounded retry budget and uses a fresh trusted challenge with the unchanged host pin. Duplicate wake and stale callbacks must not create parallel connections.
 
+Sleeping suspended recovery is itself a visible pending state, even before a wake-delay task exists. Connection, review and target-selection entry points must reject new work before mutating that intent while the system is sleeping. Manual cancellation and forgetting remain effective; a failed credential removal keeps the credential listed with an error but never silently restores the connection the owner asked to revoke.
+
 Never connect an idle saved PC merely because it is registered. Manual disconnect/window close, forgetting a device, disabling automatic reconnect, selecting a new target and terminal trust/protocol failures revoke recovery intent. A transiently interrupted registered session may resume after sleep even if its earlier retries were exhausted. New Windows host runs keep the existing off-by-default playback consent. Tests inject a fresh notification center, fake clients/channels and clock gates; never sleep the machine or access real stores, devices or system notifications.
 
 ## Native.14 audio review follow-up (2026-11-07)

@@ -45,10 +45,16 @@ final class SessionModel: ObservableObject {
         }
     }
     private var registeredRecovery: RegisteredRecovery?
-    private(set) var isSystemSleeping = false
+    @Published private(set) var isSystemSleeping = false
     private var reconnectAttempt = 0
     var reconnectAttemptCount: Int { reconnectAttempt }
-    var hasPendingReconnect: Bool { reconnectTask != nil || wakeReconnectTask != nil }
+    var hasPendingReconnect: Bool {
+        if reconnectTask != nil || wakeReconnectTask != nil { return true }
+        // No task runs while asleep, but the suspended intent still owns the
+        // connection UI until wake or an explicit cancellation.
+        guard isSystemSleeping, case .suspended = registeredRecovery else { return false }
+        return recoveryDevice != nil
+    }
     private let makeTrustedClient: @Sendable (SavedNativeDevice, String) throws -> any NativeTrustedConnecting
     private let waitForReconnect: @MainActor @Sendable (Duration) async throws -> Void
     private let waitForWakeReadiness: @MainActor @Sendable () async throws -> Void
@@ -132,13 +138,13 @@ final class SessionModel: ObservableObject {
         catch { status = "등록된 PC를 읽지 못했어요. 키체인 접근을 확인하세요." }
     }
     func connectSaved(_ id: String) {
-        guard !active, let device = savedDevices.first(where: { $0.id == id }) else { return }
+        guard !active, !isSystemSleeping, let device = savedDevices.first(where: { $0.id == id }) else { return }
         clearAutomaticRecovery(); reconnectAttempt = 0
         selectedTrustedDevice = device; pendingRegistration = nil
         beginTrustedConnection(device)
     }
     func prepareForNewTarget() {
-        guard !active else { return }
+        guard !active, !isSystemSleeping else { return }
         // An exhausted retry has no task, but can still retain wake intent.
         // Discovery/selection is an explicit departure from that old target.
         disconnect(); invitation = nil; numberAuthorized = false
@@ -166,11 +172,20 @@ final class SessionModel: ObservableObject {
     }
     func forgetSaved(_ id: String) {
         guard let device = savedDevices.first(where: { $0.id == id }) else { return }
-        if selectedTrustedDevice?.id == id { disconnect() }
+        let wasSelected = selectedTrustedDevice?.id == id
+        // Revoke this connection/recovery immediately on the owner's request,
+        // even if removing the persistent local credential subsequently fails.
+        if wasSelected { disconnect() }
         // The local credential is removed even when the host is offline. The
         // Windows device list offers independent, immediate server revocation.
         do { try removeSavedDevice(id); savedDevices.removeAll { $0.id == id } }
-        catch { status = "키체인에서 PC 등록을 해제하지 못했어요."; return }
+        catch {
+            if wasSelected {
+                phase = .failed
+                status = "연결은 종료했지만 키체인에서 PC 등록을 해제하지 못했어요. 다시 시도하세요."
+            } else { status = "키체인에서 PC 등록을 해제하지 못했어요." }
+            return
+        }
         Task { [weak self, viewerLabel, makeTrustedClient] in
             if let client = try? makeTrustedClient(device, viewerLabel) {
                 _ = try? await client.connect(revoke: true)
@@ -286,7 +301,7 @@ final class SessionModel: ObservableObject {
         }
     }
     func review(_ secret: String) {
-        guard !active else { return }
+        guard !active, !isSystemSleeping else { return }
         clearAutomaticRecovery(); identity = UUID(); reconnectAttempt = 0
         selectedTrustedDevice = nil; pendingRegistration = nil
         reconnectMethod = .invitation
@@ -295,7 +310,7 @@ final class SessionModel: ObservableObject {
         catch { invitation = nil; phase = .failed; status = "Invalid invitation. Ask the host to create a fresh native invitation." }
     }
     func connect() {
-        guard !active else { return }
+        guard !active, !isSystemSleeping else { return }
         clearAutomaticRecovery(); identity = UUID(); reconnectAttempt = 0
         selectedTrustedDevice = nil; pendingRegistration = nil
         reconnectMethod = .invitation
@@ -303,7 +318,7 @@ final class SessionModel: ObservableObject {
         startConnection()
     }
     func connectAuthenticated(_ enrollment: AuthenticatedEnrollment) {
-        guard !active else { return }
+        guard !active, !isSystemSleeping else { return }
         clearAutomaticRecovery(); identity = UUID()
         guard ContinuousClock.now < enrollment.expiresAt, Invitation.validViewerLabel(enrollment.viewerName) else {
             close(message: "Invitation was rejected or expired. Create a new invitation.", failed: true, numberConnection: true); return
@@ -316,8 +331,9 @@ final class SessionModel: ObservableObject {
         startConnection()
     }
     private func startConnection() {
+        guard !isSystemSleeping else { return }
         reconnectTask?.cancel(); reconnectTask = nil
-        guard !active, !isSystemSleeping, let invitation else { return }
+        guard !active, let invitation else { return }
         let label = viewerLabel
         guard Invitation.validViewerLabel(label) else { status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return }
         let id = UUID(); identity = id; phase = .connecting; status = "Checking the secure connection…"
