@@ -229,6 +229,21 @@ struct SystemSleepReconnectTests {
         }
     }
 
+    @Test @MainActor func choosingNewDiscoveryAfterExhaustedRetriesRevokesOldWakeIntent() async throws {
+        let device = try sleepDevice(), factory = SleepTrustedFactory([.failure(.transport)]), wake = SleepGate()
+        let model = SessionModel(makeTrustedClient: { device, _ in factory.make(device) },
+            waitForReconnect: { _ in await Task.yield() }, waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device])
+        defer { model.disconnect(); wake.releaseAll() }
+        model.connectSaved(device.id)
+        #expect(await sleepEventually { factory.normalCalls == 7 && model.phase == .failed && !model.hasPendingReconnect })
+        // The user leaves the old saved target to search/select an unverified
+        // candidate. No enrollment or live network adapter is needed to do so.
+        model.prepareForNewTarget()
+        #expect(model.phase == .idle && model.invitation == nil && !model.numberAuthorized)
+        model.systemWillSleep(); model.systemDidWake(); await sleepDrain()
+        #expect(factory.normalCalls == 7 && wake.count == 0 && !model.hasPendingReconnect)
+    }
+
     @Test @MainActor func disabledDisconnectedForgottenOrReviewedRetryCannotRecover() async throws {
         let device = try sleepDevice(), secret = try sleepSecret(8)
         for action in ["disabled", "disconnect", "forget", "review", "invalidReview"] {

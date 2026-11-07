@@ -238,6 +238,7 @@ struct PreviewWindow: View {
                 VStack(spacing: 8) {
                     ForEach(enrollment.candidates) { candidate in
                         Button {
+                            model.prepareForNewTarget()
                             secret = ""; model.invitation = nil; activeTarget = nil
                             enrollment.select(candidate.id)
                         } label: {
@@ -356,6 +357,7 @@ struct PreviewWindow: View {
     }
     private func findPC(manual: Bool = false) {
         guard !model.active else { return }
+        model.prepareForNewTarget()
         secret = ""; model.invitation = nil; activeTarget = nil
         codeFocused = false
         enrollment.find(manual: manual)

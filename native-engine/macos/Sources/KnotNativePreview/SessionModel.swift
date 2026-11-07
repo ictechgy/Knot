@@ -137,6 +137,12 @@ final class SessionModel: ObservableObject {
         selectedTrustedDevice = device; pendingRegistration = nil
         beginTrustedConnection(device)
     }
+    func prepareForNewTarget() {
+        guard !active else { return }
+        // An exhausted retry has no task, but can still retain wake intent.
+        // Discovery/selection is an explicit departure from that old target.
+        disconnect(); invitation = nil; numberAuthorized = false
+    }
     private func beginTrustedConnection(_ device: SavedNativeDevice) {
         guard !active, !isSystemSleeping else { return }
         registeredRecovery = autoReconnect ? .current(device) : nil
