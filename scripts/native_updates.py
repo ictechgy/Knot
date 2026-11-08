@@ -12,7 +12,7 @@ def https(value):
     if not isinstance(value, str) or not value or any(ord(c) <= 32 or ord(c) >= 127 for c in value):
         raise ValueError('Update URL must be ASCII public HTTPS')
     p = urlsplit(value)
-    if (p.scheme != 'https' or not p.hostname or p.username or p.password or p.query or p.fragment or
+    if (p.scheme != 'https' or not p.hostname or p.username or p.password or '?' in value or '#' in value or p.query or p.fragment or
             p.port not in (None, 443) or p.hostname.lower() in ('localhost', '127.0.0.1', '::1')):
         raise ValueError('Update URL must be public HTTPS without credentials/query/fragment')
     return value
@@ -48,7 +48,7 @@ def build_resource(root, current_version):
 def manifest(current_version, platform, url, size, sha256, expires, now=None):
     build = version(current_version); https(url); now = int(time.time()) if now is None else now
     suffix = '-macos-arm64.zip' if platform == 'macos-arm64' else '-windows-x64-setup.exe'
-    if platform not in ('macos-arm64', 'windows-x64') or urlsplit(url).path.rsplit('/', 1)[-1] != 'Knot-Native-' + current_version + suffix:
+    if platform not in ('macos-arm64', 'windows-x64') or url.rsplit('/', 1)[-1] != 'Knot-Native-' + current_version + suffix:
         raise ValueError('Native artifact identity/platform mismatch')
     if type(size) is not int or not 1 <= size <= MAXIMUM_BYTES or not re.fullmatch('[0-9a-f]{64}', sha256):
         raise ValueError('Invalid artifact size/hash')

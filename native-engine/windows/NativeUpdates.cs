@@ -143,6 +143,7 @@ namespace Knot.NativePreview
         internal NativeUpdateAttempt(Action revoke, Action cleanup, Func<bool> exited, Action kill, Func<int, bool> wait, IDisposable child)
         { this.revoke = revoke; this.cleanup = cleanup; this.exited = exited; this.kill = kill; this.wait = wait; this.child = child; }
         internal bool RevokeAuthority() { try { revoke(); return true; } catch (Exception) { return false; } }
+        internal void RequestTermination() { try { if (!exited()) kill(); } catch (Exception) { } }
         internal bool RevokeAndStop()
         {
             RevokeAuthority();
@@ -163,16 +164,25 @@ namespace Knot.NativePreview
         private Timer timer;
         private string stage;
         private NativeUpdateManifest pending;
-        private bool busy, installing, transferred, unconfirmedHelper;
+        private bool busy, installing, transferred, unconfirmedHelper, retainedCleanupScheduled;
         private NativeUpdateAttempt retainedAttempt;
+        private readonly Func<string, NativeUpdateManifest, string, CancellationToken, NativeUpdateAttempt> prepare;
         internal event Action Changed;
         internal bool Configured { get { return configuration != null && configuration.Configured; } }
         internal bool Available { get { lock (gate) return pending != null && !installing; } }
         internal bool Busy { get { lock (gate) return busy || installing || unconfirmedHelper; } }
         internal string Status { get; private set; }
-        internal NativeUpdates()
+        private static NativeUpdateConfiguration LoadConfiguration()
+        { try { return NativeUpdateConfiguration.Load(); } catch (Exception) { return null; } }
+        internal NativeUpdates() : this(LoadConfiguration()) { }
+        // Pure fake adapters/explicit in-memory fixtures exercise install state
+        // without starting a helper, reading a live store or downloading a feed.
+        internal NativeUpdates(NativeUpdateConfiguration configuration,
+            Func<string, NativeUpdateManifest, string, CancellationToken, NativeUpdateAttempt> prepare = null,
+            NativeUpdateManifest prepared = null, string preparedStage = null)
         {
-            try { configuration = NativeUpdateConfiguration.Load(); } catch (Exception) { }
+            this.configuration = configuration; pending = prepared; stage = preparedStage;
+            this.prepare = prepare ?? new Func<string, NativeUpdateManifest, string, CancellationToken, NativeUpdateAttempt>(Prepare);
             Status = Configured ? "새 버전을 자동으로 확인합니다." : "자동 업데이트 배포가 아직 구성되지 않았습니다.";
         }
         internal void StartAutomaticChecks()
@@ -215,7 +225,7 @@ namespace Knot.NativePreview
             try {
                 Exception failure = null;
                 try {
-                    attempt = await Task.Run(delegate { return Prepare(holding, m, nonce, lifetime.Token); });
+                    attempt = await Task.Run(delegate { return prepare(holding, m, nonce, lifetime.Token); });
                     lifetime.Token.ThrowIfCancellationRequested();
                     NativeUpdateHandoff.WriteSignal(holding, nonce, "commit");
                     // Close() disposes this model. Ownership transfers before that
@@ -231,18 +241,19 @@ namespace Knot.NativePreview
                 if (uncertain != null) attempt = uncertain.Attempt;
                 // Publish cancellation synchronously before yielding the UI exit
                 // callback's stack. A late READY/COMMIT cannot outlive failure.
-                bool authorityRevoked = true;
+                bool exitConfirmed = true;
                 if (attempt != null) {
                     NativeUpdateAttempt owned = attempt;
-                    authorityRevoked = owned.RevokeAuthority() ? await Task.Run(delegate { return owned.RevokeAndStop(); }) : owned.RevokeAndStop();
+                    if (!owned.RevokeAuthority()) owned.RequestTermination();
+                    exitConfirmed = await Task.Run(delegate { return owned.RevokeAndStop(); });
                 }
                 lock (gate) {
-                    transferred = false; unconfirmedHelper = !authorityRevoked;
-                    if (!authorityRevoked) retainedAttempt = attempt;
-                    if (authorityRevoked) { pending = null; stage = null; }
+                    transferred = false; unconfirmedHelper = !exitConfirmed;
+                    if (!exitConfirmed) retainedAttempt = attempt;
+                    if (exitConfirmed) { pending = null; stage = null; }
                 }
-                if (authorityRevoked) await Task.Run(delegate { DeleteOwnedStage(holding); });
-                SetStatus(authorityRevoked ? "업데이트 준비를 취소했습니다. 새 버전을 다시 확인해 주세요." : "업데이트 작업의 취소를 확인하지 못해 추가 업데이트를 중단했습니다. 현재 앱은 계속 사용할 수 있습니다.");
+                if (exitConfirmed) await Task.Run(delegate { DeleteOwnedStage(holding); });
+                SetStatus(exitConfirmed ? "업데이트 준비를 취소했습니다. 새 버전을 다시 확인해 주세요." : "업데이트 작업의 취소를 확인하지 못해 추가 업데이트를 중단했습니다. 현재 앱은 계속 사용할 수 있습니다.");
                 return false;
             } finally { lock (gate) installing = false; CleanupIfStopped(); Notify(); }
         }
@@ -312,15 +323,33 @@ namespace Knot.NativePreview
         public void Dispose()
         {
             NativeUpdateAttempt retained;
-            lock (gate) { lifetime.Cancel(); if (timer != null) { timer.Dispose(); timer = null; } retained = retainedAttempt; }
-            if (retained != null && retained.RevokeAndStop()) {
-                lock (gate) { retainedAttempt = null; unconfirmedHelper = false; }
+            lock (gate) {
+                lifetime.Cancel(); if (timer != null) { timer.Dispose(); timer = null; }
+                retained = retainedCleanupScheduled ? null : retainedAttempt;
+                if (retained != null) retainedCleanupScheduled = true;
+            }
+            if (retained != null) {
+                if (!retained.RevokeAuthority()) retained.RequestTermination();
+                Task.Run(delegate {
+                    try {
+                        if (retained.RevokeAndStop()) {
+                            lock (gate) { if (retainedAttempt == retained) { retainedAttempt = null; unconfirmedHelper = false; } }
+                            CleanupIfStopped(); Notify();
+                        }
+                    } finally { lock (gate) retainedCleanupScheduled = false; }
+                });
             }
             CleanupIfStopped();
         }
     }
     internal sealed class NativeUpdateUnconfirmedCancellation : Exception
     { internal readonly NativeUpdateAttempt Attempt; internal NativeUpdateUnconfirmedCancellation(NativeUpdateAttempt attempt) { Attempt = attempt; } }
+    internal static class NativeUpdateRecovery
+    {
+        internal static bool InstallerStopped(bool started, bool terminal) { return !started || terminal; }
+        internal static bool MayReopenOriginal(bool started, bool terminal, bool succeeded, bool unchanged)
+        { return !succeeded && InstallerStopped(started, terminal) && unchanged; }
+    }
     internal static class NativeUpdateHandoff
     {
         internal static bool ValidNonce(string nonce)
@@ -395,9 +424,9 @@ namespace Knot.NativePreview
                 }
                 if (HasSignal(stage, nonce, "cancel") || !original.WaitForExit(180000)) throw new IOException();
             }
-            if (!MayInstall(stage, nonce)) throw new IOException();
             bool installerStarted = false, installerTerminal = false, succeeded = false;
             try {
+                if (!MayInstall(stage, nonce)) throw new IOException();
                 using (var locked = new FileStream(package, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
                     m.VerifyFile(package);
@@ -417,8 +446,8 @@ namespace Knot.NativePreview
                 // A timed-out installer can still be changing files. Never open
                 // the app then. On a terminal failure, only reopen byte-identical
                 // original code; do not assume installer rollback succeeded.
-                if (!succeeded && (!installerStarted || installerTerminal)) {
-                    try { if (Digest(executable) == originalDigest) Relaunch(executable); } catch (Exception) { }
+                if (!succeeded && NativeUpdateRecovery.InstallerStopped(installerStarted, installerTerminal)) {
+                    try { if (NativeUpdateRecovery.MayReopenOriginal(installerStarted, installerTerminal, succeeded, Digest(executable) == originalDigest)) Relaunch(executable); } catch (Exception) { }
                     try { File.Delete(package); File.Delete(Path.Combine(stage, "manifest.feed")); } catch (Exception) { }
                 }
                 throw;

@@ -133,6 +133,15 @@ jobs:
           $process = Start-Process -FilePath $download -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',('/DIR="' + $install + '"')) -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw 'Native compiler installation failed' }
           "INNO_COMPILER=$install\ISCC.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Require the verified compiler override before native packaging
+        if: github.event_name != 'workflow_dispatch' || !inputs.media_only
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = Join-Path $env:RUNNER_TEMP 'KnotNativeInno\ISCC.exe'
+          if ($env:INNO_COMPILER -cne $expected -or -not (Test-Path -LiteralPath $expected -PathType Leaf)) {
+            throw 'Pinned Inno compiler override was not propagated; refuse discovery fallback on CI'
+          }
       - if: github.event_name != 'workflow_dispatch' || !inputs.media_only
         run: python scripts/build_native_engine.py --platform windows
       - if: github.event_name == 'workflow_dispatch' && inputs.media_only

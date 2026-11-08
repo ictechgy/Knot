@@ -18,28 +18,30 @@ private final class NativeUpdateDownloadLimit: NSObject, URLSessionDownloadDeleg
 
 /// The object owns only a newly launched helper and its inherited pipes.
 /// Failed handoff revokes its nonce before closing the process-lifetime pipe.
-private final class NativePreparedUpdate: @unchecked Sendable {
+final class NativePreparedUpdate: @unchecked Sendable {
     let process: Process, output: Pipe, input: Pipe, stage: URL, nonce: String
     init(process: Process, output: Pipe, input: Pipe, stage: URL, nonce: String) {
         self.process = process; self.output = output; self.input = input; self.stage = stage; self.nonce = nonce
     }
     func commit() throws { try input.fileHandleForWriting.write(contentsOf: NativeUpdateAcknowledgement.commit(nonce)) }
     func cancel() async -> Bool {
-        // If termination is delayed, a later parent exit still cannot publish.
+        // The caller is often already cancelled. Shutdown has its own lifetime;
+        // cancellation must not collapse the TERM grace/exit-confirmation waits.
+        await Task.detached(priority: .utility) { self.cancelSynchronously() }.value
+    }
+    private func cancelSynchronously() -> Bool {
         try? Data(nonce.utf8).write(to: stage.appendingPathComponent("cancel-" + nonce), options: .withoutOverwriting)
         try? input.fileHandleForWriting.close()
-        if process.isRunning { process.terminate() }
-        for _ in 0..<80 {
-            if !process.isRunning { closePipes(); return true }
-            try? await Task.sleep(for: .milliseconds(25))
-        }
-        if process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
-        for _ in 0..<80 {
-            if !process.isRunning { closePipes(); return true }
-            try? await Task.sleep(for: .milliseconds(25))
-        }
-        // Keep the stage if OS process completion could not be confirmed.
-        return false
+        let stopped = NativeUpdateChildShutdown.stop(
+            isRunning: { self.process.isRunning }, terminate: { self.process.terminate() },
+            kill: { _ = Darwin.kill(self.process.processIdentifier, SIGKILL) }, polls: 1800)
+        if stopped { closePipes() }
+        // A dead helper is not by itself proof that its tool children drained.
+        // The helper writes cleanup only after command supervision and removal
+        // of any incomplete sibling copy. Forced termination retains the stage.
+        let started = stage.appendingPathComponent("started-" + nonce)
+        let cleanup = stage.appendingPathComponent("cleanup-" + nonce)
+        return stopped && (!FileManager.default.fileExists(atPath: started.path) || (try? Data(contentsOf: cleanup)) == Data(nonce.utf8))
     }
     func closePipes() {
         try? input.fileHandleForReading.close(); try? input.fileHandleForWriting.close()
@@ -47,8 +49,31 @@ private final class NativePreparedUpdate: @unchecked Sendable {
     }
 }
 
-private struct NativeUpdateUnconfirmedCancellation: Error {
+/// Synchronous owned-child shutdown runs only on a detached worker. Injected
+/// clocks/children let tests prove cancelled callers still observe the grace.
+enum NativeUpdateChildShutdown {
+    static func stop(isRunning: () -> Bool, terminate: () -> Void, kill: () -> Void,
+                     pause: () -> Void = { Thread.sleep(forTimeInterval: 0.025) }, polls: Int = 80, killPolls: Int = 80) -> Bool {
+        if !isRunning() { return true }
+        terminate()
+        for _ in 0..<polls { if !isRunning() { return true }; pause() }
+        if isRunning() { kill() }
+        for _ in 0..<killPolls { if !isRunning() { return true }; pause() }
+        return !isRunning()
+    }
+}
+
+struct NativeUpdateUnconfirmedCancellation: Error {
     let prepared: NativePreparedUpdate
+}
+
+struct NativeUpdateInstallation: Sendable {
+    let app: URL, executable: URL, configuration: URL
+    @MainActor static func current() -> NativeUpdateInstallation? {
+        guard let executable = Bundle.main.executableURL,
+              let configuration = Bundle.main.url(forResource: "NativeUpdateConfig", withExtension: "txt") else { return nil }
+        return Self(app: Bundle.main.bundleURL, executable: executable, configuration: configuration)
+    }
 }
 
 @MainActor final class NativeUpdateModel: ObservableObject {
@@ -63,14 +88,23 @@ private struct NativeUpdateUnconfirmedCancellation: Error {
     private var generation: UInt64 = 0
     private let download: @Sendable (NativeUpdateConfiguration) async throws -> (NativeUpdateManifest, URL)
     private let now: @Sendable () -> Int64
+    private let installation: @MainActor () -> NativeUpdateInstallation?
+    private let prepareInstallation: @Sendable (NativeUpdateManifest, URL, NativeUpdateConfiguration, URL, URL, URL) async throws -> NativePreparedUpdate
+    private let terminateApplication: @MainActor () -> Void
     // Keep the parent's lifetime writer open through the actual process exit.
     private var committedHandoff: NativePreparedUpdate?
     private var unconfirmedHandoff: NativePreparedUpdate?
     init(configuration: NativeUpdateConfiguration? = NativeUpdateConfiguration.load(),
          download: (@Sendable (NativeUpdateConfiguration) async throws -> (NativeUpdateManifest, URL))? = nil,
-         now: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) }) {
+         now: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) },
+         installation: (@MainActor () -> NativeUpdateInstallation?)? = nil,
+         prepare: (@Sendable (NativeUpdateManifest, URL, NativeUpdateConfiguration, URL, URL, URL) async throws -> NativePreparedUpdate)? = nil,
+         terminate: (@MainActor () -> Void)? = nil) {
         self.configuration = configuration; configured = configuration?.configured == true
         self.download = download ?? Self.prepareDownload; self.now = now
+        self.installation = installation ?? NativeUpdateInstallation.current
+        self.prepareInstallation = prepare ?? Self.prepareInstall
+        self.terminateApplication = terminate ?? { NSApp.terminate(nil) }
         if configured { status = "새 버전을 자동으로 확인합니다." }
     }
     func startAutomaticChecks() {
@@ -125,9 +159,8 @@ private struct NativeUpdateUnconfirmedCancellation: Error {
     }
     func install(beforeExit: @escaping @MainActor () -> Void) {
         guard let (manifest, stage) = pending, !checking, committedHandoff == nil, unconfirmedHandoff == nil, let configuration,
-              let executable = Bundle.main.executableURL, let configURL = Bundle.main.url(forResource: "NativeUpdateConfig", withExtension: "txt"),
-              Bundle.main.bundleURL.pathExtension == "app", !Bundle.main.bundleURL.path.hasPrefix("/Volumes/"),
-              FileManager.default.isWritableFile(atPath: Bundle.main.bundleURL.deletingLastPathComponent().path) else {
+              let installation = installation(), installation.app.pathExtension == "app", !installation.app.path.hasPrefix("/Volumes/"),
+              FileManager.default.isWritableFile(atPath: installation.app.deletingLastPathComponent().path) else {
             if !checking, committedHandoff == nil { discardPending() }
             status = "설치된 앱을 업데이트하려면 쓰기 가능한 Applications 폴더로 옮겨 주세요."; return
         }
@@ -136,9 +169,9 @@ private struct NativeUpdateUnconfirmedCancellation: Error {
         pending = nil; available = false
         checking = true; status = "업데이트를 설치할 준비를 하고 있습니다."
         generation &+= 1; let run = generation
-        let app = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let app = installation.app.resolvingSymlinksInPath(), prepare = prepareInstallation
         operation = Task { [weak self] in
-            let worker = Task.detached { try await Self.prepareInstall(manifest: manifest, stage: stage, configuration: configuration, executable: executable, configURL: configURL, app: app) }
+            let worker = Task.detached { try await prepare(manifest, stage, configuration, installation.executable, installation.configuration, app) }
             do {
                 let prepared = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
                 guard let self, self.generation == run, !Task.isCancelled else {
@@ -152,7 +185,7 @@ private struct NativeUpdateUnconfirmedCancellation: Error {
                 }
                 self.committedHandoff = prepared; self.checking = false; self.operation = nil
                 self.checks?.cancel(); self.checks = nil
-                beforeExit(); NSApp.terminate(nil)
+                beforeExit(); self.terminateApplication()
             } catch {
                 guard let self, self.generation == run else { return }
                 self.checking = false; self.operation = nil
@@ -222,6 +255,74 @@ private struct NativeUpdateUnconfirmedCancellation: Error {
     }
 }
 
+/// Helper-only cooperative TERM handling and exact command-child supervision.
+/// No PID scans or process-name kills. Lack of a drain proof suppresses cleanup.
+final class NativeUpdateHelperContext: @unchecked Sendable {
+    let stage: URL, nonce: String
+    private let lock = NSLock()
+    private var terminated = false
+    private var source: DispatchSourceSignal?
+    private(set) var writersConfirmed = true
+    init(stage: URL, nonce: String, installSignalHandlers: Bool = true) throws {
+        self.stage = stage; self.nonce = nonce
+        if installSignalHandlers {
+            signal(SIGTERM, SIG_IGN); signal(SIGPIPE, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .utility))
+            source.setEventHandler { [weak self] in
+                guard let self else { return }; self.lock.lock(); self.terminated = true; self.lock.unlock()
+            }
+            source.resume(); self.source = source
+        }
+        try Data(nonce.utf8).write(to: stage.appendingPathComponent("started-" + nonce), options: .withoutOverwriting)
+    }
+    deinit { source?.cancel() }
+    func check() throws {
+        lock.lock(); let stopping = terminated; lock.unlock()
+        guard !stopping, !FileManager.default.fileExists(atPath: stage.appendingPathComponent("cancel-" + nonce).path) else { throw NativeUpdateError.installation }
+    }
+    func command(_ path: String, _ args: [String]) throws -> String {
+        try check()
+        let process = Process(), pipe = Pipe(); process.executableURL = URL(fileURLWithPath: path); process.arguments = args
+        process.standardOutput = pipe; process.standardError = FileHandle.nullDevice; process.standardInput = FileHandle.nullDevice
+        try process.run(); try pipe.fileHandleForWriting.close()
+        defer { try? pipe.fileHandleForReading.close() }
+        let fd = pipe.fileHandleForReading.fileDescriptor, flags = fcntl(pipe.fileHandleForReading.fileDescriptor, F_GETFL)
+        var data = Data(), buffer = [UInt8](repeating: 0, count: 65_536), eof = false
+        do {
+            guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { throw NativeUpdateError.installation }
+            let deadline = Date().addingTimeInterval(1800)
+            while !eof || process.isRunning {
+                try check(); guard Date() < deadline else { throw NativeUpdateError.installation }
+                let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+                if count > 0 {
+                    guard data.count <= 8 * 1024 * 1024 - count else { throw NativeUpdateError.installation }
+                    data.append(contentsOf: buffer.prefix(count))
+                } else if count == 0 { eof = true }
+                else if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR { throw NativeUpdateError.installation }
+                if !eof || process.isRunning { Thread.sleep(forTimeInterval: 0.025) }
+            }
+            process.waitUntilExit(); guard process.terminationStatus == 0 else { throw NativeUpdateError.installation }
+            return String(decoding: data, as: UTF8.self)
+        } catch {
+            let stopped = NativeUpdateChildShutdown.stop(isRunning: { process.isRunning }, terminate: { process.terminate() },
+                kill: { _ = Darwin.kill(process.processIdentifier, SIGKILL) })
+            // EOF also proves no inherited output writer remains. A command
+            // whose completion cannot be proved must never license stage sweep.
+            var drained = eof
+            if stopped, !drained {
+                for _ in 0..<80 {
+                    let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+                    if count == 0 { drained = true; break }
+                    if count < 0, errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR { break }
+                    Thread.sleep(forTimeInterval: 0.025)
+                }
+            }
+            if !stopped || !drained { writersConfirmed = false }
+            throw error
+        }
+    }
+}
+
 /// Dispatch before creating any windows. This helper never initializes session/capture/file adapters.
 enum NativeUpdateHandoff {
     static func runIfRequested() {
@@ -238,27 +339,36 @@ enum NativeUpdateHandoff {
               let config = NativeUpdateConfiguration.load(stage.appendingPathComponent("NativeUpdateConfig.txt")), config.configured else { throw NativeUpdateError.installation }
         var info = stat()
         guard lstat(stage.path, &info) == 0, info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else { throw NativeUpdateError.installation }
+        let context = try NativeUpdateHelperContext(stage: stage, nonce: a[5])
+        var ownedReplacement: URL?, published = false
+        defer {
+            if !published {
+                if let ownedReplacement { try? FileManager.default.removeItem(at: ownedReplacement) }
+                if context.writersConfirmed, ownedReplacement == nil || !FileManager.default.fileExists(atPath: ownedReplacement!.path) {
+                    try? Data(a[5].utf8).write(to: stage.appendingPathComponent("cleanup-" + a[5]), options: .withoutOverwriting)
+                }
+            }
+        }
+        try context.check()
         let manifest = try NativeUpdateManifest.verify(Data(contentsOf: stage.appendingPathComponent("manifest.feed")), configuration: config, platform: "macos-arm64")
         let package = stage.appendingPathComponent("payload.zip"); try manifest.verifyFile(package)
         guard let installed = Bundle(url: app), installed.bundleIdentifier == "org.knot.native-preview",
               let installedVersion = installed.object(forInfoDictionaryKey: "KnotNativeVersion") as? String,
               try NativeUpdateManifest.versionBuild(installedVersion) < manifest.build else { throw NativeUpdateError.downgrade }
-        let names = try command("/usr/bin/zipinfo", ["-1", package.path])
-        let listing = try command("/usr/bin/zipinfo", ["-l", package.path])
+        let names = try context.command("/usr/bin/zipinfo", ["-1", package.path])
+        let listing = try context.command("/usr/bin/zipinfo", ["-l", package.path])
         try NativeUpdateArchiveInventory.validate(names: names, listing: listing)
         let extraction = stage.appendingPathComponent("expanded"); try FileManager.default.createDirectory(at: extraction, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        _ = try command("/usr/bin/ditto", ["-x", "-k", package.path, extraction.path])
+        _ = try context.command("/usr/bin/ditto", ["-x", "-k", package.path, extraction.path])
         let candidate = extraction.appendingPathComponent(app.lastPathComponent)
         guard let replacement = Bundle(url: candidate), replacement.bundleIdentifier == installed.bundleIdentifier,
               replacement.object(forInfoDictionaryKey: "KnotNativeVersion") as? String == manifest.version else { throw NativeUpdateError.installation }
-        _ = try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", candidate.path])
-        let transaction = try NativeUpdateTransaction.prepare(candidate: candidate, destination: app) { copied in
+        _ = try context.command("/usr/bin/codesign", ["--verify", "--deep", "--strict", candidate.path])
+        let transaction = try NativeUpdateTransaction.prepare(candidate: candidate, destination: app, onReplacement: { ownedReplacement = $0 }) { copied in
             guard let bundle = Bundle(url: copied), bundle.bundleIdentifier == installed.bundleIdentifier,
                   bundle.object(forInfoDictionaryKey: "KnotNativeVersion") as? String == manifest.version else { throw NativeUpdateError.installation }
-            _ = try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", copied.path])
+            _ = try context.command("/usr/bin/codesign", ["--verify", "--deep", "--strict", copied.path])
         }
-        var published = false
-        defer { if !published { transaction.discardPreparedCopy() } }
         // Every validation and same-volume atomic-exchange capability check above
         // must finish before the parent is allowed to leave its working window.
         try FileHandle.standardOutput.write(contentsOf: NativeUpdateAcknowledgement.receipt(a[5]))
@@ -266,15 +376,12 @@ enum NativeUpdateHandoff {
         // COMMIT, EOF binds the wait to the actual parent-owned pipe, not just a
         // recyclable numeric PID. A cancellation marker wins before publish.
         try NativeUpdateAcknowledgement.waitForCommitAndParentExit(readDescriptor: STDIN_FILENO, nonce: a[5])
-        let parentDeadline = Date().addingTimeInterval(180)
-        while kill(pid, 0) == 0 {
-            guard Date() < parentDeadline else { throw NativeUpdateError.installation }
-            Thread.sleep(forTimeInterval: 0.025)
-        }
-        guard errno == ESRCH, !FileManager.default.fileExists(atPath: stage.appendingPathComponent("cancel-" + a[5]).path) else { throw NativeUpdateError.installation }
+        // The complete COMMIT plus EOF is the process-lifetime proof. A
+        // recycled numeric PID must not strand an otherwise validated update.
         do {
+            try context.check()
             try transaction.publish(); published = true
-            _ = try command("/usr/bin/open", [app.path, "--args", "--knot-native-update-resume"])
+            _ = try context.command("/usr/bin/open", [app.path, "--args", "--knot-native-update-resume"])
             transaction.discardPreparedCopy()
             try? FileManager.default.removeItem(at: stage)
         } catch {
@@ -407,14 +514,15 @@ struct NativeUpdateTransaction {
     }
     static func prepare(candidate: URL, destination: URL,
                         probe: (URL) throws -> Void = NativeUpdateTransaction.probeAtomicExchange,
-                        validate: (URL) throws -> Void) throws -> NativeUpdateTransaction {
+                        onReplacement: (URL) -> Void = { _ in }, validate: (URL) throws -> Void) throws -> NativeUpdateTransaction {
         let parent = destination.deletingLastPathComponent()
         let installed = try Identity.directory(destination), parentIdentity = try Identity.directory(parent, owned: false)
         _ = try Identity.directory(candidate)
         try probe(parent)
         let replacement = parent.appendingPathComponent(".knot-native-update-" + UUID().uuidString + ".app")
-        try FileManager.default.copyItem(at: candidate, to: replacement)
+        onReplacement(replacement)
         do {
+            try FileManager.default.copyItem(at: candidate, to: replacement)
             try validate(replacement)
             let prepared = try Identity.directory(replacement)
             guard prepared.device == installed.device else { throw NativeUpdateError.installation }

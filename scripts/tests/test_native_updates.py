@@ -22,7 +22,7 @@ class NativeUpdates(unittest.TestCase):
             expected = 'Knot-Native-0.1.0-native.16' + suffix
             args = dict(current_version='0.1.0-native.16', platform=platform, size=5, sha256='a'*64, expires=150, now=100)
             self.assertTrue(u.manifest(url='https://example.com/releases/' + expected, **args))
-            for name in ['x' + expected, expected + '/extra', '%4b' + expected[1:], expected + '/']:
+            for name in ['x' + expected, expected + '/extra', '%4b' + expected[1:], expected + '/', expected + '?', expected + '#']:
                 with self.assertRaises(ValueError):
                     u.manifest(url='https://example.com/releases/' + name, **args)
     def test_unconfigured_and_partial_rejected(self):
@@ -32,7 +32,7 @@ class NativeUpdates(unittest.TestCase):
             d['macFeedURL']='https://example.com/feed'; f.write_text(json.dumps(d))
             with self.assertRaises((ValueError,TypeError)): u.publisher(t)
     def test_bad_urls(self):
-        for x in ['http://example.com/x', 'https://user@example.com/x', 'https://localhost/x', 'https://example.com:12/x', 'https://example.com/x?q=1', 'https://example.com/x\n']:
+        for x in ['http://example.com/x', 'https://user@example.com/x', 'https://localhost/x', 'https://example.com:12/x', 'https://example.com/x?q=1', 'https://example.com/x?', 'https://example.com/x#', 'https://example.com/x\n']:
             with self.assertRaises(ValueError): u.https(x)
 
 if __name__ == '__main__': unittest.main()

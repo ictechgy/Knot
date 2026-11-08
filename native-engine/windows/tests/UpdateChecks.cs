@@ -33,6 +33,7 @@ namespace Knot.NativePreview
                 string expected = "Knot-Native-0.1.0-native.11-windows-x64-setup.exe";
                 foreach (string name in new[] { "x" + expected, "%4b" + expected.Substring(1), expected + "/", expected + "/extra" })
                     UpdateReject(delegate { NativeUpdateManifest.Verify(UpdateEnvelope(body.Replace(expected, name), rsa), c, "windows-x64", 100); });
+                UpdateInstallStateChecks(c, m);
                 var newer = new NativeUpdateConfiguration("0.1.0-native.11\nhttps://example.com/mac.feed\nhttps://example.com/windows.feed\n" + Convert.ToBase64String(p.Modulus) + "\n" + Convert.ToBase64String(p.Exponent) + "\n");
                 bool current = false; try { NativeUpdateManifest.Verify(envelope, newer, "windows-x64", 100); } catch (NativeUpdateCurrentException) { current = true; } Check(current);
             }
@@ -74,6 +75,53 @@ namespace Knot.NativePreview
         }
         private sealed class UpdateFakeChild : IDisposable
         { internal bool Disposed; public void Dispose() { Disposed = true; } }
+        private static void UpdateInstallStateChecks(NativeUpdateConfiguration configuration, NativeUpdateManifest manifest)
+        {
+            Check(!NativeUpdateRecovery.MayReopenOriginal(true, false, false, true)); // installer timeout
+            Check(NativeUpdateRecovery.MayReopenOriginal(false, false, false, true)); // failure before mutation
+            Check(NativeUpdateRecovery.MayReopenOriginal(true, true, false, true)); // terminal failure, original intact
+            Check(!NativeUpdateRecovery.MayReopenOriginal(true, true, false, false)); // unknown/mutated canonical
+            Check(!NativeUpdateRecovery.MayReopenOriginal(true, true, true, true)); // no old-app recovery on success
+            string stage = NativeUpdatePaths.CreateStage();
+            bool fakeExited = false; var fake = new UpdateFakeChild();
+            NativeUpdates model = null;
+            try {
+                model = new NativeUpdates(configuration, delegate(string holding, NativeUpdateManifest value, string nonce, System.Threading.CancellationToken token) {
+                    return new NativeUpdateAttempt(delegate { NativeUpdateHandoff.WriteSignal(holding, nonce, "cancel"); }, delegate { },
+                        delegate { return fakeExited; }, delegate { fakeExited = true; }, delegate(int wait) { return fakeExited; }, fake);
+                }, manifest, stage);
+                Check(!model.InstallAsync(delegate { throw new InvalidOperationException("synthetic beforeExit failure"); }).GetAwaiter().GetResult());
+                Check(!model.Available && !model.Busy && fake.Disposed && !Directory.Exists(stage));
+            } finally { if (model != null) model.Dispose(); if (Directory.Exists(stage)) Directory.Delete(stage, true); }
+            stage = NativeUpdatePaths.CreateStage(); fakeExited = false; fake = new UpdateFakeChild();
+            int disposePhase = 0, caller = System.Threading.Thread.CurrentThread.ManagedThreadId;
+            using (var completed = new System.Threading.ManualResetEvent(false)) {
+                try {
+                    model = new NativeUpdates(configuration, delegate(string holding, NativeUpdateManifest value, string nonce, System.Threading.CancellationToken token) {
+                        return new NativeUpdateAttempt(delegate { NativeUpdateHandoff.WriteSignal(holding, nonce, "cancel"); }, delegate { },
+                            delegate { return fakeExited; }, delegate { }, delegate(int wait) {
+                                if (System.Threading.Interlocked.CompareExchange(ref disposePhase, 0, 0) == 0) return false;
+                                Check(System.Threading.Thread.CurrentThread.ManagedThreadId != caller); fakeExited = true; completed.Set(); return true;
+                            }, fake);
+                    }, manifest, stage);
+                    Check(!model.InstallAsync(delegate { throw new InvalidOperationException("synthetic retained child"); }).GetAwaiter().GetResult());
+                    Check(model.Busy && model.Available && Directory.Exists(stage) && !fake.Disposed);
+                    System.Threading.Interlocked.Exchange(ref disposePhase, 1); model.Dispose();
+                    Check(completed.WaitOne(2000)); Check(System.Threading.SpinWait.SpinUntil(delegate { return !model.Busy; }, 2000));
+                    Check(System.Threading.SpinWait.SpinUntil(delegate { return !Directory.Exists(stage); }, 2000));
+                    Check(fake.Disposed);
+                } finally { if (Directory.Exists(stage)) Directory.Delete(stage, true); }
+            }
+            stage = NativeUpdatePaths.CreateStage(); fakeExited = false; fake = new UpdateFakeChild();
+            try {
+                model = new NativeUpdates(configuration, delegate(string holding, NativeUpdateManifest value, string nonce, System.Threading.CancellationToken token) {
+                    return new NativeUpdateAttempt(delegate { }, delegate { throw new Exception("committed helper must not be cleaned by parent"); },
+                        delegate { return fakeExited; }, delegate { }, delegate(int wait) { return false; }, fake);
+                }, manifest, stage);
+                Check(model.InstallAsync(delegate { model.Dispose(); }).GetAwaiter().GetResult());
+                Check(!model.Available && !model.Busy && Directory.Exists(stage) && fake.Disposed);
+            } finally { if (Directory.Exists(stage)) Directory.Delete(stage, true); }
+        }
         private static byte[] UpdateEnvelope(string text, RSACryptoServiceProvider key)
         {
             byte[] body = Encoding.ASCII.GetBytes(text), signature = key.SignData(body, CryptoConfig.MapNameToOID("SHA256"));
