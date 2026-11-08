@@ -86,6 +86,15 @@ namespace Knot.NativePreview
             Check(old.Fps == 60 && old.Bitrate == 12000000 && quality.TakeStatus() == null);
             quality.CommitProfile(text, 1); byte[] status = quality.TakeStatus();
             Check(NativeProtocol.U32(status, 0) == 30 && NativeProtocol.U32(status, 4) == 40000000);
+            AdaptiveQualityFixture unsupported = new AdaptiveQualityFixture(); unsupported.Information = nominal; unsupported.Supports = false;
+            NativeQualityController unavailable = new NativeQualityController(nominal);
+            unavailable.Handle(new Packet(0x32, new byte[] { 2 }));
+            PreparedVideoQuality unchanged = unavailable.PrepareProfile(unsupported, profile, null);
+            Check(!unchanged.Supported && unchanged.Info.Fps == 60 && unchanged.Info.Bitrate == 40000000 && unsupported.Applied.Count == 1);
+            unavailable.CommitProfile(unchanged, 1); byte[] unsupportedStatus = unavailable.TakeStatus();
+            Check(unsupportedStatus[8] == 0 && NativeProtocol.U32(unsupportedStatus, 0) == 60 && NativeProtocol.U32(unsupportedStatus, 4) == 40000000);
+            for (int i = 0; i < 20; ++i) unavailable.Apply(unsupported, (i + 1L) * 2L * Stopwatch.Frequency);
+            Check(unsupported.Applied.Count == 1);
             // Auto still owns the full requested ceiling after Text's first AU.
             quality.Handle(new Packet(0x32, new byte[] { 0 }));
             long now = 2;

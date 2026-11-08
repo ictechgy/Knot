@@ -24,7 +24,7 @@ struct NativeIdleVideoSettings: View {
                     Text("\(value)분 후").tag(value)
                 }
             }.pickerStyle(.menu)
-            Toggle("다른 앱이나 Space를 사용할 때만", isOn: Binding(get: { backgroundOnly }, set: { onInteraction(); backgroundOnly = $0 }))
+            Toggle("다른 앱을 사용할 때만", isOn: Binding(get: { backgroundOnly }, set: { onInteraction(); backgroundOnly = $0 }))
                 .disabled(minutes == 0)
             Text(backgroundOnly ? "이 앱으로 돌아오면 영상을 다시 준비해요. 파일·소리·연결은 유지돼요." :
                     "원격 입력이 없으면 영상과 입력을 쉬어요. 영상을 보고만 있어도 멈출 수 있어요.")
@@ -158,10 +158,11 @@ private struct NativeVideoPolicyPicker: View {
             })) {
                 ForEach(QualityModel.Preference.allCases) { value in Text(value.title).tag(value.rawValue) }
             }.pickerStyle(.menu).disabled(disabled)
-            Text(quality.preference == .sharp ? "글자 선명도 우선은 최대 30fps로 조절해요." :
-                    quality.preference == .responsive ? "반응 우선은 목표 전송률을 최대 20Mbps로 조절해요." :
+            Text(quality.preference == .sharp ? "지원하는 인코더에서 최대 30fps로 조절해요." :
+                    quality.preference == .responsive ? "지원하는 인코더에서 목표 전송률을 최대 20Mbps로 조절해요." :
                     "자동은 요청한 범위 안에서 처리 부하에 맞춰 조절해요.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(quality.status).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

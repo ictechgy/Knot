@@ -253,7 +253,7 @@ struct NativeVisualFixture {
         Group {
             if let convenience { FixtureConvenienceSurface(model: model, clipboard: convenience.clipboard, quality: convenience.quality) }
             else if let video, ["video-settings", "video-rollback", "video-unsupported"].contains(state) {
-                NativeVideoSettingsPanel(video: video.model, quality: nil, idleMinutes: .constant(10),
+                NativeVideoSettingsPanel(video: video.model, quality: video.quality, idleMinutes: .constant(10),
                     idleBackgroundOnly: .constant(true), beforeAction: {})
                     .frame(maxWidth: .infinity, maxHeight: .infinity).background(NativeStyle.canvas)
             }
@@ -505,11 +505,17 @@ private final class FixtureEnrollmentEffects: @unchecked Sendable {
 /// Local state-machine commands and authored replies, never an adapter or socket.
 @MainActor private struct FixtureVideoModels {
     let model: VideoControlModel
+    let quality: QualityModel
     init?(state: String) throws {
         guard state.hasPrefix("video-") else { return nil }
         let profile = VideoProfile(width: 3840, height: 2160, fps: 30, bitrate: 40_000_000)
         let value = VideoControlModel(actual: profile, send: { _ in true })
         model = value
+        quality = QualityModel(send: { _ in true })
+        if state == "video-unsupported" { quality.choose(.responsive) }
+        var effectiveQuality = Data(); effectiveQuality.appendBE(UInt32(profile.fps)); effectiveQuality.appendBE(UInt32(profile.bitrate))
+        effectiveQuality.append(state == "video-unsupported" ? 0 : 1)
+        quality.accept(effectiveQuality)
         func reply(_ outcome: VideoControlOutcome, reason: VideoControlReason = .none,
                    state: VideoControlState = .running, epoch: UInt64 = 0, next: UInt64 = 0) throws {
             guard let request = value.pending else { throw FixtureError.phase }

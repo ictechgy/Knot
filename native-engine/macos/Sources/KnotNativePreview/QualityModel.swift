@@ -29,6 +29,6 @@ final class QualityModel: ObservableObject {
         func uint(_ at: Int) -> UInt32 { bytes[at..<at+4].reduce(0) { ($0 << 8) | UInt32($1) } }
         let fps = uint(0), bitrate = uint(4)
         guard (1...60).contains(fps), (1_000_000...40_000_000).contains(bitrate), bytes[8] <= 1 else { return }
-        status = bytes[8] == 1 ? "현재 최대 \(fps)fps · \(bitrate / 1_000_000)Mbps" : "이 인코더는 연결 중 화질 변경을 지원하지 않아요. 현재 설정을 유지해요."
+        status = bytes[8] == 1 ? "현재 최대 \(fps)fps · \(bitrate / 1_000_000)Mbps" : "이 인코더는 자동 FPS·전송률 조정을 지원하지 않아 현재 값을 유지해요."
     }
 }

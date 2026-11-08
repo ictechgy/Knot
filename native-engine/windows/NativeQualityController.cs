@@ -9,6 +9,7 @@ namespace Knot.NativePreview
     {
         internal MediaInfo Info;
         internal MediaConfig Profile;
+        internal bool Supported = true;
         internal long PreferenceRevision, ReceiverRevision, WriteRevision;
     }
 
@@ -98,7 +99,12 @@ namespace Knot.NativePreview
             IAdaptiveMediaSource adaptive = source as IAdaptiveMediaSource;
             if ((info.Fps != prepared.Info.Fps || info.Bitrate != prepared.Info.Bitrate) &&
                 (adaptive == null || !adaptive.TrySetQuality(prepared.Info.Fps, prepared.Info.Bitrate)))
-                throw new ProtocolException("encoder");
+            {
+                // A nonthrowing unsupported adjustment leaves the actual newly
+                // opened source unchanged, exactly as quality-v1 does. Publish
+                // that truthful cadence and suppress automatic retry churn.
+                prepared.Info = info; prepared.Supported = false;
+            }
             return prepared;
         }
         internal void CommitProfile(PreparedVideoQuality prepared, long now)
@@ -111,7 +117,7 @@ namespace Knot.NativePreview
                 // tick. Never erase them when publishing the primed profile.
                 if (receiverRevision == prepared.ReceiverRevision) receiverPressure = false;
                 if (writeRevision == prepared.WriteRevision) writePressure = false;
-                healthy = 0; supported = true; changed = true;
+                healthy = 0; supported = prepared.Supported; changed = true;
                 nextChange = preferenceRevision == prepared.PreferenceRevision ? now + 2L * Stopwatch.Frequency : 0;
             }
         }

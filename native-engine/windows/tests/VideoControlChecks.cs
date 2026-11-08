@@ -69,6 +69,7 @@ namespace Knot.NativePreview
             VideoControlFailedResumeStaysPaused();
             VideoControlPrimeFailure();
             VideoControlPolicyTransitions();
+            VideoControlUnsupportedPolicyTransitions();
             VideoControlDrainFailure(1, 1, "encoder");
             VideoControlDrainFailure(2, 2, "capture");
             VideoControlDrainFailure(3, 1, "encoder");
@@ -99,11 +100,12 @@ namespace Knot.NativePreview
             internal readonly List<uint[]> FirstReads = new List<uint[]>();
             internal readonly ManualResetEvent OpenEntered = new ManualResetEvent(false), ContinueOpen = new ManualResetEvent(true);
             internal readonly ManualResetEvent DrainEntered = new ManualResetEvent(false), ContinueDrain = new ManualResetEvent(true);
-            internal int Opened, Closed, Reads, DrainReads, Active, PeakActive, Attempts, BlockAttempt, DrainFailure;
-            internal bool SameThread = true, GateDrain;
+            internal int Opened, Closed, Reads, DrainReads, Active, PeakActive, Attempts, BlockAttempt, DrainFailure, QualitySetAttempts;
+            internal bool SameThread = true, GateDrain, SupportsLiveQuality = true;
+            internal MediaConfig? StartingProfile;
             internal volatile bool FailRollback;
             private int ownerThread;
-            public MediaConfig InitialConfig { get { return new MediaConfig { Width = 1920, Height = 1080, Fps = 60, Bitrate = 12000000 }; } }
+            public MediaConfig InitialConfig { get { return StartingProfile ?? new MediaConfig { Width = 1920, Height = 1080, Fps = 60, Bitrate = 12000000 }; } }
             public IMediaSource Open() { return Open(InitialConfig); }
             public IMediaSource Open(MediaConfig config)
             {
@@ -168,7 +170,13 @@ namespace Knot.NativePreview
                     if (!drained) { drained = true; return Unit(buffer, false, out written, out flags, out timestamp); }
                     written = flags = 0; timestamp = 0; return 2;
                 }
-                public bool TrySetQuality(uint fps, uint bitrate) { owner.CheckThread(); Check(!disposed && !draining && fps <= config.Fps && bitrate <= config.Bitrate); effectiveFps = fps; effectiveBitrate = bitrate; return true; }
+                public bool TrySetQuality(uint fps, uint bitrate)
+                {
+                    owner.CheckThread(); Check(!disposed && !draining && fps <= config.Fps && bitrate <= config.Bitrate);
+                    Interlocked.Increment(ref owner.QualitySetAttempts);
+                    if (!owner.SupportsLiveQuality) return false;
+                    effectiveFps = fps; effectiveBitrate = bitrate; return true;
+                }
                 public void Dispose()
                 {
                     owner.CheckThread(); Check(!disposed); disposed = true;
@@ -379,6 +387,59 @@ namespace Knot.NativePreview
             Check(statuses.Count > 0); Packet latest = statuses[statuses.Count - 1];
             Check(NativeProtocol.U32(latest.Payload, 0) == fps && NativeProtocol.U32(latest.Payload, 4) == bitrate &&
                 NativeProtocol.U32(status.Payload, 29) == fps && NativeProtocol.U32(status.Payload, 33) == bitrate);
+        }
+        private static void VideoControlUnsupportedPolicyTransitions()
+        {
+            long ticks = 0;
+            using (VideoFixtureFactory factory = new VideoFixtureFactory())
+            {
+                factory.StartingProfile = MediaQualityProfile.Sharp4K.Config; factory.SupportsLiveQuality = false;
+                using (HostServer server = VideoHost(factory, new FakeInput(), delegate { return Interlocked.Read(ref ticks); }))
+                {
+                    string token = Token(server); server.Start();
+                    using (TlsClient client = new TlsClient(server, server.Pin))
+                    {
+                        client.Send(1, VideoHello(token)); Check(client.ReadNonHeartbeat().Kind == 2);
+                        List<Packet> videos = new List<Packet>(), statuses = new List<Packet>();
+                        client.Send(0x32, new byte[] { 2 });
+                        Packet status;
+                        do {
+                            status = client.Read();
+                            if (status.Kind == 3) videos.Add(status);
+                            if (status.Kind == 0x34) statuses.Add(status);
+                        } while (status.Kind != 0x34 || status.Payload[8] != 0);
+                        Check(NativeProtocol.U32(status.Payload, 0) == 30 && NativeProtocol.U32(status.Payload, 4) == 40000000);
+                        client.Send(0x35, VideoRequest(1, 1, 2560, 1440, 60, 40000000));
+                        CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 1, 0, 0, 0, 0, 0);
+                        Packet applied = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(applied, 1, 1, 1, 0, 0, 3);
+                        CheckQualityBeforeVideoStatus(statuses, applied, 60, 40000000); Check(statuses[statuses.Count - 1].Payload[8] == 0);
+                        Packet fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1);
+                        Check(factory.FirstReads[1][1] == 60 && factory.FirstReads[1][2] == 40000000 && server.IsActive);
+                        int attempts = factory.QualitySetAttempts, reads = factory.Reads;
+                        WaitFor(delegate { return factory.Reads >= reads + 4; }); Check(factory.QualitySetAttempts == attempts);
+                        Interlocked.Exchange(ref ticks, 3L * Stopwatch.Frequency);
+                        client.Send(0x35, VideoRequest(2, 2)); CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 2, 1, 0, 0, 0, 0);
+                        CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 2, 1, 1, 0, 1, 0);
+                        Interlocked.Exchange(ref ticks, 6L * Stopwatch.Frequency);
+                        client.Send(0x35, VideoRequest(3, 3)); CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 3, 1, 0, 0, 1, 0);
+                        applied = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(applied, 3, 2, 1, 0, 0, 5);
+                        CheckQualityBeforeVideoStatus(statuses, applied, 60, 40000000); Check(statuses[statuses.Count - 1].Payload[8] == 0);
+                        fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1 && server.IsActive);
+                        Check(factory.FirstReads[2][1] == 60 && factory.FirstReads[2][2] == 40000000);
+                        Interlocked.Exchange(ref ticks, 9L * Stopwatch.Frequency);
+                        client.Send(0x35, VideoRequest(1, 4, 2560, 1440, 60, 13000000));
+                        CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 4, 2, 0, 0, 0, 0);
+                        Packet rollback = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(rollback, 4, 3, 3, 4, 0, 7);
+                        CheckQualityBeforeVideoStatus(statuses, rollback, 60, 40000000); Check(statuses[statuses.Count - 1].Payload[8] == 0);
+                        fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1 && server.IsActive);
+                        Check(factory.FirstReads[3][1] == 60 && factory.FirstReads[3][2] == 40000000);
+                        attempts = factory.QualitySetAttempts; reads = factory.Reads;
+                        WaitFor(delegate { return factory.Reads >= reads + 4; }); Check(factory.QualitySetAttempts == attempts && attempts == 4);
+                        server.Stop(); Check(server.WaitStopped(4000));
+                        Check(factory.Attempts == 5 && factory.Opened == 4 && factory.Closed == 4 && factory.Active == 0 && factory.PeakActive == 1 && factory.SameThread);
+                    }
+                }
+            }
         }
         private static void VideoControlDrainFailure(int failure, byte operation, string expectedCode)
         {
