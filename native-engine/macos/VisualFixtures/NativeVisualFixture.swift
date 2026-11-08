@@ -376,6 +376,8 @@ struct NativeVisualFixture {
             model.phase = .streaming; model.systemWillSleep()
         case "wake-reconnect":
             model.phase = .streaming; model.systemWillSleep(); model.systemDidWake()
+            model.diagnostics.record(.silenceDeadline)
+            model.diagnostics.record(.transport)
         case "reviewed", "invalid-name":
             let body: [String: Any] = ["v": 1, "address": "192.168.50.24", "port": 48631,
                 "certificateSHA256": String(repeating: "0123456789abcdef", count: 4),
@@ -408,6 +410,7 @@ struct NativeVisualFixture {
         case "failed":
             model.phase = .failed
             model.status = "Connection ended or validation failed. Ask the host for a new invitation."
+            model.diagnostics.record(.protocolFailure)
         default: break
         }
         return model

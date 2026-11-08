@@ -43,8 +43,10 @@ private func inertInvitation() throws -> Invitation {
 }
 @MainActor private final class InertRetryWait {
     private var pending: CheckedContinuation<Void, any Error>?
+    private(set) var delays: [Duration] = []
     var waiting: Bool { pending != nil }
     func wait(_ delay: Duration) async throws {
+        delays.append(delay)
         try await withCheckedThrowingContinuation { pending = $0 }
     }
     func advance() { let waiter = pending; pending = nil; waiter?.resume() }
@@ -72,16 +74,24 @@ struct TrustedReconnectTests {
         for _ in 0..<20 { await Task.yield() }
         #expect(attempts.count == 0)
     }
-    @Test @MainActor func transientFailuresStopAtSixRetriesWithoutOSAdapters() async throws {
-        let device = try inertSavedDevice(), attempts = TrustedAttemptRecorder()
-        let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
-            waitForReconnect: { _ in await Task.yield() }, initialSavedDevices: [device])
+    @Test @MainActor func longOutageKeepsCappedBackoffAndRecoversAfterTheFormerSixRetryLimit() async throws {
+        let device = try inertSavedDevice(), invitation = try inertInvitation()
+        let attempts = TrustedAttemptRecorder(), gate = InertRetryWait(), channel = HeldReconnectChannel()
+        let model = SessionModel(makeChannel: { _ in channel }, makeTrustedClient: { _, _ in
+            if attempts.count < 12 { return FailingTrustedClient(.transport, attempts) }
+            return SuccessfulTrustedClient(invitation)
+        }, waitForReconnect: { try await gate.wait($0) }, initialSavedDevices: [device])
+        defer { model.disconnect(); gate.advance() }
         model.connectSaved(device.id)
-        #expect(await waitForTrustedState { attempts.count == 7 && model.phase == .failed && !model.hasPendingReconnect })
-        #expect(model.reconnectAttemptCount == 6)
-        for _ in 0..<20 { await Task.yield() }
-        #expect(attempts.count == 7)
-        model.disconnect()
+        for attempt in 1...12 {
+            #expect(await waitForTrustedState { attempts.count == attempt && gate.waiting })
+            #expect(model.hasPendingReconnect && model.reconnectAttemptCount == min(attempt, 6))
+            #expect(!model.status.contains("/6"))
+            gate.advance()
+        }
+        #expect(await waitForTrustedState { model.phase == .approval && channel.isReading })
+        #expect(gate.delays == [1, 2, 4, 8, 16, 30, 30, 30, 30, 30, 30, 30].map { Duration.seconds($0) })
+        #expect(!model.hasPendingReconnect && attempts.count == 12)
     }
     @Test @MainActor func trustAndMalformedFailuresNeverScheduleRetry() async throws {
         let device = try inertSavedDevice()
@@ -251,7 +261,7 @@ struct TrustedReconnectTests {
 }
 
 
-@Test @MainActor func updaterRestoresPendingRecoveryButNeverExhaustedRetrySelection() async throws {
+@Test @MainActor func updaterRestoresPendingRecoveryAcrossAnExtendedOutage() async throws {
     let device = try inertSavedDevice(), pending = InertRetryWait(), activeStore = InertUpdateResume()
     let attempts = TrustedAttemptRecorder()
     let waiting = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
@@ -261,14 +271,20 @@ struct TrustedReconnectTests {
     #expect(await waitForTrustedState { pending.waiting })
     waiting.prepareForUpdate(); pending.advance()
     #expect(activeStore.value?.0 == device.id && !waiting.hasPendingReconnect)
-    let exhaustedStore = InertUpdateResume(), exhaustedAttempts = TrustedAttemptRecorder()
-    let exhausted = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, exhaustedAttempts) },
-        waitForReconnect: { _ in await Task.yield() }, initialSavedDevices: [device],
-        writeUpdateResume: { exhaustedStore.write($0, $1) }, takeUpdateResume: { exhaustedStore.take() })
-    exhausted.connectSaved(device.id)
-    #expect(await waitForTrustedState { exhaustedAttempts.count == 7 && exhausted.phase == .failed && !exhausted.hasPendingReconnect })
-    exhausted.prepareForUpdate()
-    #expect(exhaustedStore.writes.count == 1 && exhaustedStore.value == nil)
+    let extendedStore = InertUpdateResume(), extendedAttempts = TrustedAttemptRecorder(), extendedWait = InertRetryWait()
+    let extended = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, extendedAttempts) },
+        waitForReconnect: { try await extendedWait.wait($0) }, initialSavedDevices: [device],
+        writeUpdateResume: { extendedStore.write($0, $1) }, takeUpdateResume: { extendedStore.take() })
+    defer { extended.disconnect(); extendedWait.advance() }
+    extended.connectSaved(device.id)
+    for attempt in 1...8 {
+        #expect(await waitForTrustedState { extendedAttempts.count == attempt && extendedWait.waiting })
+        if attempt < 8 { extendedWait.advance() }
+    }
+    #expect(extended.hasPendingReconnect && extended.reconnectAttemptCount == 6)
+    extended.prepareForUpdate(); extendedWait.advance()
+    #expect(extendedStore.writes.count == 1 && extendedStore.value?.0 == device.id)
+    #expect(!extended.hasPendingReconnect)
 }
 
 
@@ -327,4 +343,166 @@ private func inertNumberEnrollment() throws -> AuthenticatedEnrollment {
     active.phase = .streaming; active.autoReconnect = false
     active.prepareForUpdate()
     #expect(store.value == nil && store.writes.count == 1 && attempts.count == 0)
+}
+
+// Synthetic blocked transport: no sockets, OS capture, clipboard or activity IO.
+private final class HeldReconnectChannel: NativeChannel, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: CheckedContinuation<Data, any Error>?
+    private var closed = false
+    var isReading: Bool { lock.withLock { pending != nil } }
+    func start() async throws {}
+    func send(_ packet: Packet) async throws {}
+    func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if closed { lock.unlock(); continuation.resume(throwing: NativeFailure.transport) }
+            else { pending = continuation; lock.unlock() }
+        }
+    }
+    func close() {
+        lock.lock(); closed = true; let owned = pending; pending = nil; lock.unlock()
+        owned?.resume(throwing: NativeFailure.transport)
+    }
+}
+private final class ActivityRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var starts = 0, stops = 0
+    var counts: (Int, Int) { lock.withLock { (starts, stops) } }
+    func make() -> NativeConnectionActivity {
+        NativeConnectionActivity(begin: { self.lock.withLock { self.starts += 1 }; return NSObject() },
+                                 end: { _ in self.lock.withLock { self.stops += 1 } })
+    }
+}
+
+@Test func connectionActivityEndsExactlyOnceAndAllowsIdleSystemSleep() {
+    let recorder = ActivityRecorder()
+    var lease: NativeConnectionActivity? = recorder.make()
+    #expect(recorder.counts == (1, 0))
+    lease?.stop(); lease?.stop(); lease = nil
+    #expect(recorder.counts == (1, 1))
+    do { let scoped = recorder.make(); withExtendedLifetime(scoped) {} }
+    #expect(recorder.counts == (2, 2))
+    #expect(NativeConnectionActivity.options == .userInitiatedAllowingIdleSystemSleep)
+    #expect(!NativeConnectionActivity.options.contains(.idleSystemSleepDisabled))
+    #expect(!NativeConnectionActivity.options.contains(.idleDisplaySleepDisabled))
+}
+
+@Test(arguments: ["disconnect", "autoOff", "forget", "newTarget"])
+@MainActor func extendedRecoveryActivityEndsOnOwnerCancellationAndRejectsLateRetry(_ action: String) async throws {
+    let device = try inertSavedDevice(), attempts = TrustedAttemptRecorder(), retry = InertRetryWait()
+    let activities = ActivityRecorder()
+    let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
+        waitForReconnect: { try await retry.wait($0) }, initialSavedDevices: [device], removeSavedDevice: { _ in },
+        makeConnectionActivity: { activities.make() })
+    defer { model.disconnect(); retry.advance() }
+    model.connectSaved(device.id)
+    for attempt in 1...8 {
+        #expect(await waitForTrustedState { attempts.count == attempt && retry.waiting })
+        if attempt < 8 { retry.advance() }
+    }
+    #expect(activities.counts == (1, 0) && model.hasPendingReconnect)
+    switch action {
+    case "disconnect": model.disconnect()
+    case "autoOff": model.autoReconnect = false
+    case "forget": model.forgetSaved(device.id)
+    default: model.prepareForNewTarget()
+    }
+    #expect(activities.counts == (1, 1) && !model.hasPendingReconnect)
+    retry.advance()
+    for _ in 0..<30 { await Task.yield() }
+    #expect(!model.active && !model.hasPendingReconnect && activities.counts == (1, 1))
+}
+
+@Test @MainActor func activeConnectionKeepsActivityWithAutomaticReconnectOffAndSleepReleasesIt() async throws {
+    let device = try inertSavedDevice(), invitation = try inertInvitation(), channel = HeldReconnectChannel()
+    let activities = ActivityRecorder(), wake = InertRetryWait()
+    let model = SessionModel(makeChannel: { _ in channel }, makeTrustedClient: { _, _ in SuccessfulTrustedClient(invitation) },
+        waitForWakeReadiness: { try await wake.wait(.seconds(2)) }, initialSavedDevices: [device],
+        makeConnectionActivity: { activities.make() })
+    defer { model.disconnect(); wake.advance() }
+    model.connectSaved(device.id)
+    #expect(await waitForTrustedState { model.phase == .approval && channel.isReading })
+    model.autoReconnect = false
+    #expect(activities.counts == (1, 0)) // The live heartbeat still needs timely scheduling.
+    model.autoReconnect = true
+    model.systemWillSleep()
+    #expect(activities.counts == (1, 1) && model.isSystemSleeping && model.hasPendingReconnect)
+    model.systemDidWake()
+    #expect(await waitForTrustedState { wake.waiting })
+    #expect(activities.counts == (2, 1))
+    model.disconnect(); wake.advance()
+    for _ in 0..<20 { await Task.yield() }
+    #expect(activities.counts == (2, 2) && !model.active && !model.hasPendingReconnect)
+}
+
+@Test @MainActor func terminalFailuresReleaseConnectionActivityWithoutRetry() async throws {
+    let device = try inertSavedDevice()
+    for failure in [NativeFailure.trust, .certificatePinMismatch, .certificatePolicy, .malformed, .decoder] {
+        let activities = ActivityRecorder(), attempts = TrustedAttemptRecorder()
+        let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(failure, attempts) },
+            waitForReconnect: { _ in Issue.record("Terminal failure cannot recover") }, initialSavedDevices: [device],
+            makeConnectionActivity: { activities.make() })
+        model.connectSaved(device.id)
+        #expect(await waitForTrustedState { model.phase == .failed })
+        #expect(!model.hasPendingReconnect && activities.counts == (1, 1))
+        model.systemWillSleep(); model.systemDidWake()
+        #expect(activities.counts == (1, 1) && !model.hasPendingReconnect)
+        model.disconnect()
+    }
+}
+
+@Test @MainActor func onlyCurrentRegisteredPreReadyBusyAndTimeoutResponsesKeepRecovery() async throws {
+    let device = try inertSavedDevice()
+    for phase in [SessionModel.Phase.approval, .decoding, .streaming] {
+        for registered in [false, true] {
+            for code in ["timeout", "busy", "auth", "expired", "capture", "input", "protocol"] {
+                let retry = InertRetryWait()
+                let model = SessionModel(waitForReconnect: { try await retry.wait($0) },
+                    initialSavedDevices: registered ? [device] : [], initialRegisteredDevice: registered ? device : nil)
+                defer { model.disconnect(); retry.advance() }
+                model.phase = phase
+                model.handleHostError(code)
+                let recovers = registered && phase == .approval && ["timeout", "busy"].contains(code)
+                #expect(model.hasPendingReconnect == recovers)
+                #expect(model.phase == .failed)
+                if recovers { #expect(await waitForTrustedState { retry.waiting }) }
+            }
+        }
+    }
+    let disabled = SessionModel(initialSavedDevices: [device], initialRegisteredDevice: device)
+    disabled.autoReconnect = false; disabled.phase = .approval; disabled.handleHostError("timeout")
+    #expect(!disabled.hasPendingReconnect)
+}
+
+private final class ReconnectErrorChannel: NativeChannel, @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: Data
+    init(_ code: String) { bytes = Packet(kind: .error, payload: Data("{\"code\":\"\(code)\"}".utf8)).encoded }
+    func start() async throws {}
+    func send(_ packet: Packet) async throws {}
+    func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
+        try lock.withLock {
+            guard count <= bytes.count else { throw NativeFailure.transport }
+            let value = Data(bytes.prefix(count)); bytes.removeFirst(count); return value
+        }
+    }
+    func close() { lock.withLock { bytes.removeAll() } }
+}
+
+@Test @MainActor func framedPreReadyTimeoutUsesFreshTrustedRecoveryWithoutDiscardingSavedCredential() async throws {
+    let device = try inertSavedDevice(), invitation = try inertInvitation()
+    let retry = InertRetryWait(), activities = ActivityRecorder()
+    let model = SessionModel(makeChannel: { _ in ReconnectErrorChannel("timeout") },
+        makeTrustedClient: { _, _ in SuccessfulTrustedClient(invitation) },
+        waitForReconnect: { try await retry.wait($0) }, initialSavedDevices: [device],
+        makeConnectionActivity: { activities.make() })
+    defer { model.disconnect(); retry.advance() }
+    model.connectSaved(device.id)
+    #expect(await waitForTrustedState { model.phase == .failed && retry.waiting })
+    #expect(model.hasPendingReconnect && model.savedDevices == [device])
+    #expect(activities.counts == (1, 0))
+    model.disconnect(); retry.advance()
+    for _ in 0..<20 { await Task.yield() }
+    #expect(!model.active && !model.hasPendingReconnect && activities.counts == (1, 1))
 }

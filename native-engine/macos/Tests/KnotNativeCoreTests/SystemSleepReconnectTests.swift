@@ -209,17 +209,22 @@ struct SystemSleepReconnectTests {
         #expect(model.reconnectAttemptCount == 1)
     }
 
-    @Test @MainActor func wakeRearmsExhaustedTransientBudget() async throws {
-        let device = try sleepDevice(), challenge = SleepGate(), wake = SleepGate()
+    @Test @MainActor func wakeResetsTheBackoffAfterAnExtendedTransientOutage() async throws {
+        let device = try sleepDevice(), challenge = SleepGate(), wake = SleepGate(), retry = SleepGate()
         let outcomes = Array(repeating: SleepTrustedOutcome.failure(.transport), count: 7) + [.held(challenge, try sleepInvitation())]
         let factory = SleepTrustedFactory(outcomes)
         let model = SessionModel(makeTrustedClient: { device, _ in factory.make(device) },
-            waitForReconnect: { _ in await Task.yield() }, waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device])
-        defer { model.disconnect(); wake.releaseAll(); challenge.releaseAll() }
+            waitForReconnect: { _ in try await retry.wait() }, waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device])
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll(); challenge.releaseAll() }
         model.connectSaved(device.id)
-        #expect(await sleepEventually { factory.normalCalls == 7 && model.phase == .failed && !model.hasPendingReconnect })
+        for attempt in 1...7 {
+            #expect(await sleepEventually { factory.normalCalls == attempt && retry.count == attempt })
+            if attempt < 7 { retry.advance() }
+        }
+        #expect(model.phase == .failed && model.hasPendingReconnect)
         #expect(model.reconnectAttemptCount == 6)
         model.systemWillSleep(); model.systemDidWake()
+        retry.advance(); await sleepDrain()
         #expect(await sleepEventually { wake.count == 1 })
         wake.advance()
         #expect(await sleepEventually { factory.normalCalls == 8 && challenge.count == 1 })
@@ -324,19 +329,24 @@ struct SystemSleepReconnectTests {
         }
     }
 
-    @Test @MainActor func choosingNewDiscoveryAfterExhaustedRetriesRevokesOldWakeIntent() async throws {
-        let device = try sleepDevice(), factory = SleepTrustedFactory([.failure(.transport)]), wake = SleepGate()
+    @Test @MainActor func choosingNewDiscoveryDuringExtendedRecoveryRevokesOldWakeIntent() async throws {
+        let device = try sleepDevice(), factory = SleepTrustedFactory([.failure(.transport)]), wake = SleepGate(), retry = SleepGate()
         let model = SessionModel(makeTrustedClient: { device, _ in factory.make(device) },
-            waitForReconnect: { _ in await Task.yield() }, waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device])
-        defer { model.disconnect(); wake.releaseAll() }
+            waitForReconnect: { _ in try await retry.wait() }, waitForWakeReadiness: { try await wake.wait() }, initialSavedDevices: [device])
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
         model.connectSaved(device.id)
-        #expect(await sleepEventually { factory.normalCalls == 7 && model.phase == .failed && !model.hasPendingReconnect })
+        for attempt in 1...8 {
+            #expect(await sleepEventually { factory.normalCalls == attempt && retry.count == attempt })
+            if attempt < 8 { retry.advance() }
+        }
+        #expect(model.phase == .failed && model.hasPendingReconnect)
         // The user leaves the old saved target to search/select an unverified
         // candidate. No enrollment or live network adapter is needed to do so.
         model.prepareForNewTarget()
+        retry.advance(); await sleepDrain()
         #expect(model.phase == .idle && model.invitation == nil && !model.numberAuthorized)
         model.systemWillSleep(); model.systemDidWake(); await sleepDrain()
-        #expect(factory.normalCalls == 7 && wake.count == 0 && !model.hasPendingReconnect)
+        #expect(factory.normalCalls == 8 && wake.count == 0 && !model.hasPendingReconnect)
     }
 
     @Test @MainActor func disabledDisconnectedForgottenOrReviewedRetryCannotRecover() async throws {

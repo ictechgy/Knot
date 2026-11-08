@@ -176,6 +176,7 @@ struct PreviewWindow: View {
                 }.padding(.top, 12)
             } label: { Label("연결 설정 · 내 Mac 이름", systemImage: "laptopcomputer").font(.system(size: 13)) }
                 .disabled(enrollment.busy).padding(16).nativePanel()
+            NativeConnectionDiagnosticsView(diagnostics: model.diagnostics)
             Text("미리보기 · Windows 11 SDR 기본 화면 → Apple Silicon Mac")
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
         }
