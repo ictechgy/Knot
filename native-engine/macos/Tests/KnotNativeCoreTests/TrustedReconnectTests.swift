@@ -375,6 +375,31 @@ private final class ActivityRecorder: @unchecked Sendable {
     }
 }
 
+@Test(arguments: [false, true])
+@MainActor func savedDeviceRemovalDuringRefreshRetiresRecoveryOrActiveConnection(_ connected: Bool) async throws {
+    let device = try inertSavedDevice(), invitation = try inertInvitation(), channel = HeldReconnectChannel()
+    let activities = ActivityRecorder(), retry = InertRetryWait(), attempts = TrustedAttemptRecorder()
+    let model = SessionModel(makeChannel: { _ in channel }, makeTrustedClient: { _, _ in
+        if connected { return SuccessfulTrustedClient(invitation) }
+        return FailingTrustedClient(.transport, attempts)
+    }, waitForReconnect: { try await retry.wait($0) }, initialSavedDevices: [device],
+        loadSavedDevices: { [] }, makeConnectionActivity: { activities.make() })
+    defer { model.disconnect(); retry.advance() }
+    model.connectSaved(device.id)
+    if connected { #expect(await waitForTrustedState { model.phase == .approval && channel.isReading }) }
+    else { #expect(await waitForTrustedState { retry.waiting }) }
+    #expect(activities.counts == (1, 0))
+    model.refreshSavedDevices()
+    #expect(!model.active && !model.hasPendingReconnect && model.savedDevices.isEmpty)
+    #expect(activities.counts == (1, 1))
+    #expect(model.diagnostics.entries.last?.issue == .trust)
+    retry.advance()
+    model.systemWillSleep(); model.systemDidWake()
+    for _ in 0..<30 { await Task.yield() }
+    #expect(!model.active && !model.hasPendingReconnect && activities.counts == (1, 1))
+    #expect(attempts.count == (connected ? 0 : 1))
+}
+
 @Test func connectionActivityEndsExactlyOnceAndAllowsIdleSystemSleep() {
     let recorder = ActivityRecorder()
     var lease: NativeConnectionActivity? = recorder.make()

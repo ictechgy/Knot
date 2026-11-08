@@ -167,7 +167,17 @@ final class SessionModel: ObservableObject {
         connectSaved(id)
     }
     func refreshSavedDevices() {
-        do { savedDevices = try loadSavedDevices() }
+        do {
+            savedDevices = try loadSavedDevices()
+            // A successful refresh can observe a removal or replacement made
+            // by another app instance. Retire the old target immediately so a
+            // completed retry task cannot keep its UI/activity ownership alive.
+            if let selectedTrustedDevice, !savedDevices.contains(selectedTrustedDevice) {
+                diagnostics.record(.trust)
+                close(message: "등록된 PC 정보가 변경되어 연결과 자동 복구를 종료했어요. ‘내 PC’를 확인하고 다시 연결하세요.", failed: true)
+                self.selectedTrustedDevice = nil
+            }
+        }
         catch { status = "등록된 PC를 읽지 못했어요. 키체인 접근을 확인하세요." }
     }
     func connectSaved(_ id: String) {
