@@ -54,6 +54,8 @@ enum NativeRecoveryEvent: String, CaseIterable, Sendable {
     case wakeStarted = "recovery.wake-started"
     case wakeCancelled = "recovery.wake-cancelled"
     case connectionClosed = "recovery.connection-closed"
+    case invitationTemporary = "recovery.invitation-temporary"
+    case manualDisconnect = "recovery.manual-disconnect"
 }
 
 struct NativeRecoverySnapshot: Equatable, Sendable {

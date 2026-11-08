@@ -236,6 +236,37 @@ private final class RegistrationProofClient: NativeTrustedConnecting, Sendable {
 }
 
 struct SavedNumberRecoveryTests {
+    @Test(arguments: ["disconnect", "review", "connect", "new-target"]) @MainActor
+    func explicitTemporarySelectionDoesNotInheritPriorCredentialDiagnostics(_ action: String) async throws {
+        let device = try registrationDevice(1), store = RegistrationStore([device])
+        let channel = RegistrationChannel(), presenter = RegistrationPresenter()
+        let model = registrationModel(store, channel: channel)
+        defer { model.disconnect() }
+        try await presentNumberSession(model, channel: channel, presenter: presenter,
+            enrollment: registrationEnrollment(address: device.address, pin: device.certificateSHA256), remember: false)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .saved)
+        model.handleHostError("protocol")
+        let firstIssue = model.diagnostics.firstIssue
+        switch action {
+        case "review":
+            let value = try registrationEnrollment().offer.invitation
+            let fields: [String: Any] = ["v": 1, "address": value.address, "port": value.port,
+                "certificateSHA256": value.certificateSHA256, "token": value.token]
+            model.review("knot-native:v1:" + Invitation.encodeBase64URL(try JSONSerialization.data(withJSONObject: fields)))
+            #expect(model.diagnostics.latestRecoverySnapshot?.credential == NativeRecoveryCredential.none)
+            model.connect()
+            #expect(!model.checkDeadlines(now: .now + .seconds(11)))
+        case "connect": model.connect()
+        case "new-target": model.prepareForNewTarget()
+        default: model.disconnect()
+        }
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == NativeRecoveryCredential.none)
+        #expect(model.diagnostics.latestRecoverySnapshot?.intent == NativeRecoveryIntent.none)
+        #expect(!model.hasPendingReconnect && model.diagnostics.firstIssue == firstIssue)
+        #expect(model.diagnostics.recoveryEntries.contains { $0.snapshot.credential == .saved })
+        #expect(store.loads == 0 && store.saves == 0 && store.registered.isEmpty)
+    }
+
     @Test @MainActor func freshNumberAdoptsExactSavedHostWithoutReadingWritingOrRegisteringCredentials() async throws {
         let store = RegistrationStore(try (1...16).map { try registrationDevice(UInt8($0)) })
         let existing = store.devices[3], channel = RegistrationChannel(), presenter = RegistrationPresenter()

@@ -484,6 +484,8 @@ final class SessionModel: ObservableObject {
         guard !active, !isSystemSleeping else { return }
         clearAutomaticRecovery(); endConnectionActivity(); identity = UUID(); reconnectAttempt = 0
         selectedTrustedDevice = nil; pendingRegistration = nil
+        authenticatedRecoveryEndpoint = nil; recoveryCredential = .none
+        recordRecovery(.invitationTemporary)
         reconnectMethod = .invitation
         numberAuthorized = false
         do { invitation = try Invitation(secret); phase = .idle; status = "Review the private address and exact certificate pin below. Trust lasts for this connection only." }
@@ -493,6 +495,8 @@ final class SessionModel: ObservableObject {
         guard !active, !isSystemSleeping else { return }
         clearAutomaticRecovery(); endConnectionActivity(); identity = UUID(); reconnectAttempt = 0
         selectedTrustedDevice = nil; pendingRegistration = nil
+        authenticatedRecoveryEndpoint = nil; recoveryCredential = .none
+        recordRecovery(.invitationTemporary)
         reconnectMethod = .invitation
         numberAuthorized = false
         startConnection()
@@ -964,6 +968,7 @@ final class SessionModel: ObservableObject {
         close(message: registered ? "연결을 종료했어요. 등록된 PC를 선택하거나 새 번호로 연결하세요." :
             "Disconnected. Reconnect with a fresh invitation.", failed: false)
         selectedTrustedDevice = nil
+        recoveryCredential = .none; recordRecovery(.manualDisconnect)
     }
     private func fail(_ message: String) { close(message: message, failed: true) }
     private func close(message: String, failed: Bool, numberConnection: Bool? = nil, retainingActivity: Bool = false) {
