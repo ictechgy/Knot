@@ -85,6 +85,27 @@ namespace Knot.NativePreview
                     Check(!bridge.TryTake(out ignored) && cancelled.Reads == 0);
                 }
             }
+            // Suspension may land after Allowed() but before the host shortcut.
+            // Even a silent suspended shortcut cannot disclose stale copy text:
+            // authorization and Cancel's generation both void the worker reply.
+            using (ManualResetEvent entered = new ManualResetEvent(false))
+            using (ManualResetEvent release = new ManualResetEvent(false))
+            {
+                SyntheticClipboard cancelled = new SyntheticClipboard(); FakeInput suspendedSink = new FakeInput();
+                InputSession suspendedInput = new InputSession(suspendedSink, new CaptureRectangle(0, 0, 1920, 1080));
+                int authorized = 1;
+                using (ClipboardBridge bridge = new ClipboardBridge(delegate(byte operation) {
+                    entered.Set(); release.WaitOne(2000); suspendedInput.ClipboardShortcut(operation);
+                }, delegate { return Interlocked.CompareExchange(ref authorized, 0, 0) == 1; }, cancelled))
+                {
+                    bridge.Handle(ClipboardRequestBytes(1, "")); Check(entered.WaitOne(2000));
+                    Interlocked.Exchange(ref authorized, 0); Check(suspendedInput.Suspend()); bridge.Cancel(); release.Set();
+                    for (int i = 0; i < 250 && bridge.IsBusy; ++i) Thread.Sleep(10);
+                    Check(!bridge.IsBusy); Interlocked.Exchange(ref authorized, 1); byte[] ignored;
+                    Check(!bridge.TryTake(out ignored) && cancelled.Reads == 0 && cancelled.Writes == 0 && suspendedSink.Events.Count == 0);
+                }
+                suspendedInput.Close();
+            }
             FakeInput sink = new FakeInput();
             InputSession session = new InputSession(sink, new CaptureRectangle(0, 0, 1920, 1080));
             session.ClipboardShortcut(1);

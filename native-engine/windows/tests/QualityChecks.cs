@@ -26,6 +26,7 @@ namespace Knot.NativePreview
         }
         private static void QualityChecks()
         {
+            QualityProfilePreparationChecks();
             MediaInfo info = new MediaInfo { Fps = 60, Bitrate = 40000000 };
             AdaptiveQualityFixture media = new AdaptiveQualityFixture(); media.Information = info;
             NativeQualityController quality = new NativeQualityController(info);
@@ -71,6 +72,46 @@ namespace Knot.NativePreview
             NativeQualityController fixedQuality = new NativeQualityController(info);
             fixedQuality.Handle(new Packet(0x32, new byte[] { 1 })); fixedQuality.Apply(fixedMedia, 1);
             Check(fixedQuality.TakeStatus()[8] == 0);
+        }
+        private static void QualityProfilePreparationChecks()
+        {
+            MediaInfo nominal = new MediaInfo { Fps = 60, Bitrate = 40000000 };
+            MediaConfig profile = new MediaConfig { Width = 3840, Height = 2160, Fps = 60, Bitrate = 40000000 };
+            AdaptiveQualityFixture source = new AdaptiveQualityFixture(); source.Information = nominal;
+            NativeQualityController quality = new NativeQualityController(new MediaInfo { Fps = 60, Bitrate = 12000000 });
+            quality.TakeStatus(); quality.Handle(new Packet(0x32, new byte[] { 1 }));
+            PreparedVideoQuality text = quality.PrepareProfile(source, profile, null);
+            Check(text.Info.Fps == 30 && text.Info.Bitrate == 40000000 && source.Applied.Count == 1 && source.Applied[0][0] == 30);
+            MediaInfo old = nominal; quality.Snapshot(ref old);
+            Check(old.Fps == 60 && old.Bitrate == 12000000 && quality.TakeStatus() == null);
+            quality.CommitProfile(text, 1); byte[] status = quality.TakeStatus();
+            Check(NativeProtocol.U32(status, 0) == 30 && NativeProtocol.U32(status, 4) == 40000000);
+            // Auto still owns the full requested ceiling after Text's first AU.
+            quality.Handle(new Packet(0x32, new byte[] { 0 }));
+            long now = 2;
+            for (int i = 0; i < 5; ++i) { quality.Apply(source, now); now += 2L * Stopwatch.Frequency; }
+            status = quality.TakeStatus(); Check(NativeProtocol.U32(status, 0) == 60 && NativeProtocol.U32(status, 4) == 40000000);
+            quality.Handle(new Packet(0x32, new byte[] { 2 }));
+            PreparedVideoQuality responsive = quality.PrepareProfile(source, profile, null);
+            Check(responsive.Info.Fps == 60 && responsive.Info.Bitrate == 20000000);
+            quality.CommitProfile(responsive, now); status = quality.TakeStatus();
+            Check(NativeProtocol.U32(status, 0) == 60 && NativeProtocol.U32(status, 4) == 20000000);
+            // A slow old-AU write during drain affects the first new submission,
+            // but never changes the still-current snapshot before its barrier.
+            quality.Handle(new Packet(0x32, new byte[] { 0 })); quality.ObserveWrite(150);
+            PreparedVideoQuality pressure = quality.PrepareProfile(source, profile, null);
+            Check(pressure.Info.Fps == 30 && pressure.Info.Bitrate == 30000000);
+            old = nominal; quality.Snapshot(ref old); Check(old.Fps == 60 && old.Bitrate == 20000000);
+            // A later slow-write signal survives commit and the cooldown.
+            quality.ObserveWrite(150); quality.CommitProfile(pressure, now); quality.TakeStatus();
+            now += 2L * Stopwatch.Frequency; quality.Apply(source, now);
+            status = quality.TakeStatus(); Check(NativeProtocol.U32(status, 0) == 30 && NativeProtocol.U32(status, 4) == 22500000);
+            // A preference admitted while a driver primes is retained and gets
+            // an immediate policy tick after the already-primed AU is published.
+            PreparedVideoQuality beforePreference = quality.PrepareProfile(source, profile, null);
+            quality.Handle(new Packet(0x32, new byte[] { 1 }));
+            quality.CommitProfile(beforePreference, now); quality.TakeStatus(); quality.Apply(source, now);
+            status = quality.TakeStatus(); Check(NativeProtocol.U32(status, 0) == 30 && NativeProtocol.U32(status, 4) == 40000000);
         }
         private static void AlternatingQualityPressureChecks(MediaInfo info, bool slowWrites)
         {

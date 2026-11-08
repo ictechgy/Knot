@@ -135,6 +135,16 @@ namespace Knot.NativePreview
             if (Stopwatch.GetTimestamp() - lastHeartbeat >= 2L * Stopwatch.Frequency)
             { NativeProtocol.Write(tls, 4, new byte[0]); lastHeartbeat = Stopwatch.GetTimestamp(); }
         }
+        private MediaInfo WriteVideoControlStatus(SslStream tls, VideoControlRequest request, ulong epoch,
+            byte outcome, byte reason, bool paused, MediaInfo info, ulong nextSequence, ref long heartbeat)
+        {
+            // 0x34 always precedes any status that references its effective
+            // cadence. Snapshot after sidecar delivery, including pause/reject.
+            WriteVideoSidecars(tls, ref heartbeat);
+            MediaInfo actual = ActualVideoInfo(info);
+            NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, outcome, reason, paused, actual, nextSequence));
+            return actual;
+        }
         private static void ValidateMediaRead(int status, uint written, uint flags, byte[] encoded, bool draining)
         {
             // A genuine result is validated even if Stop raced the driver call;
@@ -177,9 +187,9 @@ namespace Knot.NativePreview
             throw new ProtocolException("closed");
         }
         private IMediaSource OpenPrimedVideo(MediaConfig config, CaptureRectangle rectangle, byte[] encoded, SslStream tls,
-            ref long heartbeat, MediaInfo? restoreQuality, out MediaInfo info, out uint written, out ulong timestamp)
+            ref long heartbeat, MediaInfo? restoreQuality, out MediaInfo info, out PreparedVideoQuality prepared, out uint written, out ulong timestamp)
         {
-            IMediaSource target = null; info = new MediaInfo(); written = 0; timestamp = 0;
+            IMediaSource target = null; info = new MediaInfo(); prepared = null; written = 0; timestamp = 0;
             try
             {
                 if (Stopping) throw new ProtocolException("closed");
@@ -190,13 +200,8 @@ namespace Knot.NativePreview
                 if (actual.Left != rectangle.Left || actual.Top != rectangle.Top || actual.Width != rectangle.Width || actual.Height != rectangle.Height)
                     throw new ProtocolException("capture", "display");
                 if (!(target is IDrainableMediaSource) || !(target is IAdaptiveMediaSource)) throw new ProtocolException("encoder");
-                if (restoreQuality.HasValue)
-                {
-                    MediaInfo effective = restoreQuality.Value;
-                    if ((info.Fps != effective.Fps || info.Bitrate != effective.Bitrate) &&
-                        !((IAdaptiveMediaSource)target).TrySetQuality(effective.Fps, effective.Bitrate)) throw new ProtocolException("encoder");
-                    info.Fps = effective.Fps; info.Bitrate = effective.Bitrate;
-                }
+                prepared = quality.PrepareProfile(target, config, restoreQuality);
+                info = prepared.Info;
                 long until = Stopwatch.GetTimestamp() + 5L * Stopwatch.Frequency;
                 while (!Stopping)
                 {
@@ -238,11 +243,11 @@ namespace Knot.NativePreview
                 if (reason == 0 && !noOp && clock() < nextVideoChange) reason = 3;
                 if (reason != 0 || noOp)
                 {
-                    NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, reason == 0 ? (byte)1 : (byte)2, reason, paused, actual, 0));
+                    WriteVideoControlStatus(tls, request, epoch, reason == 0 ? (byte)1 : (byte)2, reason, paused, info, 0, ref heartbeat);
                     return;
                 }
                 SuspendVideoInput();
-                NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, 0, 0, paused, actual, 0));
+                actual = WriteVideoControlStatus(tls, request, epoch, 0, 0, paused, info, 0, ref heartbeat);
                 nextVideoChange = clock() + 2L * Stopwatch.Frequency;
                 MediaConfig oldProfile = profile;
                 CaptureRectangle rectangle = info.Rectangle;
@@ -258,20 +263,19 @@ namespace Knot.NativePreview
                 if (Stopping) throw new ProtocolException("closed");
                 if (request.Operation == 2)
                 {
-                    info = actual;
-                    NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, 1, 0, true, info, 0));
+                    info = WriteVideoControlStatus(tls, request, epoch, 1, 0, true, info, 0, ref heartbeat);
                     Notify("화면과 원격 입력을 일시 정지했어요. 연결, 파일과 허용된 소리는 유지돼요.");
                     return;
                 }
                 try
                 {
                     MediaConfig targetProfile = request.Operation == 1 ? request.Config : profile;
-                    uint written; ulong timestamp; MediaInfo targetInfo;
-                    media = OpenPrimedVideo(targetProfile, rectangle, encoded, tls, ref heartbeat, wasPaused ? (MediaInfo?)actual : null, out targetInfo, out written, out timestamp);
+                    uint written; ulong timestamp; MediaInfo targetInfo; PreparedVideoQuality prepared;
+                    media = OpenPrimedVideo(targetProfile, rectangle, encoded, tls, ref heartbeat, wasPaused ? (MediaInfo?)actual : null, out targetInfo, out prepared, out written, out timestamp);
                     if (epoch == ulong.MaxValue || sequence == ulong.MaxValue) throw new ProtocolException("encoder");
                     committed = true;
-                    ++epoch; profile = targetProfile; info = targetInfo; quality.ResetProfile(info, profile);
-                    NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, 1, 0, false, info, sequence + 1));
+                    ++epoch; profile = targetProfile; info = targetInfo; quality.CommitProfile(prepared, Stopwatch.GetTimestamp());
+                    info = WriteVideoControlStatus(tls, request, epoch, 1, 0, false, info, sequence + 1, ref heartbeat);
                     WriteVideoUnit(tls, encoded, payload, written, 1, timestamp, ref sequence);
                     ResumeVideoInput();
                     Notify("화면을 전송하고 있어요. 연결된 Mac에서 최대 4K · 60fps · 40Mbps까지 화질을 바꿀 수 있어요.");
@@ -286,16 +290,16 @@ namespace Knot.NativePreview
                     if (wasPaused)
                     {
                         // Resume failure retains the authenticated paused session.
-                        NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, 2, 4, true, actual, 0));
+                        WriteVideoControlStatus(tls, request, epoch, 2, 4, true, info, 0, ref heartbeat);
                         return;
                     }
                     // The failed target was fully closed before rollback. There
                     // is never a second simultaneous output-duplication owner.
-                    uint written; ulong timestamp; MediaInfo restored;
-                    media = OpenPrimedVideo(oldProfile, rectangle, encoded, tls, ref heartbeat, actual, out restored, out written, out timestamp);
+                    uint written; ulong timestamp; MediaInfo restored; PreparedVideoQuality prepared;
+                    media = OpenPrimedVideo(oldProfile, rectangle, encoded, tls, ref heartbeat, actual, out restored, out prepared, out written, out timestamp);
                     if (epoch == ulong.MaxValue || sequence == ulong.MaxValue) throw new ProtocolException("encoder");
-                    ++epoch; profile = oldProfile; info = restored; quality.ResetProfile(info, profile);
-                    NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, 3, 4, false, info, sequence + 1));
+                    ++epoch; profile = oldProfile; info = restored; quality.CommitProfile(prepared, Stopwatch.GetTimestamp());
+                    info = WriteVideoControlStatus(tls, request, epoch, 3, 4, false, info, sequence + 1, ref heartbeat);
                     WriteVideoUnit(tls, encoded, payload, written, 1, timestamp, ref sequence);
                     ResumeVideoInput();
                     Notify("요청한 화질을 준비하지 못해 이전 화질로 돌아왔어요. 화면 연결은 유지돼요.");

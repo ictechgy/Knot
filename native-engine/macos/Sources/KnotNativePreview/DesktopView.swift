@@ -249,8 +249,10 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
         keyDown(with: event); return true
     }
     override func keyDown(with event: NSEvent) {
-        if !inputSuspended, !fileDragInProgress, focusedForInput, model?.consumeVideoResumeGesture() == true { return }
         let flags = Self.modifiers(event.modifierFlags)
+        let route = MacKeyboardRouting.route(keyCode: event.keyCode, modifiers: flags,
+            textMode: model?.textMode == true, hasMarkedText: hasMarkedText(), ownsPhysicalDown: physicalKeys.owns(event.keyCode))
+        if !inputSuspended, !fileDragInProgress, focusedForInput, model?.consumeVideoResumeGesture(route: route) == true { return }
         if acceptsInput, model?.macShortcuts == true, flags == .command,
            heldButtons.isEmpty, model?.clipboard != nil,
            event.keyCode == 8 || event.keyCode == 9 {
@@ -259,8 +261,6 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
             model?.performClipboardGesture(paste: event.keyCode == 9)
             return
         }
-        let route = MacKeyboardRouting.route(keyCode: event.keyCode, modifiers: Self.modifiers(event.modifierFlags),
-            textMode: model?.textMode == true, hasMarkedText: hasMarkedText(), ownsPhysicalDown: physicalKeys.owns(event.keyCode))
         switch route {
         case .localCapsLock: return
         case .localSpace:

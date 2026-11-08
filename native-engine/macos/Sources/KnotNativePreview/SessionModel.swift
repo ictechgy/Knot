@@ -6,6 +6,7 @@ import KnotNativeCore
 @MainActor
 final class SessionModel: ObservableObject {
     typealias ClipboardFactory = @MainActor (@escaping (Packet) -> Bool) -> ClipboardModel
+    typealias VideoControlExpectation = @Sendable (NativePacketReader, VideoControlRequest) async throws -> Void
     enum Phase: Equatable { case idle, connecting, approval, decoding, streaming, failed }
     enum ReconnectMethod: Equatable { case registered, number, invitation }
     @Published var phase: Phase = .idle
@@ -107,6 +108,7 @@ final class SessionModel: ObservableObject {
     private var ticker: Task<Void, Never>?
     private var decoder: (any NativeVideoDecoding)?
     private let makeDecoder: @MainActor (VideoProfile) -> any NativeVideoDecoding
+    private let expectVideoControl: VideoControlExpectation
     private var input = InputBuffer()
     private var identity = UUID()
     private var connectedAt = ContinuousClock.now
@@ -124,6 +126,7 @@ final class SessionModel: ObservableObject {
 
     init(makeDecoder: @escaping @MainActor (VideoProfile) -> any NativeVideoDecoding = { NativeDecoder(width: $0.width, height: $0.height) },
          makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) },
+         expectVideoControl: @escaping VideoControlExpectation = { try await $0.expectVideoControl($1) },
          waitForInputDeadline: @escaping @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void = { deadline in
              if ContinuousClock.now < deadline { try await Task.sleep(until: deadline) }
          },
@@ -151,7 +154,7 @@ final class SessionModel: ObservableObject {
              return id.map { ($0, expiry) }
          },
          makeClipboard: @escaping ClipboardFactory = { ClipboardModel(send: $0) }) {
-        self.makeDecoder = makeDecoder
+        self.makeDecoder = makeDecoder; self.expectVideoControl = expectVideoControl
         self.makeClipboard = makeClipboard
         self.writeUpdateResume = writeUpdateResume; self.takeUpdateResume = takeUpdateResume
         self.makeChannel = makeChannel
@@ -621,7 +624,7 @@ final class SessionModel: ObservableObject {
         case "capture": "Host capture is unavailable. Check its logged-in SDR primary display."
         case "encoder": "The host hardware H.264 encoder could not start."
         case "input": "The host stopped accepting input. Create a new invitation."
-        case "protocol": "연결 중 화질 조절에는 Mac과 Windows 앱 모두 Native.18 이상이 필요해요. 두 앱을 업데이트한 뒤 새 번호로 연결하세요."
+        case "protocol": "호스트가 연결 형식 오류를 보고해 연결을 종료했어요. 새 연결로 다시 시도하세요."
         case "timeout": "The connection timed out. Create a new invitation."
         default: "The host closed the connection. Create a new invitation to reconnect."
         }
@@ -636,7 +639,9 @@ final class SessionModel: ObservableObject {
             transportFailed(reason: issue)
         } else {
             diagnostics.record(issue)
-            fail(Self.message(code))
+            if code == "protocol", phase == .approval {
+                fail("연결 중 화질 조절에는 Mac과 Windows 앱 모두 Native.18 이상이 필요해요. 두 앱을 업데이트한 뒤 새 번호로 연결하세요.")
+            } else { fail(Self.message(code)) }
         }
     }
     private func startTicker(id: UUID) {
@@ -693,7 +698,7 @@ final class SessionModel: ObservableObject {
     @discardableResult func sendControl(_ packet: Packet) -> Bool {
         guard [.clipboardRequest, .qualityPreference, .qualityFeedback].contains(packet.kind),
               phase == .streaming, !fileUIInputSuspended,
-              packet.kind != .clipboardRequest || videoControl?.blocksInput != true else { return false }
+              packet.kind == .qualityFeedback || videoControl?.blocksInput != true else { return false }
         do {
             try input.append(packet)
             if packet.kind != .qualityFeedback { acceptedLocalInteraction() }
@@ -799,6 +804,10 @@ final class SessionModel: ObservableObject {
     }
     /// Returning input wakes automatically paused video but is never replayed.
     /// Manual pause still requires the explicit Resume action.
+    @discardableResult func consumeVideoResumeGesture(route: MacKeyboardRouting.Route) -> Bool {
+        guard route == .interpretText || route == .physical else { return false }
+        return consumeVideoResumeGesture()
+    }
     @discardableResult func consumeVideoResumeGesture() -> Bool {
         guard phase == .streaming, !fileUIInputSuspended, let videoControl, videoControl.blocksInput else { return false }
         acceptedLocalInteraction()
@@ -832,8 +841,13 @@ final class SessionModel: ObservableObject {
                     else if let pending = self.input.pop() { packet = pending }
                     else { break }
                     if packet.kind == .videoControl {
-                        guard let packetReader = self.packetReader else { throw NativeFailure.state }
-                        try await packetReader.expectVideoControl(VideoControlRequest(packet.payload))
+                        do {
+                            guard let packetReader = self.packetReader else { throw NativeFailure.state }
+                            try await self.expectVideoControl(packetReader, VideoControlRequest(packet.payload))
+                        } catch {
+                            guard self.identity == id, !Task.isCancelled else { return }
+                            self.connectionFailed(error); return
+                        }
                         guard self.identity == id, !Task.isCancelled else { return }
                     }
                     try await channel.send(packet)

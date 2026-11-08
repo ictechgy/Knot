@@ -209,3 +209,54 @@ private func video18Hex(_ data: Data) -> String { data.map { String(format: "%02
     _ = try noOp.accept(Packet(kind: .videoControlStatus, payload: video18Status(.resume, outcome: .applied)))
     #expect(noOp.videoControl.pending == nil && noOp.videoControl.epoch == 0)
 }
+
+@Test(arguments: [VideoControlReason.initializationFailed, .unsupported, .outOfPolicy]) @MainActor
+func failedAutomaticVideoResumeRequiresExplicitRetry(_ reason: VideoControlReason) throws {
+    let clock = Video18Clock(); var writes: [VideoControlRequest] = []
+    let model = VideoControlModel(actual: video18Initial, now: { clock.value }, send: { writes.append($0); return true })
+    model.pause(manual: false)
+    model.accept(try VideoControlStatus(video18Status(.pause, outcome: .applied, state: .paused)))
+    clock.advance(.seconds(2)); model.resumeAfterLocalUse()
+    #expect(writes.count == 2 && writes[1].operation == .resume)
+    model.accept(try VideoControlStatus(video18Status(.resume, id: 2, outcome: .rejected, reason: reason, state: .paused)))
+    #expect(model.isPaused && !model.isAutomaticallyPaused && !model.canResumeAutomatically && !model.isApplying)
+    #expect(model.status.contains("화면 재개"))
+    for _ in 0..<20 {
+        clock.advance(.seconds(3)); model.resumeAfterLocalUse(); model.tick()
+    }
+    #expect(writes.count == 2 && model.pending == nil)
+    model.resume()
+    #expect(writes.count == 3 && writes[2].operation == .resume && model.isApplying)
+}
+
+@Test func videoControlQualitySidecarCanAnnounceNewProfileCadenceBeforeAppliedAndRollbackBarriers() throws {
+    func quality(fps: UInt32, bitrate: UInt32) -> Packet {
+        var data = Data(); data.appendBE(fps); data.appendBE(bitrate); data.append(1)
+        return Packet(kind: .qualityStatus, payload: data)
+    }
+    var receiver = ReceiveState(videoControlVersion: 1)
+    let initial = String(decoding: video18Ready(), as: UTF8.self).replacingOccurrences(of: "\"bitrate\":1000000", with: "\"bitrate\":12000000")
+    _ = try receiver.accept(Packet(kind: .ready, payload: Data(initial.utf8)))
+    let old = VideoProfile(width: 64, height: 64, fps: 30, bitrate: 12_000_000)
+    _ = try receiver.accept(quality(fps: 30, bitrate: 12_000_000))
+    try receiver.expectVideoControl(VideoControlRequest(operation: .profile, requestID: 1, profile: video18Requested))
+    _ = try receiver.accept(Packet(kind: .videoControlStatus, payload: video18Status(actual: old)))
+    // MTA primes within the requested profile, then emits its policy-adjusted
+    // 0x34 before the 0x36 barrier. This may exceed the old 12 Mbps ceiling.
+    _ = try receiver.accept(quality(fps: 60, bitrate: 40_000_000))
+    let new = VideoProfile(width: 1920, height: 1080, fps: 60, bitrate: 40_000_000)
+    _ = try receiver.accept(Packet(kind: .videoControlStatus, payload: video18Status(epoch: 1, outcome: .applied, actual: new, next: 1)))
+    _ = try receiver.accept(video18AU(sequence: 1, sets: true))
+    #expect(receiver.videoControl.actual == new && receiver.videoControl.epoch == 1)
+    // A failed next profile reopens the prior requested bounds and reports
+    // the preserved policy's effective values before its rollback barrier.
+    try receiver.expectVideoControl(VideoControlRequest(operation: .profile, requestID: 2,
+        profile: VideoProfile(width: 3840, height: 2160, fps: 30, bitrate: 10_000_000)))
+    _ = try receiver.accept(Packet(kind: .videoControlStatus, payload: video18Status(id: 2, epoch: 1, actual: new)))
+    _ = try receiver.accept(quality(fps: 30, bitrate: 20_000_000))
+    let restored = VideoProfile(width: 1920, height: 1080, fps: 30, bitrate: 20_000_000)
+    _ = try receiver.accept(Packet(kind: .videoControlStatus, payload: video18Status(id: 2, epoch: 2,
+        outcome: .rolledBack, reason: .initializationFailed, actual: restored, next: 2)))
+    _ = try receiver.accept(video18AU(sequence: 2, sets: true))
+    #expect(receiver.videoControl.actual == restored && receiver.videoControl.epoch == 2 && receiver.sequence == 2)
+}

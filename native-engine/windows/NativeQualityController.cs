@@ -5,6 +5,13 @@ namespace Knot.NativePreview
 {
     internal interface IAdaptiveMediaSource { bool TrySetQuality(uint fps, uint bitrate); }
 
+    internal sealed class PreparedVideoQuality
+    {
+        internal MediaInfo Info;
+        internal MediaConfig Profile;
+        internal long PreferenceRevision, ReceiverRevision, WriteRevision;
+    }
+
     // Receiver pressure and slow socket writes are hints, never authority to
     // exceed the locally selected profile. Only the media MTA applies changes.
     internal sealed class NativeQualityController
@@ -14,7 +21,7 @@ namespace Knot.NativePreview
         private uint fps, bitrate;
         private byte preference;
         private bool receiverPressure, writePressure, changed = true, supported = true;
-        private long nextChange;
+        private long nextChange, preferenceRevision, receiverRevision, writeRevision;
         private int healthy;
         internal NativeQualityController(MediaInfo info) : this(info, new MediaConfig { Fps = info.Fps, Bitrate = info.Bitrate }) { }
         internal NativeQualityController(MediaInfo info, MediaConfig profile)
@@ -29,11 +36,11 @@ namespace Knot.NativePreview
             if (packet.Payload.Length != 1 || (packet.Kind == 0x32 ? packet.Payload[0] > 2 : packet.Kind != 0x33 || packet.Payload[0] > 1))
                 throw new ProtocolException("protocol");
             lock (gate) {
-                if (packet.Kind == 0x32) { preference = packet.Payload[0]; nextChange = 0; healthy = 0; }
-                else if (packet.Payload[0] == 1) receiverPressure = true;
+                if (packet.Kind == 0x32) { preference = packet.Payload[0]; ++preferenceRevision; nextChange = 0; healthy = 0; }
+                else if (packet.Payload[0] == 1) { receiverPressure = true; ++receiverRevision; }
             }
         }
-        internal void ObserveWrite(double milliseconds) { if (milliseconds >= 100) lock (gate) writePressure = true; }
+        internal void ObserveWrite(double milliseconds) { if (milliseconds >= 100) lock (gate) { writePressure = true; ++writeRevision; } }
         internal void Apply(IMediaSource source) { Apply(source, Stopwatch.GetTimestamp()); }
         internal void Apply(IMediaSource source, long now)
         {
@@ -64,12 +71,48 @@ namespace Knot.NativePreview
                 changed = true;
             }
         }
-        internal void ResetProfile(MediaInfo info, MediaConfig profile)
+        // Compute the current policy before the new encoder's first submission.
+        // This does not publish a new current profile or consume pressure until
+        // priming succeeds, so target failure can still restore the old source.
+        internal PreparedVideoQuality PrepareProfile(IMediaSource source, MediaConfig profile, MediaInfo? restore)
+        {
+            MediaInfo info = source.Info;
+            PreparedVideoQuality prepared;
+            lock (gate)
+            {
+                uint desiredFps = restore.HasValue ? Math.Min(info.Fps, restore.Value.Fps) : info.Fps;
+                uint desiredRate = restore.HasValue ? Math.Min(info.Bitrate, restore.Value.Bitrate) : info.Bitrate;
+                if (preference == 1) { desiredFps = Math.Min(30U, info.Fps); desiredRate = info.Bitrate; }
+                else if (preference == 2) { desiredFps = info.Fps; desiredRate = Math.Min(20000000U, info.Bitrate); }
+                else if (receiverPressure || writePressure)
+                {
+                    desiredFps = Math.Min(desiredFps, Math.Min(30U, info.Fps));
+                    if (writePressure) desiredRate = Math.Max(Math.Min(4000000U, info.Bitrate), desiredRate * 3U / 4U);
+                }
+                prepared = new PreparedVideoQuality { Info = info, Profile = profile,
+                    PreferenceRevision = preferenceRevision, ReceiverRevision = receiverRevision, WriteRevision = writeRevision };
+                prepared.Info.Fps = desiredFps; prepared.Info.Bitrate = desiredRate;
+            }
+            // Driver work stays on the media MTA but never holds up the reader's
+            // policy/heartbeat admission lock. A later preference is retained.
+            IAdaptiveMediaSource adaptive = source as IAdaptiveMediaSource;
+            if ((info.Fps != prepared.Info.Fps || info.Bitrate != prepared.Info.Bitrate) &&
+                (adaptive == null || !adaptive.TrySetQuality(prepared.Info.Fps, prepared.Info.Bitrate)))
+                throw new ProtocolException("encoder");
+            return prepared;
+        }
+        internal void CommitProfile(PreparedVideoQuality prepared, long now)
         {
             lock (gate)
             {
-                fps = info.Fps; bitrate = info.Bitrate; maxFps = profile.Fps; maxBitrate = profile.Bitrate;
-                receiverPressure = writePressure = false; healthy = 0; nextChange = 0; supported = true; changed = true;
+                fps = prepared.Info.Fps; bitrate = prepared.Info.Bitrate;
+                maxFps = prepared.Profile.Fps; maxBitrate = prepared.Profile.Bitrate;
+                // Events admitted after preparation belong to the next policy
+                // tick. Never erase them when publishing the primed profile.
+                if (receiverRevision == prepared.ReceiverRevision) receiverPressure = false;
+                if (writeRevision == prepared.WriteRevision) writePressure = false;
+                healthy = 0; supported = true; changed = true;
+                nextChange = preferenceRevision == prepared.PreferenceRevision ? now + 2L * Stopwatch.Frequency : 0;
             }
         }
         internal void Snapshot(ref MediaInfo info)

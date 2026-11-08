@@ -301,9 +301,10 @@ HRESULT Encoder::Receive(AccessUnit& output) {
     ComPtr<IMFSample> supplied;
     if (result.pSample && result.pSample != owned.Get()) supplied.Attach(result.pSample);
     if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-        // Async transforms advertise every output by event and must not use
-        // NEED_MORE_INPUT. For sync transforms it is the terminal drain signal.
-        if (async_) return E_FAIL;
+        // Preserve the normal streaming retry behavior of async encoders that
+        // return NEED_MORE_INPUT despite having signaled output. Only draining
+        // requires strict async event completion; sync uses this terminal signal.
+        if (async_ && draining_) return E_FAIL;
         if (draining_) {
             if (inFlight_ != 0 || !stamps_.empty()) return E_FAIL;
             drainSignaled_ = true;

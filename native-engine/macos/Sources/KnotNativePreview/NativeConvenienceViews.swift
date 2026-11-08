@@ -5,11 +5,12 @@ struct NativeWorkToolsActions: View {
     let clipboard: ClipboardModel?
     let quality: QualityModel?
     let clipboardAction: (Bool) -> Void
+    var qualityDisabled = false
     var body: some View {
         Group {
             Toggle("Mac 단축키 · ⌘를 Ctrl로", isOn: $macShortcuts)
             if let clipboard { NativeClipboardActions(clipboard: clipboard, action: clipboardAction) }
-            if let quality { NativeQualityActions(quality: quality) }
+            if let quality { NativeQualityActions(quality: quality).disabled(qualityDisabled) }
         }
     }
 }

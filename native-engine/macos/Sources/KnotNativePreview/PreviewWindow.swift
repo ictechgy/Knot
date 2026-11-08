@@ -572,7 +572,7 @@ struct PreviewWindow: View {
                 ZStack {
                     Color.black.opacity(0.18).onTapGesture { setFilesVisible(false) }
                     if let files = simulatedFiles ?? model.files {
-                        NativeFilePanel(files: files, owner: filePromises, beforeAction: { model.releaseInput() }, close: { setFilesVisible(false) })
+                        NativeFilePanel(files: files, owner: filePromises, beforeAction: { model.releaseInput(); model.acceptedLocalInteraction() }, close: { setFilesVisible(false) })
                             .frame(maxWidth: 520, maxHeight: 540).padding(24)
                     } else {
                         VStack(alignment: .leading, spacing: 16) {
@@ -609,13 +609,13 @@ struct PreviewWindow: View {
                     .disabled(model.phase != .streaming)
             } else if let quality = model.quality {
                 Menu { NativeQualityActions(quality: quality) } label: { Label("화질", systemImage: "slider.horizontal.3") }
-                    .help("해상도 변경과 영상 절전은 두 앱 모두 Native.18 이상이 필요해요.")
+                    .help("이 연결에서는 해상도 변경과 영상 절전을 사용할 수 없어요. 두 앱의 버전과 Windows 미디어 지원을 확인하세요.")
             }
             Button {
                 setFilesVisible(true)
                 if let files = model.files, !files.isBusy { files.refresh() }
             } label: { Label("파일", systemImage: "folder") }.disabled(model.phase != .streaming)
-            Button { model.releaseInput(); windowState.toggleFullscreen() } label: {
+            Button { model.releaseInput(); model.acceptedLocalInteraction(); windowState.toggleFullscreen() } label: {
                 Label(immersive ? "전체 화면 나가기" : "전체 화면", systemImage: "arrow.up.left.and.arrow.down.right")
             }.labelStyle(.iconOnly).help(immersive ? "전체 화면 나가기" : "전체 화면")
                 .disabled(!immersive && model.phase != .streaming)
@@ -633,13 +633,13 @@ struct PreviewWindow: View {
             } label: {
                 Label(model.textMode ? "Mac 입력기 · Caps Lock 한/영" : "물리 키보드", systemImage: "keyboard")
             }.menuStyle(.borderlessButton).fixedSize()
-                .onChange(of: model.textMode) { _, _ in model.releaseInput() }
+                .onChange(of: model.textMode) { _, _ in model.releaseInput(); model.acceptedLocalInteraction() }
             Menu {
-                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: model.clipboard, quality: model.quality, clipboardAction: { model.performClipboardGesture(paste: $0) })
+                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: model.clipboard, quality: model.quality, clipboardAction: { model.performClipboardGesture(paste: $0) }, qualityDisabled: model.videoControl?.blocksInput == true)
             } label: { Label("작업 도구", systemImage: "slider.horizontal.3") }.menuStyle(.borderlessButton).fixedSize()
-                .onChange(of: model.macShortcuts) { _, _ in model.releaseInput() }
+                .onChange(of: model.macShortcuts) { _, _ in model.releaseInput(); model.acceptedLocalInteraction() }
             if let audio = simulatedAudio ?? model.audio {
-                NativeAudioControls(audio: audio, beforeAction: { model.releaseInput() })
+                NativeAudioControls(audio: audio, beforeAction: { model.releaseInput(); model.acceptedLocalInteraction() })
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {

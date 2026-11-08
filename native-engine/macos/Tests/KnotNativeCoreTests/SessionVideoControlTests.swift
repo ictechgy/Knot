@@ -12,6 +12,8 @@ private final class Video18Channel: NativeChannel, @unchecked Sendable {
     private var waiter: (Int, CheckedContinuation<Data, any Error>)?
     private var closed = false
     private var sent: [Packet] = []
+    private let failKind: Kind?
+    init(failKind: Kind? = nil) { self.failKind = failKind }
     func start() async throws {}
     func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
@@ -22,7 +24,10 @@ private final class Video18Channel: NativeChannel, @unchecked Sendable {
             } else { waiter = (count, continuation); lock.unlock() }
         }
     }
-    func send(_ packet: Packet) async throws { lock.withLock { sent.append(packet) } }
+    func send(_ packet: Packet) async throws {
+        if packet.kind == failKind { throw NativeFailure.transport }
+        lock.withLock { sent.append(packet) }
+    }
     func feed(_ data: Data) {
         lock.lock(); guard !closed else { lock.unlock(); return }
         precondition(bytes.count + data.count <= 8192); bytes.append(data)
@@ -53,9 +58,9 @@ private actor Video18AudioSink: NativeAudioPlaying {
     func stop() {}
 }
 private func video18SessionStatus(_ operation: VideoControlOperation, id: UInt64 = 1, epoch: UInt64 = 0,
-                                  outcome: VideoControlOutcome = .applied, paused: Bool = true, next: UInt64 = 0) -> Packet {
+                                  outcome: VideoControlOutcome = .applied, reason: VideoControlReason = .none, paused: Bool = true, next: UInt64 = 0) -> Packet {
     var bytes = Data([1, operation.rawValue]); bytes.appendBE(id); bytes.appendBE(epoch)
-    bytes.append(contentsOf: [outcome.rawValue, 0, paused ? 1 : 0])
+    bytes.append(contentsOf: [outcome.rawValue, reason.rawValue, paused ? 1 : 0])
     bytes.appendBE(UInt32(64)); bytes.appendBE(UInt32(64)); bytes.appendBE(UInt32(30)); bytes.appendBE(UInt32(1_000_000)); bytes.appendBE(next)
     return Packet(kind: .videoControlStatus, payload: bytes)
 }
@@ -64,7 +69,21 @@ private func video18SessionStatus(_ operation: VideoControlOperation, id: UInt64
     while !predicate(), ContinuousClock.now < deadline { await Task.yield() }
     try #require(predicate())
 }
+private final class Video18TrustedClient: NativeTrustedConnecting, Sendable {
+    let invitation: Invitation
+    init(_ invitation: Invitation) { self.invitation = invitation }
+    func connect(revoke: Bool) async throws -> Invitation? { invitation }
+    func close() {}
+}
+private func video18SavedDevice() throws -> SavedNativeDevice {
+    let fields: [String: Any] = ["id": Invitation.encodeBase64URL(Data(repeating: 1, count: 32)), "name": "Fresh synthetic PC",
+        "address": "192.168.50.12", "certificateSHA256": String(repeating: "a", count: 64),
+        "secret": Data(repeating: 2, count: 32).base64EncodedString()]
+    return try JSONDecoder().decode(SavedNativeDevice.self, from: JSONSerialization.data(withJSONObject: fields)).validated()
+}
 @MainActor private func video18Start(channel: Video18Channel, audio: Video18Channel? = nil,
+                                             savedDevice: SavedNativeDevice? = nil,
+                                             expectVideoControl: @escaping SessionModel.VideoControlExpectation = { try await $0.expectVideoControl($1) },
                                              makeDecoder: @escaping @MainActor (VideoProfile) -> any NativeVideoDecoding = { NativeDecoder(width: $0.width, height: $0.height) }) async throws -> (SessionModel, Video18Presenter) {
     let presenter = Video18Presenter()
     let audioFactory: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)?
@@ -73,12 +92,16 @@ private func video18SessionStatus(_ operation: VideoControlOperation, id: UInt64
             try NativeAudioSession(invitation: invitation, makeChannel: { _ in audio }, makePlayer: { Video18AudioSink() })
         }
     } else { audioFactory = nil }
-    let model = SessionModel(makeDecoder: makeDecoder, makeChannel: { _ in channel }, makeAudioSession: audioFactory,
-                             makeClipboard: { ClipboardModel(send: $0, readText: { nil }, writeText: { _ in false }) })
-    model.surface = presenter
     let json = try JSONSerialization.data(withJSONObject: ["v": 1, "address": "192.168.50.12", "port": 48631,
         "certificateSHA256": String(repeating: "a", count: 64), "token": Invitation.encodeBase64URL(Data(repeating: 5, count: 32))])
-    model.review("knot-native:v1:" + Invitation.encodeBase64URL(json)); model.connect()
+    let invitation = try Invitation("knot-native:v1:" + Invitation.encodeBase64URL(json))
+    let model = SessionModel(makeDecoder: makeDecoder, makeChannel: { _ in channel }, expectVideoControl: expectVideoControl,
+                             makeTrustedClient: { _, _ in Video18TrustedClient(invitation) },
+                             initialSavedDevices: savedDevice.map { [$0] } ?? [], makeAudioSession: audioFactory,
+                             makeClipboard: { ClipboardModel(send: $0, readText: { nil }, writeText: { _ in false }) })
+    model.surface = presenter
+    if let savedDevice { model.connectSaved(savedDevice.id) }
+    else { model.review("knot-native:v1:" + Invitation.encodeBase64URL(json)); model.connect() }
     try await video18Wait { model.phase == .approval && channel.waiting }
     let token = Invitation.encodeBase64URL(Data(repeating: 8, count: 32))
     let ready = Data((#"{"v":1,"codec":"h264-annexb","width":64,"height":64,"fps":30,"bitrate":1000000,"hardwareEncoder":true,"qualityVersion":1,"videoControlVersion":1,"clipboardVersion":1,"filesVersion":2,"filePort":48634,"fileToken":""# + token + #"","fileRootName":"Fresh fixture"}"#).utf8)
@@ -333,4 +356,80 @@ func activeApplicationIdlePauseConsumesLocalUseAndResumesWithoutReplaying(_ gest
     cancelled.cancel()
     do { try await cancelled.value; Issue.record("Cancelled decoder drain completed") } catch {}
     #expect(!decoder.waiting && !nextDeadline.waiting)
+}
+
+@Test @MainActor func streamingHostProtocolErrorIsTerminalWithoutLegacyUpdateAdvice() async throws {
+    let channel = Video18Channel()
+    let (model, _) = try await video18Start(channel: channel, savedDevice: video18SavedDevice())
+    defer { model.disconnect() }
+    channel.feed(Packet(kind: .error, payload: Data(#"{"code":"protocol"}"#.utf8)).encoded)
+    try await video18Wait { model.phase == .failed }
+    #expect(model.status.contains("형식 오류") && !model.status.contains("Native.18") && !model.status.contains("업데이트"))
+    #expect(!model.hasPendingReconnect && channel.isClosed)
+}
+
+@Test @MainActor func videoControlLocalExpectationFailureIsTerminalButActualWriteFailureCanRecover() async throws {
+    for clientStateFailure in [true, false] {
+        let channel = Video18Channel(failKind: clientStateFailure ? nil : .videoControl)
+        let (model, _) = try await video18Start(channel: channel, savedDevice: video18SavedDevice(),
+            expectVideoControl: { reader, request in
+                if clientStateFailure { throw NativeFailure.state }
+                try await reader.expectVideoControl(request)
+            })
+        let control = try #require(model.videoControl)
+        control.pause()
+        try await video18Wait { model.phase == .failed }
+        #expect(channel.isClosed && model.hasPendingReconnect == !clientStateFailure)
+        #expect(model.diagnostics.firstIssue?.issue == (clientStateFailure ? .protocolFailure : .writeTransport))
+        #expect(!channel.writes.contains { $0.kind == .videoControl })
+        model.disconnect()
+    }
+}
+
+@Test @MainActor func localSpaceAndCapsLockRoutesDoNotConsumeOrResumePausedVideo() async throws {
+    let channel = Video18Channel()
+    let (model, _) = try await video18Start(channel: channel)
+    defer { model.disconnect() }
+    let control = try #require(model.videoControl)
+    control.pause(manual: false)
+    try await video18Wait { channel.writes.contains { $0.kind == .videoControl } }
+    for key in UInt16(123)...126 {
+        let route = MacKeyboardRouting.route(keyCode: key, modifiers: .control, textMode: true, hasMarkedText: false, ownsPhysicalDown: false)
+        #expect(route == .localSpace && !model.consumeVideoResumeGesture(route: route))
+    }
+    let caps = MacKeyboardRouting.route(keyCode: 57, modifiers: [], textMode: true, hasMarkedText: false, ownsPhysicalDown: false)
+    #expect(caps == .localCapsLock && !model.consumeVideoResumeGesture(route: caps))
+    channel.feed(video18SessionStatus(.pause, outcome: .preparing, paused: false).encoded + video18SessionStatus(.pause).encoded)
+    try await video18Wait { control.isPaused && !control.isApplying }
+    // Expire the real host-control cooldown, then prove local routes did not
+    // leave a desired-resume intent while the automatic pause was pending.
+    try await Task.sleep(for: .milliseconds(2050))
+    control.tick()
+    #expect(channel.writes.filter { $0.kind == .videoControl }.count == 1 && !control.isApplying)
+    #expect(model.consumeVideoResumeGesture(route: .interpretText))
+    try await video18Wait { channel.writes.filter { $0.kind == .videoControl }.count == 2 }
+    channel.feed(video18SessionStatus(.resume, id: 2, outcome: .rejected, reason: .initializationFailed).encoded)
+    try await video18Wait { control.isPaused && !control.isApplying && !control.isAutomaticallyPaused }
+    #expect(!model.consumeVideoResumeGesture(route: .localSpace) && !model.consumeVideoResumeGesture(route: .localCapsLock))
+    for _ in 0..<20 {
+        model.setApplicationActive(false); model.setApplicationActive(true)
+        #expect(model.consumeVideoResumeGesture(route: .physical))
+        control.tick()
+    }
+    #expect(channel.writes.filter { $0.kind == .videoControl }.count == 2 && control.pending == nil)
+    #expect(control.status.contains("화면 재개"))
+}
+
+@Test @MainActor func qualityPreferenceCannotChangeWhileVideoTransactionOrPauseBlocksInput() async throws {
+    let channel = Video18Channel()
+    let (model, _) = try await video18Start(channel: channel)
+    defer { model.disconnect() }
+    let control = try #require(model.videoControl)
+    control.pause()
+    let preference = Packet(kind: .qualityPreference, payload: Data([1]))
+    #expect(!model.sendControl(preference))
+    try await video18Wait { channel.writes.contains { $0.kind == .videoControl } }
+    channel.feed(video18SessionStatus(.pause, outcome: .preparing, paused: false).encoded + video18SessionStatus(.pause).encoded)
+    try await video18Wait { control.isPaused && !control.isApplying }
+    #expect(!model.sendControl(preference) && !channel.writes.contains { $0.kind == .qualityPreference })
 }

@@ -68,6 +68,7 @@ namespace Knot.NativePreview
             VideoControlStopDuringOpen();
             VideoControlFailedResumeStaysPaused();
             VideoControlPrimeFailure();
+            VideoControlPolicyTransitions();
             VideoControlDrainFailure(1, 1, "encoder");
             VideoControlDrainFailure(2, 2, "capture");
             VideoControlDrainFailure(3, 1, "encoder");
@@ -95,10 +96,11 @@ namespace Knot.NativePreview
         private sealed class VideoFixtureFactory : IConfigurableMediaFactory, IDisposable
         {
             internal readonly List<string> Trace = new List<string>();
+            internal readonly List<uint[]> FirstReads = new List<uint[]>();
             internal readonly ManualResetEvent OpenEntered = new ManualResetEvent(false), ContinueOpen = new ManualResetEvent(true);
             internal readonly ManualResetEvent DrainEntered = new ManualResetEvent(false), ContinueDrain = new ManualResetEvent(true);
             internal int Opened, Closed, Reads, DrainReads, Active, PeakActive, Attempts, BlockAttempt, DrainFailure;
-            internal bool SameThread = true;
+            internal bool SameThread = true, GateDrain;
             internal volatile bool FailRollback;
             private int ownerThread;
             public MediaConfig InitialConfig { get { return new MediaConfig { Width = 1920, Height = 1080, Fps = 60, Bitrate = 12000000 }; } }
@@ -122,7 +124,8 @@ namespace Knot.NativePreview
                 private readonly VideoFixtureFactory owner;
                 private readonly MediaConfig config;
                 private bool first = true, draining, drained, disposed;
-                internal Source(VideoFixtureFactory owner, MediaConfig config) { this.owner = owner; this.config = config; }
+                private uint effectiveFps, effectiveBitrate;
+                internal Source(VideoFixtureFactory owner, MediaConfig config) { this.owner = owner; this.config = config; effectiveFps = config.Fps; effectiveBitrate = config.Bitrate; }
                 public MediaInfo Info { get { return new MediaInfo { Width = config.Width, Height = config.Height, Fps = config.Fps, Bitrate = config.Bitrate,
                     DesktopWidth = 3840, DesktopHeight = 2160, HardwareEncoder = 1 }; } }
                 private int Unit(byte[] buffer, bool idr, out uint written, out uint flags, out ulong timestamp)
@@ -133,14 +136,19 @@ namespace Knot.NativePreview
                 public int Read(byte[] buffer, out uint written, out uint flags, out ulong timestamp)
                 {
                     owner.CheckThread(); Check(!draining && !disposed); Interlocked.Increment(ref owner.Reads);
-                    if (first) { first = false; return Unit(buffer, config.Bitrate != 14000000, out written, out flags, out timestamp); }
+                    if (first)
+                    {
+                        first = false;
+                        lock (owner.FirstReads) owner.FirstReads.Add(new uint[] { config.Bitrate, effectiveFps, effectiveBitrate });
+                        return Unit(buffer, config.Bitrate != 14000000, out written, out flags, out timestamp);
+                    }
                     Thread.Sleep(10); written = flags = 0; timestamp = 0; return 1;
                 }
                 public int BeginDrain()
                 {
                     owner.CheckThread(); Check(!disposed && !draining); draining = true;
                     lock (owner.Trace) owner.Trace.Add("begin-drain");
-                    if (owner.DrainFailure != 0)
+                    if (owner.DrainFailure != 0 || owner.GateDrain)
                     {
                         owner.DrainEntered.Set();
                         if (!owner.ContinueDrain.WaitOne(8000)) throw new InvalidOperationException("Synthetic drain gate expired.");
@@ -160,7 +168,7 @@ namespace Knot.NativePreview
                     if (!drained) { drained = true; return Unit(buffer, false, out written, out flags, out timestamp); }
                     written = flags = 0; timestamp = 0; return 2;
                 }
-                public bool TrySetQuality(uint fps, uint bitrate) { owner.CheckThread(); Check(!disposed && !draining && fps <= config.Fps && bitrate <= config.Bitrate); return true; }
+                public bool TrySetQuality(uint fps, uint bitrate) { owner.CheckThread(); Check(!disposed && !draining && fps <= config.Fps && bitrate <= config.Bitrate); effectiveFps = fps; effectiveBitrate = bitrate; return true; }
                 public void Dispose()
                 {
                     owner.CheckThread(); Check(!disposed); disposed = true;
@@ -169,19 +177,20 @@ namespace Knot.NativePreview
                 }
             }
         }
-        private static HostServer VideoHost(VideoFixtureFactory factory, FakeInput sink, Func<long> clock, Func<bool> desktop = null)
+        private static HostServer VideoHost(VideoFixtureFactory factory, FakeInput sink, Func<long> clock, Func<bool> desktop = null, Func<long> inputClock = null)
         {
-            HostServer server = new HostServer(IPAddress.Loopback, 0, factory, sink, true, null, false, clock, "Synthetic video PC", syntheticPausedDesktopAllowed: desktop);
+            HostServer server = new HostServer(IPAddress.Loopback, 0, factory, sink, true, null, false, clock, "Synthetic video PC", inputClock: inputClock, syntheticPausedDesktopAllowed: desktop);
             server.ApprovalRequested = delegate { server.RespondToApproval(true); };
             ++tlsFixtures; ++videoControlTlsFixtures; return server;
         }
-        private static Packet ReadVideoStatus(TlsClient client, List<Packet> video)
+        private static Packet ReadVideoStatus(TlsClient client, List<Packet> video, List<Packet> qualityStatus = null)
         {
             for (int i = 0; i < 100; ++i)
             {
                 Packet packet = client.Read();
                 if (packet.Kind == 3) { video.Add(packet); continue; }
-                if (packet.Kind == 4 || packet.Kind == 0x34) continue;
+                if (packet.Kind == 0x34) { if (qualityStatus != null) qualityStatus.Add(packet); continue; }
+                if (packet.Kind == 4) continue;
                 Check(packet.Kind == 0x36 && packet.Payload.Length == 45); return packet;
             }
             throw new InvalidOperationException("Synthetic video response bound exceeded.");
@@ -297,6 +306,79 @@ namespace Knot.NativePreview
                     Check(factory.Opened == 1 && factory.Closed == 1 && factory.Active == 0 && !server.MayResumeRegisteredConnection);
                 }
             }
+        }
+        private static void VideoControlPolicyTransitions()
+        {
+            long ticks = 0; int inputPackets = 0;
+            using (VideoFixtureFactory factory = new VideoFixtureFactory())
+            using (HostServer server = VideoHost(factory, new FakeInput(), delegate { return Interlocked.Read(ref ticks); },
+                inputClock: delegate {
+                    if (Thread.CurrentThread.Name == "Knot native input reader") Interlocked.Increment(ref inputPackets);
+                    return Stopwatch.GetTimestamp();
+                }))
+            {
+                factory.GateDrain = true; factory.ContinueDrain.Reset(); string token = Token(server); server.Start();
+                try
+                {
+                    using (TlsClient client = new TlsClient(server, server.Pin))
+                    {
+                        client.Send(1, VideoHello(token)); Check(client.ReadNonHeartbeat().Kind == 2);
+                        List<Packet> videos = new List<Packet>(), statuses = new List<Packet>();
+                        client.Send(0x35, VideoRequest(1, 1, 2560, 1440, 60, 40000000));
+                        CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 1, 0, 0, 0, 0, 0);
+                        Check(factory.DrainEntered.WaitOne(3000));
+                        SendPolicyDuringDrain(client, ref inputPackets, 1); factory.ContinueDrain.Set();
+                        Packet applied = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(applied, 1, 1, 1, 0, 0, 3);
+                        CheckQualityBeforeVideoStatus(statuses, applied, 30, 40000000);
+                        Packet fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1);
+                        Check(factory.FirstReads.Count == 2 && factory.FirstReads[1][1] == 30 && factory.FirstReads[1][2] == 40000000);
+                        Interlocked.Exchange(ref ticks, 3L * Stopwatch.Frequency); factory.DrainEntered.Reset(); factory.ContinueDrain.Reset();
+                        client.Send(0x35, VideoRequest(2, 2)); CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 2, 1, 0, 0, 0, 0);
+                        Check(factory.DrainEntered.WaitOne(3000)); SendPolicyDuringDrain(client, ref inputPackets, 2); factory.ContinueDrain.Set();
+                        Packet paused = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(paused, 2, 1, 1, 0, 1, 0);
+                        CheckQualityBeforeVideoStatus(statuses, paused, 30, 40000000);
+                        Interlocked.Exchange(ref ticks, 6L * Stopwatch.Frequency);
+                        client.Send(0x35, VideoRequest(3, 3)); CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 3, 1, 0, 0, 1, 0);
+                        applied = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(applied, 3, 2, 1, 0, 0, 5);
+                        CheckQualityBeforeVideoStatus(statuses, applied, 60, 20000000);
+                        fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1);
+                        Check(factory.FirstReads.Count == 3 && factory.FirstReads[2][1] == 60 && factory.FirstReads[2][2] == 20000000);
+                        client.Send(0x35, VideoRequest(1, 4, 222, 1080, 60, 12000000));
+                        Packet rejected = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(rejected, 4, 2, 2, 2, 0, 0);
+                        CheckQualityBeforeVideoStatus(statuses, rejected, 60, 20000000);
+                        client.Send(0x35, VideoRequest(3, 5));
+                        Packet noOp = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(noOp, 5, 2, 1, 0, 0, 0);
+                        CheckQualityBeforeVideoStatus(statuses, noOp, 60, 20000000);
+                        Interlocked.Exchange(ref ticks, 9L * Stopwatch.Frequency); factory.DrainEntered.Reset(); factory.ContinueDrain.Reset();
+                        client.Send(0x35, VideoRequest(1, 6, 2560, 1440, 60, 13000000));
+                        CheckVideoStatus(ReadVideoStatus(client, videos, statuses), 6, 2, 0, 0, 0, 0);
+                        Check(factory.DrainEntered.WaitOne(3000)); SendPolicyDuringDrain(client, ref inputPackets, 1); factory.ContinueDrain.Set();
+                        Packet rollback = ReadVideoStatus(client, videos, statuses); CheckVideoStatus(rollback, 6, 3, 3, 4, 0, 7);
+                        CheckQualityBeforeVideoStatus(statuses, rollback, 30, 40000000);
+                        fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1);
+                        Check(factory.FirstReads.Count == 4 && factory.FirstReads[3][1] == 30 && factory.FirstReads[3][2] == 40000000);
+                        server.Stop(); Check(server.WaitStopped(4000));
+                        Check(factory.Attempts == 5 && factory.Opened == 4 && factory.Closed == 4 && factory.Active == 0 && factory.PeakActive == 1 && factory.SameThread);
+                    }
+                }
+                finally { factory.ContinueDrain.Set(); }
+            }
+        }
+        private static void SendPolicyDuringDrain(TlsClient client, ref int inputPackets, byte preference)
+        {
+            int expected = Interlocked.CompareExchange(ref inputPackets, 0, 0) + 2;
+            client.Send(0x32, new byte[] { preference }); client.Send(0x25, new byte[0]);
+            // The ordered reader calls inputClock before each envelope. Reaching
+            // the heartbeat proves the preceding preference handler completed.
+            Stopwatch deadline = Stopwatch.StartNew();
+            while (Interlocked.CompareExchange(ref inputPackets, 0, 0) < expected && deadline.ElapsedMilliseconds < 3000) Thread.Sleep(5);
+            Check(Interlocked.CompareExchange(ref inputPackets, 0, 0) >= expected);
+        }
+        private static void CheckQualityBeforeVideoStatus(List<Packet> statuses, Packet status, uint fps, uint bitrate)
+        {
+            Check(statuses.Count > 0); Packet latest = statuses[statuses.Count - 1];
+            Check(NativeProtocol.U32(latest.Payload, 0) == fps && NativeProtocol.U32(latest.Payload, 4) == bitrate &&
+                NativeProtocol.U32(status.Payload, 29) == fps && NativeProtocol.U32(status.Payload, 33) == bitrate);
         }
         private static void VideoControlDrainFailure(int failure, byte operation, string expectedCode)
         {

@@ -93,6 +93,11 @@ final class VideoControlModel: ObservableObject {
             isApplying = false; automaticPausePending = false
             resumeDesired = request.operation == .resume && response.reason == .busy
             if resumeDesired { lastSubmitted = receivedAt ?? now() }
+            if request.operation == .resume, response.reason != .busy {
+                isAutomaticallyPaused = false
+                status = "화면을 다시 준비하지 못해 일시 정지를 유지해요. 다시 시도하려면 ‘화면 재개’를 누르세요."
+                return
+            }
             switch response.reason {
             case .unsupported: status = "요청한 해상도/FPS 조합을 지원하지 않아요. 현재 설정을 유지해요."
             case .outOfPolicy: status = "허용 범위를 벗어난 설정이에요. 현재 화면을 유지해요."
