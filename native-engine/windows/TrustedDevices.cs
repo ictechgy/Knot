@@ -150,6 +150,8 @@ namespace Knot.NativePreview
         private readonly string pin;
         private readonly Func<IPAddress, string, string, string, string, bool> register;
         private readonly Func<IPAddress, string, string> issue;
+        // This callback reports host availability only. Device lookup and the
+        // fresh challenge proof below remain the credential authority.
         private readonly Func<bool> authorize;
         private readonly Func<string, byte[]> lookupKey;
         private readonly Action<string> revoke;
@@ -217,7 +219,10 @@ namespace Knot.NativePreview
                         }
                         else if (op == "connect" || op == "revoke")
                         {
-                            if (value != "" || keyText != "" || !authorize()) throw new ProtocolException("auth");
+                            if (value != "" || keyText != "") throw new ProtocolException("auth");
+                            // A host that is closing cannot grant a connection,
+                            // but that does not reject the saved device's trust.
+                            if (!authorize()) throw new ProtocolException("busy");
                             byte[] key = lookupKey(id);
                             try
                             {

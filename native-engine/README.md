@@ -17,13 +17,15 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 
 ## Daily use (native.17)
 
-Native.17 repairs Mac recovery and is compatible with the native.16 Windows host. Updating the Mac is sufficient for these fixes. The Mac's **최근 연결 진단** disclosure retains fixed failure codes in memory across retries; it contains no endpoint or credential and is never written to a log file.
+Native.17 repairs Mac recovery and a Windows shutdown race that could report temporary host unavailability as rejected registration. Update both apps to receive both fixes. The wire format remains compatible with native.16. The Mac's **최근 연결 진단** disclosure retains fixed failure codes in memory across retries; it contains no endpoint or credential and is never written to a log file.
 
 Native.14 starts a short audio burst after a bounded prebuffer deadline, coalesces rapid mute changes and lets **소리 다시 연결** retry unavailable audio without disconnecting video. Connecting has its own visible state. Successful audio authentication clears earlier failures; eight consecutive failures still stop that listener with an authored notice. Both apps should be updated for these improvements. No precise AV-sync or physical performance guarantee is implied.
 
 When Mac sleeps during a registered connection or its transient recovery, it closes the old session and pauses retries. On wake, with automatic reconnect enabled, it waits briefly for networking and starts fresh pinned authentication. Transient failures retry with increasing delays up to 30 seconds and continue at that interval until the current connection recovers or the owner cancels; an extended outage does not exhaust recovery. Duplicate wake notifications cannot start parallel connections. Idle saved PCs, manual disconnect, forgetting a PC, choosing another target and terminal trust/protocol failures never authorize wake reconnect. A new Windows share still clears playback-sound consent. Active connections and their transport recovery hold a scoped user-initiated activity to keep App Nap from deferring their work; idle display sleep and actual system sleep remain allowed. This scheduling protection does not establish the cause of a particular observed disconnect.
 
 The pending recovery card remains visible from the sleep notification through the wake delay. Connection and target-selection actions during sleep cannot erase its intent; **재연결 취소** still stops recovery. Forgetting a device also stops its active recovery when local credential removal fails; the device remains listed with an error until removal succeeds.
+
+Stopping a Windows share revokes the current session and its tokens. Saved-device registration remains, and the Mac keeps waiting until its owner cancels recovery or that registration is revoked. Starting a new Windows share can therefore reconnect the waiting registered Mac.
 
 ### Playback sound and receiver fixes (native.13)
 

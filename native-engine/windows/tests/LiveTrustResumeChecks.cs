@@ -13,6 +13,7 @@ namespace Knot.NativePreview
         private static void LiveTrustResumeChecks()
         {
             stage = "trust-owner-terminal-gates"; ResumeOwnerAndTerminalGates();
+            TrustedShutdownAvailabilityChecks();
             CrossProcessTrustTransactions();
             IntegratedHostTrustChecks();
             IntegratedConsumedGrantLastRevocation();
@@ -29,6 +30,118 @@ namespace Knot.NativePreview
             }
             ResumeAfterAuthenticatedRevocation(true, false, true);
         }
+        private static void TrustedShutdownAvailabilityChecks()
+        {
+            NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(new MemoryTrustStorage());
+            string id = TrustId(1); store.Add(id, "Synthetic Mac", TrustId(9));
+            byte[] key = NativeProtocol.DecodeToken(TrustId(9)), wrongKey = NativeProtocol.DecodeToken(TrustId(8));
+            int available = 1, holdAvailability = 1, availabilityChecks = 0;
+            int registrations = 0, lookups = 0, grants = 0, revocations = 0, revokeCompletions = 0, proofs = 0;
+            object activityGate = new object(); List<string> nonces = new List<string>();
+            Action<string> challenged = delegate(string nonce) {
+                Check(NativeProtocol.DecodeToken(nonce).Length == 32 && !nonces.Contains(nonce)); nonces.Add(nonce); ++proofs;
+            };
+            try
+            {
+                using (ManualResetEvent availabilityEntered = new ManualResetEvent(false))
+                using (ManualResetEvent releaseAvailability = new ManualResetEvent(false))
+                using (RunCertificate certificate = new RunCertificate())
+                using (TrustedDeviceServer server = new TrustedDeviceServer(IPAddress.Loopback, certificate.Certificate, certificate.Pin,
+                    delegate(IPAddress peer, string token, string candidate, string name, string secret) { lock (activityGate) ++registrations; return false; },
+                    delegate(IPAddress peer, string name) { lock (activityGate) { ++grants; return "fresh-synthetic-shutdown-invitation"; } },
+                    delegate {
+                        Interlocked.Increment(ref availabilityChecks);
+                        if (Interlocked.CompareExchange(ref holdAvailability, 0, 0) != 0)
+                        {
+                            availabilityEntered.Set();
+                            if (!releaseAvailability.WaitOne(5000)) throw new IOException("Fresh synthetic availability wait expired.");
+                        }
+                        return Interlocked.CompareExchange(ref available, 0, 0) != 0;
+                    }, syntheticLoopback: true, port: 0,
+                    lookupKey: delegate(string candidate) { lock (activityGate) ++lookups; return store.Key(candidate); },
+                    revoke: delegate(string candidate) { lock (activityGate) ++revocations; store.Revoke(candidate); },
+                    revokeFinished: delegate { lock (activityGate) ++revokeCompletions; }))
+                {
+                    server.Start();
+                    try
+                    {
+                        stage = "trust-shutdown-connect-busy";
+                        // Hold a real pinned-TLS hello at the availability seam,
+                        // then enter the same unavailable state as HostServer.Stop.
+                        Packet busy = ShutdownTrustedRequest(server, certificate.Pin, id, key, "connect", challenged,
+                            delegate {
+                                Check(availabilityEntered.WaitOne(3000));
+                                Interlocked.Exchange(ref available, 0); Interlocked.Exchange(ref holdAvailability, 0); releaseAvailability.Set();
+                            });
+                        CheckShutdownTrustedError(busy, "busy");
+                        lock (activityGate) Check(availabilityChecks == 1 && lookups == 0 && proofs == 0 && nonces.Count == 0 && grants == 0 && revocations == 0 && revokeCompletions == 0 && registrations == 0);
+                        stage = "trust-shutdown-revoke-busy";
+                        CheckShutdownTrustedError(ShutdownTrustedRequest(server, certificate.Pin, id, key, "revoke", challenged), "busy");
+                        lock (activityGate) Check(availabilityChecks == 2 && lookups == 0 && proofs == 0 && nonces.Count == 0 && grants == 0 && revocations == 0 && revokeCompletions == 0 && registrations == 0);
+
+                        stage = "trust-shutdown-malformed-rejected";
+                        CheckShutdownTrustedError(ShutdownTrustedRequest(server, certificate.Pin, id, key, "connect", challenged, value: "invalid"), "rejected");
+                        CheckShutdownTrustedError(ShutdownTrustedRequest(server, certificate.Pin, id, key, "revoke", challenged, keyText: TrustId(9)), "rejected");
+                        lock (activityGate) Check(availabilityChecks == 2 && lookups == 0 && proofs == 0 && grants == 0 && revocations == 0 && registrations == 0);
+
+                        stage = "trust-shutdown-reopened-fresh-proof";
+                        Interlocked.Exchange(ref available, 1);
+                        Packet connected = ShutdownTrustedRequest(server, certificate.Pin, id, key, "connect", challenged);
+                        Check(connected.Kind == 1 && StrictJson.String(StrictJson.Parse(connected.Payload, "invitation"), "invitation") == "fresh-synthetic-shutdown-invitation");
+                        lock (activityGate) Check(availabilityChecks == 3 && lookups == 1 && proofs == 1 && grants == 1 && revocations == 0 && store.HasDevices);
+
+                        stage = "trust-shutdown-wrong-secret-rejected";
+                        CheckShutdownTrustedError(ShutdownTrustedRequest(server, certificate.Pin, id, wrongKey, "connect", challenged), "rejected");
+                        lock (activityGate) Check(availabilityChecks == 4 && lookups == 2 && proofs == 2 && grants == 1 && revocations == 0 && store.HasDevices);
+                        stage = "trust-shutdown-unknown-device-rejected";
+                        CheckShutdownTrustedError(ShutdownTrustedRequest(server, certificate.Pin, TrustId(2), key, "connect", challenged), "rejected");
+                        lock (activityGate) Check(availabilityChecks == 5 && lookups == 3 && proofs == 2 && grants == 1 && revocations == 0 && store.HasDevices);
+
+                        stage = "trust-shutdown-authenticated-revoke";
+                        Check(ShutdownTrustedRequest(server, certificate.Pin, id, key, "revoke", challenged).Kind == 1);
+                        WaitFor(delegate { lock (activityGate) return revokeCompletions == 1; });
+                        lock (activityGate) Check(availabilityChecks == 6 && lookups == 4 && proofs == 3 && grants == 1 && revocations == 1 && revokeCompletions == 1 && !store.HasDevices);
+                        stage = "trust-shutdown-revoked-device-rejected";
+                        CheckShutdownTrustedError(ShutdownTrustedRequest(server, certificate.Pin, id, key, "connect", challenged), "rejected");
+                        lock (activityGate) Check(availabilityChecks == 7 && lookups == 5 && proofs == 3 && nonces.Count == 3 && grants == 1 && revocations == 1 && revokeCompletions == 1 && registrations == 0 && !store.HasDevices);
+                    }
+                    finally { releaseAvailability.Set(); }
+                }
+            }
+            finally { Array.Clear(key, 0, key.Length); Array.Clear(wrongKey, 0, wrongKey.Length); }
+        }
+        private static Packet ShutdownTrustedRequest(TrustedDeviceServer server, string pin, string id, byte[] key, string operation,
+            Action<string> challenged, Action helloSent = null, string value = "", string keyText = "")
+        {
+            ++tlsFixtures;
+            using (System.Net.Sockets.TcpClient client = new System.Net.Sockets.TcpClient())
+            {
+                client.Connect(IPAddress.Loopback, server.ListeningPort); client.ReceiveTimeout = client.SendTimeout = 3000;
+                using (System.Net.Security.SslStream tls = new System.Net.Security.SslStream(client.GetStream(), false,
+                    delegate(object sender, System.Security.Cryptography.X509Certificates.X509Certificate peer, System.Security.Cryptography.X509Certificates.X509Chain chain, System.Net.Security.SslPolicyErrors errors) { return RunCertificate.VerifyPinned(peer, errors, pin); }))
+                {
+                    tls.AuthenticateAsClient("knot-native", null, System.Security.Authentication.SslProtocols.Tls12, false);
+                    TrustedWrite(tls, "{\"op\":" + StrictJson.Quote(operation) + ",\"id\":" + StrictJson.Quote(id) + ",\"name\":\"Synthetic Mac\",\"value\":" + StrictJson.Quote(value) + ",\"key\":" + StrictJson.Quote(keyText) + "}");
+                    if (helloSent != null) helloSent();
+                    Packet first = ReadShutdownTrusted(tls);
+                    if (first.Kind == 127) return first;
+                    Check(first.Kind == 1);
+                    string nonce = StrictJson.String(StrictJson.Parse(first.Payload, "nonce"), "nonce"); challenged(nonce);
+                    byte[] proof = NativeTrustedDevices.Proof(key, id, nonce, "Synthetic Mac", pin, operation);
+                    try { TrustedWrite(tls, "{\"proof\":" + StrictJson.Quote(NativeProtocol.Base64Url(proof)) + "}"); }
+                    finally { Array.Clear(proof, 0, proof.Length); }
+                    return ReadShutdownTrusted(tls);
+                }
+            }
+        }
+        private static Packet ReadShutdownTrusted(Stream stream)
+        {
+            byte[] header = NativeProtocol.ReadExactly(stream, 5); uint length = NativeProtocol.U32(header, 1);
+            Check(length > 0 && length <= 4096);
+            return new Packet(header[0], NativeProtocol.ReadExactly(stream, (int)length));
+        }
+        private static void CheckShutdownTrustedError(Packet packet, string code)
+        { Check(packet.Kind == 127 && StrictJson.String(StrictJson.Parse(packet.Payload, "code"), "code") == code); }
         private sealed class FreshTrustStorage : ITrustedDeviceStorage
         {
             private readonly ProtectedCertificateStorage inner;
