@@ -247,21 +247,24 @@ namespace Knot.NativePreview
                 MediaConfig oldProfile = profile;
                 CaptureRectangle rectangle = info.Rectangle;
                 bool wasPaused = paused, committed = false;
+                // The old encoder must drain successfully before replacement is
+                // allowed. A failed/malformed drain is a terminal media failure,
+                // never a target initialization failure eligible for rollback.
+                if (media != null)
+                {
+                    DrainVideo(media, tls, encoded, payload, ref sequence, ref heartbeat);
+                    IMediaSource old = media; media = null; DisposeVideoSource(old);
+                }
+                if (Stopping) throw new ProtocolException("closed");
+                if (request.Operation == 2)
+                {
+                    info = actual;
+                    NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, 1, 0, true, info, 0));
+                    Notify("화면과 원격 입력을 일시 정지했어요. 연결, 파일과 허용된 소리는 유지돼요.");
+                    return;
+                }
                 try
                 {
-                    if (media != null)
-                    {
-                        DrainVideo(media, tls, encoded, payload, ref sequence, ref heartbeat);
-                        IMediaSource old = media; media = null; DisposeVideoSource(old);
-                    }
-                    if (Stopping) throw new ProtocolException("closed");
-                    if (request.Operation == 2)
-                    {
-                        info = actual; committed = true;
-                        NativeProtocol.Write(tls, 0x36, VideoControlProtocol.Status(request, epoch, 1, 0, true, info, 0));
-                        Notify("화면과 원격 입력을 일시 정지했어요. 연결, 파일과 허용된 소리는 유지돼요.");
-                        return;
-                    }
                     MediaConfig targetProfile = request.Operation == 1 ? request.Config : profile;
                     uint written; ulong timestamp; MediaInfo targetInfo;
                     media = OpenPrimedVideo(targetProfile, rectangle, encoded, tls, ref heartbeat, wasPaused ? (MediaInfo?)actual : null, out targetInfo, out written, out timestamp);

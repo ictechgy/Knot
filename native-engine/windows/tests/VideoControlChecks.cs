@@ -68,6 +68,10 @@ namespace Knot.NativePreview
             VideoControlStopDuringOpen();
             VideoControlFailedResumeStaysPaused();
             VideoControlPrimeFailure();
+            VideoControlDrainFailure(1, 1, "encoder");
+            VideoControlDrainFailure(2, 2, "capture");
+            VideoControlDrainFailure(3, 1, "encoder");
+            VideoControlDrainFailure(4, 2, "encoder");
         }
         private static void VideoControlInputChecks()
         {
@@ -92,7 +96,8 @@ namespace Knot.NativePreview
         {
             internal readonly List<string> Trace = new List<string>();
             internal readonly ManualResetEvent OpenEntered = new ManualResetEvent(false), ContinueOpen = new ManualResetEvent(true);
-            internal int Opened, Closed, Reads, DrainReads, Active, PeakActive, Attempts, BlockAttempt;
+            internal readonly ManualResetEvent DrainEntered = new ManualResetEvent(false), ContinueDrain = new ManualResetEvent(true);
+            internal int Opened, Closed, Reads, DrainReads, Active, PeakActive, Attempts, BlockAttempt, DrainFailure;
             internal bool SameThread = true;
             internal volatile bool FailRollback;
             private int ownerThread;
@@ -111,7 +116,7 @@ namespace Knot.NativePreview
                 return new Source(this, config);
             }
             private void CheckThread() { SameThread &= ownerThread == Thread.CurrentThread.ManagedThreadId && Thread.CurrentThread.GetApartmentState() == ApartmentState.MTA; }
-            public void Dispose() { ContinueOpen.Set(); ContinueOpen.Dispose(); OpenEntered.Dispose(); }
+            public void Dispose() { ContinueOpen.Set(); ContinueDrain.Set(); ContinueOpen.Dispose(); OpenEntered.Dispose(); ContinueDrain.Dispose(); DrainEntered.Dispose(); }
             private sealed class Source : IDrainableMediaSource, IAdaptiveMediaSource
             {
                 private readonly VideoFixtureFactory owner;
@@ -134,11 +139,24 @@ namespace Knot.NativePreview
                 public int BeginDrain()
                 {
                     owner.CheckThread(); Check(!disposed && !draining); draining = true;
-                    lock (owner.Trace) owner.Trace.Add("begin-drain"); return 0;
+                    lock (owner.Trace) owner.Trace.Add("begin-drain");
+                    if (owner.DrainFailure != 0)
+                    {
+                        owner.DrainEntered.Set();
+                        if (!owner.ContinueDrain.WaitOne(8000)) throw new InvalidOperationException("Synthetic drain gate expired.");
+                    }
+                    return owner.DrainFailure == 1 ? -3 : 0;
                 }
                 public int ReadDrain(byte[] buffer, out uint written, out uint flags, out ulong timestamp)
                 {
                     owner.CheckThread(); Check(draining && !disposed); Interlocked.Increment(ref owner.DrainReads);
+                    if (owner.DrainFailure == 2) { written = flags = 0; timestamp = 0; return -4; }
+                    if (owner.DrainFailure == 3)
+                    {
+                        int status = Unit(buffer, false, out written, out flags, out timestamp);
+                        buffer[0] = 0xff; return status;
+                    }
+                    if (owner.DrainFailure == 4) { Thread.Sleep(50); written = flags = 0; timestamp = 0; return 1; }
                     if (!drained) { drained = true; return Unit(buffer, false, out written, out flags, out timestamp); }
                     written = flags = 0; timestamp = 0; return 2;
                 }
@@ -277,6 +295,36 @@ namespace Knot.NativePreview
                     CheckVideoStatus(ReadVideoStatus(client, videos), 1, 0, 1, 0, 1, 0);
                     Interlocked.Exchange(ref allowed, 0); Check(server.WaitStopped(4000));
                     Check(factory.Opened == 1 && factory.Closed == 1 && factory.Active == 0 && !server.MayResumeRegisteredConnection);
+                }
+            }
+        }
+        private static void VideoControlDrainFailure(int failure, byte operation, string expectedCode)
+        {
+            FakeInput sink = new FakeInput();
+            using (VideoFixtureFactory factory = new VideoFixtureFactory())
+            using (HostServer server = VideoHost(factory, sink, Stopwatch.GetTimestamp))
+            {
+                factory.DrainFailure = failure; factory.ContinueDrain.Reset(); string token = Token(server); server.Start();
+                using (TlsClient client = new TlsClient(server, server.Pin))
+                {
+                    client.Send(1, VideoHello(token)); Check(client.ReadNonHeartbeat().Kind == 2);
+                    client.Send(0x20, Key(1, 30).Payload); Check(sink.Down.WaitOne(3000));
+                    List<Packet> videos = new List<Packet>();
+                    client.Send(0x35, operation == 1 ? VideoRequest(1, 1, 2560, 1440, 60, 20000000) : VideoRequest(2, 1));
+                    CheckVideoStatus(ReadVideoStatus(client, videos), 1, 0, 0, 0, 0, 0);
+                    // Already-in-flight input after preparing must never be
+                    // injected, even while a failing drain polls to its deadline.
+                    Check(factory.DrainEntered.WaitOne(3000));
+                    client.Send(0x20, Key(1, 31).Payload); factory.ContinueDrain.Set();
+                    Packet terminal;
+                    do { terminal = client.Read(); } while (terminal.Kind == 4 || terminal.Kind == 0x34);
+                    Check(terminal.Kind == 127 && StrictJson.String(StrictJson.Parse(terminal.Payload, "code"), "code") == expectedCode);
+                    Check(server.WaitStopped(4000) && !server.IsActive && !server.MayResumeRegisteredConnection);
+                    Check(factory.Attempts == 1 && factory.Opened == 1 && factory.Closed == 1 && factory.Active == 0 && factory.PeakActive == 1 && factory.SameThread);
+                    Check(sink.Events.Contains("key:30:up") && !sink.Events.Contains("key:31:down"));
+                    Check(videos.Count == 1 && videos[0].Payload[16] == 1 && NativeProtocol.U64(videos[0].Payload, 0) == 1);
+                    Check(factory.Trace.Count == 3 && factory.Trace[0] == "open:12000000" && factory.Trace[1] == "begin-drain" && factory.Trace[2] == "close:12000000");
+                    Check(failure == 1 ? factory.DrainReads == 0 : factory.DrainReads >= 1);
                 }
             }
         }
