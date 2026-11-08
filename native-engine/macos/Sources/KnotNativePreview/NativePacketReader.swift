@@ -6,6 +6,7 @@ enum NativeIncoming: Sendable {
     case video(VideoPacket)
     case clipboard(ClipboardResponse)
     case quality(Data)
+    case videoControl(VideoControlStatus)
     case heartbeat
     case error(String)
 }
@@ -16,16 +17,19 @@ actor NativePacketReader {
     typealias Parser = @Sendable (Packet, inout ReceiveState) throws -> VideoPacket?
     private let channel: any NativeChannel
     private let parse: Parser
-    private var state = ReceiveState()
+    private var state: ReceiveState
     private var reading = false
     private var failed = false
 
     // Parser injection is internal and synchronous: fresh fixtures can hold media
     // work to verify UI/input independence without capturing or injecting input.
-    init(channel: any NativeChannel, parse: @escaping Parser = { try $1.accept($0) }) {
+    init(channel: any NativeChannel, videoControlVersion: Int = 0, parse: @escaping Parser = { try $1.accept($0) }) {
         self.channel = channel
+        self.state = ReceiveState(videoControlVersion: videoControlVersion)
         self.parse = parse
     }
+
+    func expectVideoControl(_ request: VideoControlRequest) throws { try state.expectVideoControl(request) }
 
     func next(timeout: Duration) async throws -> NativeIncoming {
         try Task.checkCancellation()
@@ -49,6 +53,7 @@ actor NativePacketReader {
                 guard let video else { throw NativeFailure.state }
                 return .video(video)
             case .qualityStatus: return .quality(bytes)
+            case .videoControlStatus: return .videoControl(try VideoControlStatus(bytes))
             case .clipboardResponse: return .clipboard(try ClipboardResponse(bytes))
             case .hostHeartbeat: return .heartbeat
             case .error:

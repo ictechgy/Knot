@@ -36,6 +36,15 @@ final class SessionModel: ObservableObject {
     @Published private(set) var savedDevices: [SavedNativeDevice] = []
     @Published private(set) var clipboard: ClipboardModel?
     @Published private(set) var quality: QualityModel?
+    @Published private(set) var videoControl: VideoControlModel?
+    @Published var idleVideoMinutes = 10 {
+        didSet { if !NativeVideoIdlePolicy.allowedMinutes.contains(idleVideoMinutes) { idleVideoMinutes = 10 } }
+    }
+    @Published var idleVideoBackgroundOnly = true
+    private var videoIdle = NativeVideoIdlePolicy()
+    private var videoEpoch: UInt64 = 0
+    private var packetReader: NativePacketReader?
+    private var videoControlObservation: AnyCancellable?
     @Published private(set) var audio: NativeAudioSession?
     private let makeClipboard: ClipboardFactory
     private let makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)?
@@ -96,7 +105,8 @@ final class SessionModel: ObservableObject {
     private var reader: Task<Void, Never>?
     private var writer: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
-    private var decoder: NativeDecoder?
+    private var decoder: (any NativeVideoDecoding)?
+    private let makeDecoder: @MainActor (VideoProfile) -> any NativeVideoDecoding
     private var input = InputBuffer()
     private var identity = UUID()
     private var connectedAt = ContinuousClock.now
@@ -112,7 +122,8 @@ final class SessionModel: ObservableObject {
     private var receiverPressure = ReceiverPressureWindow()
     var active: Bool { [.connecting, .approval, .decoding, .streaming].contains(phase) }
 
-    init(makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) },
+    init(makeDecoder: @escaping @MainActor (VideoProfile) -> any NativeVideoDecoding = { NativeDecoder(width: $0.width, height: $0.height) },
+         makeChannel: @escaping @Sendable (Invitation) throws -> any NativeChannel = { try TLSChannel(invitation: $0) },
          waitForInputDeadline: @escaping @MainActor @Sendable (ContinuousClock.Instant) async throws -> Void = { deadline in
              if ContinuousClock.now < deadline { try await Task.sleep(until: deadline) }
          },
@@ -140,6 +151,7 @@ final class SessionModel: ObservableObject {
              return id.map { ($0, expiry) }
          },
          makeClipboard: @escaping ClipboardFactory = { ClipboardModel(send: $0) }) {
+        self.makeDecoder = makeDecoder
         self.makeClipboard = makeClipboard
         self.writeUpdateResume = writeUpdateResume; self.takeUpdateResume = takeUpdateResume
         self.makeChannel = makeChannel
@@ -436,6 +448,7 @@ final class SessionModel: ObservableObject {
         beginConnectionActivity()
         let id = UUID(); identity = id; phase = .connecting; status = "Checking the secure connection…"
         input = InputBuffer(); inputRecovery = false
+        videoEpoch = 0; videoIdle.reset(now: .now)
         presentationBackpressureSince = nil; displayBehind = false; receiverPressure.reset()
         connectedAt = .now; lastIncoming = .now; lastHeartbeat = .now
         reader = Task { [weak self] in
@@ -446,7 +459,7 @@ final class SessionModel: ObservableObject {
                 guard self.identity == id, !Task.isCancelled else { transport.close(); return }
                 self.status = "Sending the connection request…"
                 // This write completes before the sole post-Hello writer starts.
-                try await transport.send(invitation.hello(name: label))
+                try await transport.send(invitation.hello(name: label, videoControlVersion: 1))
                 guard self.identity == id, !Task.isCancelled else { transport.close(); return }
                 self.invitation = nil // one-use token must not become reusable trust
                 self.connectedAt = .now
@@ -454,9 +467,10 @@ final class SessionModel: ObservableObject {
                 self.phase = .approval
                 self.status = self.numberAuthorized ? "Number verified. Preparing the host desktop…" : "Certificate verified. Waiting for host approval and native encoder startup…"
                 self.startTicker(id: id)
-                let packets = NativePacketReader(channel: transport)
+                let packets = NativePacketReader(channel: transport, videoControlVersion: 1)
+                self.packetReader = packets
                 while !Task.isCancelled, self.identity == id {
-                    let budget: Duration = self.phase == .approval ? .seconds(65) : .seconds(10)
+                    let budget: Duration = self.phase == .approval ? .seconds(65) : self.videoControl?.pending != nil ? .seconds(30) : .seconds(10)
                     let incoming = try await packets.next(timeout: budget)
                     guard self.identity == id, !Task.isCancelled else { return }
                     self.lastIncoming = .now
@@ -471,22 +485,14 @@ final class SessionModel: ObservableObject {
                         if let offer = ready.files {
                             self.files = try FileTransferModel(invitation: invitation, offer: offer)
                         }
-                        self.videoSize = CGSize(width: ready.width, height: ready.height)
-                        let decoder = NativeDecoder(width: ready.width, height: ready.height)
-                        decoder.onPerformanceEvent = { [weak self] event in
-                            guard let self, self.identity == id, [.decoding, .streaming].contains(self.phase) else { return }
-                            self.receiverPressure.decode(event, at: .now)
+                        let profile = VideoProfile(width: ready.width, height: ready.height, fps: ready.fps, bitrate: ready.bitrate)
+                        if ready.videoControlVersion == 1 {
+                            let control = VideoControlModel(actual: profile, onInteraction: { [weak self] in self?.acceptedLocalInteraction(resumeAutomatically: false) }, send: { [weak self] request in self?.sendVideoControl(request) ?? false })
+                            self.videoControl = control
+                            self.videoControlObservation = control.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
                         }
-                        decoder.onImage = { [weak self] image in
-                            guard let self, self.identity == id else { return }
-                            self.presentDecodedImage(image)
-                        }
-                        decoder.onFailure = { [weak self] in
-                            guard let self, self.identity == id else { return }
-                            self.diagnostics.record(.decoder)
-                            self.fail("The native decoder stopped. Create a new invitation to reconnect.")
-                        }
-                        self.decoder = decoder; self.phase = .decoding
+                        self.installDecoder(profile: profile, sessionID: id, epoch: 0)
+                        self.phase = .decoding
                         self.armPresentationFailure()
                         self.readyAt = .now
                         self.status = "Host approved and encoder ready. Waiting for the first decoded image…"
@@ -500,7 +506,8 @@ final class SessionModel: ObservableObject {
                     case .error(let code):
                         self.handleHostError(code); return
                     case .clipboard(let response): self.clipboard?.accept(response)
-                    case .quality(let response): self.quality?.accept(response)
+                    case .quality(let response): self.quality?.accept(response); self.videoControl?.acceptQuality(response)
+                    case .videoControl(let response): try await self.acceptVideoControl(response, sessionID: id)
                     case .heartbeat: break
                     }
                 }
@@ -511,11 +518,65 @@ final class SessionModel: ObservableObject {
             }
         }
     }
+    private func installDecoder(profile: VideoProfile, sessionID: UUID, epoch: UInt64) {
+        videoSize = CGSize(width: profile.width, height: profile.height)
+        let next = makeDecoder(profile)
+        next.onPerformanceEvent = { [weak self] event in
+            guard let self, self.identity == sessionID, self.videoEpoch == epoch, [.decoding, .streaming].contains(self.phase) else { return }
+            self.receiverPressure.decode(event, at: .now)
+        }
+        next.onImage = { [weak self] image in
+            guard let self, self.identity == sessionID, self.videoEpoch == epoch else { return }
+            self.presentDecodedImage(image)
+        }
+        next.onFailure = { [weak self] in
+            guard let self, self.identity == sessionID, self.videoEpoch == epoch else { return }
+            self.diagnostics.record(.decoder)
+            self.fail("The native decoder stopped. Create a new invitation to reconnect.")
+        }
+        decoder = next
+    }
+    private func acceptVideoControl(_ response: VideoControlStatus, sessionID: UUID) async throws {
+        let receivedAt = ContinuousClock.now
+        guard identity == sessionID, let control = videoControl else { throw NativeFailure.state }
+        if response.requiresReset || response.state == .paused {
+            if let old = decoder {
+                // Admission covers queued pixel delivery as well as VideoToolbox.
+                // A cancelled or overdue drain cannot retain a second decoder.
+                try await NativeVideoDecoderDrain.wait(old)
+                guard identity == sessionID, !Task.isCancelled else { throw CancellationError() }
+                old.stop(); decoder = nil
+            }
+            guard identity == sessionID, !Task.isCancelled else { throw CancellationError() }
+            receiverPressure.reset(); presentationBackpressureSince = nil; displayBehind = false
+            videoEpoch = response.videoEpoch
+            if response.state == .running { installDecoder(profile: response.actual, sessionID: sessionID, epoch: videoEpoch) }
+        }
+        control.accept(response, receivedAt: receivedAt)
+        if !control.blocksInput, !inputRecovery { input.recover() }
+    }
+    private func sendVideoControl(_ request: VideoControlRequest) -> Bool {
+        guard phase == .streaming, packetReader != nil else { return false }
+        clipboard?.cancel(); inputEpoch &+= 1
+        input.revoke(); if !inputRecovery { input.recover() }
+        surface?.forgetHeldKeys()
+        do { try input.append(request.packet); pumpWriter(); return true }
+        catch { return false }
+    }
+    func acceptedLocalInteraction(now: ContinuousClock.Instant = .now, resumeAutomatically: Bool = true) {
+        videoIdle.interaction(now: now)
+        if resumeAutomatically { videoControl?.resumeAfterLocalUse() }
+    }
+    func setApplicationActive(_ active: Bool, now: ContinuousClock.Instant = .now) {
+        videoIdle.focus(active, now: now)
+        if active { videoControl?.resumeAfterLocalUse() }
+    }
     func presentDecodedImage(_ image: CVPixelBuffer, now: ContinuousClock.Instant = .now) {
         guard [.decoding, .streaming].contains(phase) else { return }
         switch surface?.display(image) ?? .backpressure {
         case .presented:
             receiverPressure.presentation(accepted: true, at: now)
+            videoControl?.firstImageArrived()
             let beganStreaming = phase != .streaming
             let statusChanged = beganStreaming || displayBehind
             presentationBackpressureSince = nil; displayBehind = false
@@ -560,6 +621,7 @@ final class SessionModel: ObservableObject {
         case "capture": "Host capture is unavailable. Check its logged-in SDR primary display."
         case "encoder": "The host hardware H.264 encoder could not start."
         case "input": "The host stopped accepting input. Create a new invitation."
+        case "protocol": "연결 중 화질 조절에는 Mac과 Windows 앱 모두 Native.18 이상이 필요해요. 두 앱을 업데이트한 뒤 새 번호로 연결하세요."
         case "timeout": "The connection timed out. Create a new invitation."
         default: "The host closed the connection. Create a new invitation to reconnect."
         }
@@ -591,7 +653,7 @@ final class SessionModel: ObservableObject {
     /// The feedback interval is separate from the UI's continuous-stall notice.
     /// Keeping the existing one-byte protocol avoids changing stream schemas.
     func reportReceiverPressure(now: ContinuousClock.Instant = .now) {
-        guard phase == .streaming else { return }
+        guard phase == .streaming, videoControl?.blocksInput != true else { return }
         quality?.reportPressure(displayBehind || receiverPressure.isOverloaded(at: now), now: now)
     }
     /// Shared by the real ticker and inert lifecycle tests; host activity cannot
@@ -608,7 +670,20 @@ final class SessionModel: ObservableObject {
             diagnostics.record(.firstImageDeadline)
             fail("The first decoded image did not arrive. Create a new invitation."); return false
         }
-        let silence: Duration = phase == .approval ? .seconds(65) : .seconds(10)
+        if let pendingBegan = videoControl?.pendingBegan, now - pendingBegan >= .seconds(30) {
+            diagnostics.record(.protocolFailure)
+            fail("화면 변경 응답이 30초 안에 도착하지 않았어요. 새 연결로 다시 시도하세요."); return false
+        }
+        if let resetBegan = videoControl?.resetBegan, now - resetBegan >= .seconds(15) {
+            diagnostics.record(.firstImageDeadline)
+            fail("변경된 화면의 첫 이미지가 15초 안에 도착하지 않았어요. 새 연결로 다시 시도하세요."); return false
+        }
+        videoControl?.tick()
+        if phase == .streaming, let control = videoControl, !control.isApplying, !control.isPaused,
+           videoIdle.shouldPause(minutes: idleVideoMinutes, backgroundOnly: idleVideoBackgroundOnly, now: now) {
+            control.pause(manual: false)
+        }
+        let silence: Duration = phase == .approval ? .seconds(65) : videoControl?.pending != nil ? .seconds(30) : .seconds(10)
         guard now - lastIncoming < silence else {
             transportFailed(reason: .silenceDeadline)
             return false
@@ -616,16 +691,22 @@ final class SessionModel: ObservableObject {
         return true
     }
     @discardableResult func sendControl(_ packet: Packet) -> Bool {
-        guard phase == .streaming, !fileUIInputSuspended else { return false }
-        do { try input.append(packet); pumpWriter(); return true }
+        guard [.clipboardRequest, .qualityPreference, .qualityFeedback].contains(packet.kind),
+              phase == .streaming, !fileUIInputSuspended,
+              packet.kind != .clipboardRequest || videoControl?.blocksInput != true else { return false }
+        do {
+            try input.append(packet)
+            if packet.kind != .qualityFeedback { acceptedLocalInteraction() }
+            pumpWriter(); return true
+        }
         catch {
             if input.needsRecovery { inputQueueSaturated() }
             return false
         }
     }
     @discardableResult func send(_ packet: Packet) -> Bool {
-        guard phase == .streaming, !inputRecovery, !fileUIInputSuspended else { return false }
-        do { try input.append(packet); pumpWriter(); return true }
+        guard packet.kind != .videoControl, phase == .streaming, !inputRecovery, !fileUIInputSuspended, videoControl?.blocksInput != true else { return false }
+        do { try input.append(packet); acceptedLocalInteraction(); pumpWriter(); return true }
         catch {
             inputQueueSaturated()
             return false
@@ -638,7 +719,7 @@ final class SessionModel: ObservableObject {
     }
     func captureExplorerDrag(nonce: Data) async throws -> [NativeFileEntry] {
         guard nonce.count == 16, phase == .streaming, let files, !files.isBusy,
-              !inputRecovery, !fileUIInputSuspended else { throw NativeFileError.busy }
+              !inputRecovery, !fileUIInputSuspended, videoControl?.blocksInput != true else { throw NativeFileError.busy }
         let run = identity
         // This barrier shares the bounded ordered input queue with the accepted
         // left-down and moves. The file socket alone cannot authorize a drag.
@@ -655,7 +736,7 @@ final class SessionModel: ObservableObject {
     @discardableResult func sendCommittedText(_ text: String) -> Bool {
         // Empty AppKit commits are a no-op, including while input is paused.
         guard !text.isEmpty else { return true }
-        guard phase == .streaming, !inputRecovery, !fileUIInputSuspended else { return false }
+        guard phase == .streaming, !inputRecovery, !fileUIInputSuspended, videoControl?.blocksInput != true else { return false }
         let packet: Packet
         do { packet = try Input.text(text) }
         catch {
@@ -678,7 +759,8 @@ final class SessionModel: ObservableObject {
     /// independently of validation, empty clipboards or send admission failure.
     /// Preserve an existing focus/recovery pause without pausing normal typing.
     @discardableResult func prepareClipboardGesture() -> Bool {
-        guard phase == .streaming, !fileUIInputSuspended else { return false }
+        guard phase == .streaming, !fileUIInputSuspended, videoControl?.blocksInput != true else { return false }
+        acceptedLocalInteraction()
         clipboard?.cancel()
         let wasPaused = inputRecovery
         inputEpoch &+= 1
@@ -706,12 +788,15 @@ final class SessionModel: ObservableObject {
     func recoverInput() {
         guard !fileUIInputSuspended else { return }
         guard phase == .streaming else { return }
+        acceptedLocalInteraction()
+        // The gesture that resumes video is consumed locally, never replayed.
+        guard videoControl?.blocksInput != true else { return }
         input.recover(); inputRecovery = false
         updateStreamingStatus()
     }
     func setFileUIInputSuspended(_ suspended: Bool) {
         fileUIInputSuspended = suspended
-        if suspended { releaseInput() }
+        if suspended { acceptedLocalInteraction(); releaseInput() }
     }
     private func pumpWriter() {
         guard !writerBusy, let channel, [.approval, .decoding, .streaming].contains(phase) else { return }
@@ -736,6 +821,11 @@ final class SessionModel: ObservableObject {
                     if ContinuousClock.now - self.lastHeartbeat >= .seconds(2) { packet = Packet(kind: .heartbeat) }
                     else if let pending = self.input.pop() { packet = pending }
                     else { break }
+                    if packet.kind == .videoControl {
+                        guard let packetReader = self.packetReader else { throw NativeFailure.state }
+                        try await packetReader.expectVideoControl(VideoControlRequest(packet.payload))
+                        guard self.identity == id, !Task.isCancelled else { return }
+                    }
                     try await channel.send(packet)
                     guard self.identity == id, !Task.isCancelled else { return }
                     if packet.kind == .heartbeat { self.lastHeartbeat = .now }
@@ -761,6 +851,8 @@ final class SessionModel: ObservableObject {
         trustedTask?.cancel(); trustedTask = nil; trustedClient?.close(); trustedClient = nil
         registrationTask?.cancel(); registrationTask = nil; pendingRegistration = nil
         clipboard?.cancel(); clipboard = nil; quality = nil
+        videoControl?.cancel(); videoControl = nil; videoControlObservation = nil
+        packetReader = nil; videoEpoch = 0; videoIdle.reset(now: .now)
         audio?.onChange = nil; audio?.stop(); audio = nil
         files?.close(); files = nil
         fileUIInputSuspended = false

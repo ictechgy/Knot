@@ -10,13 +10,15 @@ namespace Knot.NativePreview
     internal sealed class NativeQualityController
     {
         private readonly object gate = new object();
-        private readonly uint maxFps, maxBitrate;
+        private uint maxFps, maxBitrate;
         private uint fps, bitrate;
         private byte preference;
         private bool receiverPressure, writePressure, changed = true, supported = true;
         private long nextChange;
         private int healthy;
-        internal NativeQualityController(MediaInfo info) { fps = maxFps = info.Fps; bitrate = maxBitrate = info.Bitrate; }
+        internal NativeQualityController(MediaInfo info) : this(info, new MediaConfig { Fps = info.Fps, Bitrate = info.Bitrate }) { }
+        internal NativeQualityController(MediaInfo info, MediaConfig profile)
+        { fps = info.Fps; bitrate = info.Bitrate; maxFps = profile.Fps; maxBitrate = profile.Bitrate; }
         internal static byte[] WithOffer(byte[] ready) {
             string json = StrictJson.Utf8.GetString(ready);
             if (!json.EndsWith("}", StringComparison.Ordinal)) throw new ProtocolException("protocol");
@@ -62,6 +64,16 @@ namespace Knot.NativePreview
                 changed = true;
             }
         }
+        internal void ResetProfile(MediaInfo info, MediaConfig profile)
+        {
+            lock (gate)
+            {
+                fps = info.Fps; bitrate = info.Bitrate; maxFps = profile.Fps; maxBitrate = profile.Bitrate;
+                receiverPressure = writePressure = false; healthy = 0; nextChange = 0; supported = true; changed = true;
+            }
+        }
+        internal void Snapshot(ref MediaInfo info)
+        { lock (gate) { info.Fps = fps; info.Bitrate = bitrate; } }
         internal byte[] TakeStatus()
         {
             lock (gate) {

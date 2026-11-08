@@ -53,8 +53,13 @@ public struct InputBuffer: Sendable {
     public var count: Int { queue.count }
     public init() {}
     public mutating func append(_ packet: Packet) throws {
-        guard !needsRecovery || [.clipboardRequest, .qualityPreference, .qualityFeedback].contains(packet.kind) else { throw NativeFailure.saturated }
-        guard [.key, .text, .pointer, .wheel, .explorerDrag, .clipboardRequest, .qualityPreference, .qualityFeedback].contains(packet.kind) else { throw NativeFailure.malformed }
+        guard !needsRecovery || [.clipboardRequest, .qualityPreference, .qualityFeedback, .videoControl].contains(packet.kind) else { throw NativeFailure.saturated }
+        guard [.key, .text, .pointer, .wheel, .explorerDrag, .clipboardRequest, .qualityPreference, .qualityFeedback, .videoControl].contains(packet.kind) else { throw NativeFailure.malformed }
+        if packet.kind == .videoControl {
+            _ = try VideoControlRequest(packet.payload)
+            guard !queue.contains(where: { $0.kind == .videoControl }), queue.count < 256, byteCount + packet.wireByteCount <= 16_384 else { throw NativeFailure.saturated }
+            queue.append(packet); byteCount += packet.wireByteCount; return
+        }
         if packet.kind == .clipboardRequest {
             try ClipboardProtocol.validateRequest(packet.payload)
             guard !queue.contains(where: { $0.kind == .clipboardRequest }), queue.count < 256,
@@ -109,7 +114,12 @@ public struct InputBuffer: Sendable {
         guard queue.count < 256, byteCount + 5 <= 16_384 else { revoke(); throw NativeFailure.saturated }
         queue.append(Packet(kind: .releaseAll)); byteCount += 5
     }
-    public mutating func revoke() { queue = [Packet(kind: .releaseAll)]; byteCount = 5; needsRecovery = true }
+    public mutating func revoke() {
+        // Focus and input revocation must not discard an admitted video transaction.
+        let controls = queue.filter { $0.kind == .videoControl }
+        queue = [Packet(kind: .releaseAll)] + controls
+        byteCount = queue.reduce(0) { $0 + $1.wireByteCount }; needsRecovery = true
+    }
     /// Only an explicit focus/click recovery may re-admit input; release remains first in line.
     public mutating func recover() { needsRecovery = false }
 }

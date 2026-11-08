@@ -23,7 +23,7 @@ from build_snapshot import source_snapshot, validate_corresponding_source
 from native_updates import build_resource as native_update_resource
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.17"
+VERSION = "0.1.0-native.18"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -323,6 +323,40 @@ def validate_four_k_fixture(record, fixture, fps, frames):
         raise ValueError("4K codec evidence must prove its exact fresh software-only synthetic profile") from error
 
 
+def validate_reconfiguration_fixture(record, fixture):
+    if (type(record.get("v")) is not int or record["v"] != 1 or
+            record.get("synthetic") is not True or record.get("captureInvoked") is not False or
+            record.get("hardwareEncoder") is not False or record.get("codec") != "h264-annexb" or
+            any(record.get(key) is not True for key in ["parserChecks", "reconfigurationFixture", "drainChecks", "emptyDrainChecks"]) or
+            type(record.get("frames")) is not int or record["frames"] != 36 or
+            type(record.get("keyframes")) is not int or not 3 <= record["keyframes"] <= 36 or
+            not fixture.is_file() or fixture.is_symlink() or not 0 < fixture.stat().st_size <= 64 * 1024 * 1024):
+        raise ValueError("Reconfiguration evidence must prove three drained software-only synthetic epochs")
+    segments, units = record.get("segments"), record.get("accessUnits")
+    if not isinstance(segments, list) or len(segments) != 3 or not isinstance(units, list) or len(units) != 36:
+        raise ValueError("Reconfiguration segment/AU count differs")
+    profiles = [(320, 180, 30, 2000000), (640, 360, 60, 4000000), (320, 180, 30, 2000000)]
+    offset, timestamp, keyframes = 0, 0, 0
+    for epoch, (segment, profile) in enumerate(zip(segments, profiles)):
+        expected = dict(epoch=epoch, width=profile[0], height=profile[1], fps=profile[2], bitrate=profile[3],
+                        frames=12, firstSequence=epoch * 12 + 1)
+        if (not isinstance(segment, dict) or any(type(segment.get(k)) is not int or segment[k] != v for k, v in expected.items()) or
+                segment.get("drainComplete") is not True or segment.get("firstOutputIDR") is not True or
+                type(segment.get("drainInFlight")) is not int or not 1 <= segment["drainInFlight"] <= 2):
+            raise ValueError("Reconfiguration epoch/profile/drain contract differs")
+        for index, unit in enumerate(units[epoch * 12:(epoch + 1) * 12]):
+            sequence = epoch * 12 + index + 1
+            if (not isinstance(unit, dict) or any(type(unit.get(k)) is not int for k in
+                    ["sequence", "offset", "length", "flags", "timestampMicros", "epoch"]) or
+                    unit["sequence"] != sequence or unit["epoch"] != epoch or unit["offset"] != offset or
+                    not 1 <= unit["length"] <= 4194287 or unit["flags"] not in (0, 1) or
+                    index == 0 and unit["flags"] != 1 or unit["timestampMicros"] <= timestamp):
+                raise ValueError("Reconfiguration AU order, bounds or first IDR differs")
+            offset += unit["length"]; timestamp = unit["timestampMicros"]; keyframes += unit["flags"]
+    if offset != fixture.stat().st_size or keyframes != record["keyframes"]:
+        raise ValueError("Reconfiguration AU byte coverage or keyframe count differs")
+
+
 def inno_compiler():
     if "INNO_COMPILER" in os.environ:
         explicit = os.environ["INNO_COMPILER"]
@@ -408,7 +442,7 @@ class Builder:
         for name in ["NATIVE-BUILD.json", "SHA256SUMS", "NATIVE-INPUTS.json", "native-ui-visual-checks.json",
                      "native-cpp-checks.json", "native-host-checks.json", "native-installer-metadata.json",
                      "native-pairing-crypto-checks.json", "native-pairing-managed-checks.json",
-                     "synthetic-codec.json", "synthetic-codec-4k.json", "synthetic-4k60.json",
+                     "synthetic-codec.json", "synthetic-codec-4k.json", "synthetic-4k60.json", "synthetic-reconfigure.json",
                      "native-wait-checks.json", "native-audio-conversion-checks.json"]:
             path = self.output / name
             info = output_stat(path)
@@ -531,7 +565,7 @@ class Builder:
                 report.get("audioEngineInvoked") is not False or type(report.get("audioAdaptersInvoked")) is not int or
                 report["audioAdaptersInvoked"] != 0):
             raise ValueError("Mac audio UI fixtures must never invoke audio devices or output engines")
-        if not isinstance(rows, list) or not 7 <= len(rows) <= 64:
+        if not isinstance(rows, list) or not 7 <= len(rows) <= 96:
             raise ValueError("UI fixture state coverage is missing or excessive")
         names = set()
         for row in rows:
@@ -541,6 +575,13 @@ class Builder:
             if name.casefold() in names:
                 raise ValueError("Duplicate UI fixture image name")
             names.add(name.casefold())
+            if self.platform == "macos" and name.startswith(("mac-video-", "mac-fullscreen-video-")):
+                if row.get("videoControlVisible") is not True or row.get("videoControlSyntheticOnly") is not True:
+                    raise ValueError("Video control UI state must use the inert negotiated model")
+                expected_paused = "paused" in name
+                expected_applying = "applying" in name
+                if row.get("videoControlPaused") is not expected_paused or row.get("videoControlApplying") is not expected_applying:
+                    raise ValueError("Video pause/applying UI differs from authored state")
             image = directory / name
             if not image.is_file() or image.is_symlink() or image.stat().st_size > 32 * 1024 * 1024:
                 raise ValueError("UI fixture image is missing or unsafe")
@@ -559,7 +600,9 @@ class Builder:
                       "audio-connecting", "audio-connecting-compact", "fullscreen-audio-connecting-controls",
                       "wake-reconnect", "wake-reconnect-compact",
                       "sleep-recovery-compact",
-                      "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls"]}
+                      "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls",
+                      "video-settings", "video-settings-compact", "video-settings-dark", "video-streaming", "video-paused-auto",
+                      "video-paused-manual-compact", "fullscreen-video-applying", "fullscreen-video-paused", "video-rollback-settings", "video-unsupported-settings"]}
                     if self.platform == "macos" else
                     {"windows-" + name + ".png" for name in
                      ["idle", "invitation", "request", "preparing", "sharing", "failure", "help",
@@ -876,9 +919,15 @@ class Builder:
         self.run("native-media-synthetic-4k60", [self.output / "KnotNativeMediaSynthetic.exe", "--software-4k60",
                                                fixture_4k60, fixture_record_4k60], timeout=180)
         validate_four_k_fixture(json.loads(fixture_record_4k60.read_text()), fixture_4k60, 60, 12)
+        fixture_reconfigure = self.output / "synthetic-reconfigure.h264"
+        fixture_record_reconfigure = self.output / "synthetic-reconfigure.json"
+        self.run("native-media-synthetic-reconfigure", [self.output / "KnotNativeMediaSynthetic.exe", "--software-reconfigure",
+                  fixture_reconfigure, fixture_record_reconfigure], timeout=180)
+        validate_reconfiguration_fixture(json.loads(fixture_record_reconfigure.read_text()), fixture_reconfigure)
         if self.media_only:
             return [self.output / "KnotNativeMedia.dll", fixture, fixture_record, fixture_4k, fixture_record_4k,
-                    fixture_4k60, fixture_record_4k60, wait_record, cpp_record, self.output / "native-audio-conversion-checks.json"]
+                    fixture_4k60, fixture_record_4k60, fixture_reconfigure, fixture_record_reconfigure,
+                    wait_record, cpp_record, self.output / "native-audio-conversion-checks.json"]
         sources = sorted((ROOT / "native-engine/windows").glob("*.cs"))
         executable = self.csharp("Knot-Native-Preview", sources, "Knot.NativePreview.Program", "winexe")
         managed_crypto = self.csharp("KnotNativePairingBridgeChecks",
@@ -918,7 +967,7 @@ class Builder:
                              ("actualFreshTreeFixtures", 9), ("actualFreshTreeTlsFixtures", 28), ("actualPersistentCertificateFixtures", 3),
                              ("actualCrossProcessCertificateLeaseFixtures", 1), ("actualFreshAudioFixtures", 13),
                              ("actualFreshAudioTlsFixtures", 30), ("actualSyntheticAudioCaptureFixtures", 6),
-                             ("actualFreshAudioHostFixtures", 3)]:
+                             ("actualFreshAudioHostFixtures", 3), ("actualFreshVideoControlTlsFixtures", 8)]:
             if type(parsed.get(key)) is not int or parsed[key] < minimum:
                 raise ValueError("Native host folder/Explorer checks incomplete: " + key)
         (self.output / "native-host-checks.json").write_text(json.dumps(parsed, indent=2) + "\n")
@@ -959,7 +1008,8 @@ class Builder:
             raise ValueError("Native installer version metadata differs from the checked preview version")
         installer_metadata.write_text(json.dumps(inspected, indent=2) + "\n")
         return [executable, self.output / "KnotNativeMedia.dll", setup, fixture, fixture_record, fixture_4k, fixture_record_4k,
-                fixture_4k60, fixture_record_4k60, wait_record, self.output / "native-audio-conversion-checks.json",
+                fixture_4k60, fixture_record_4k60, fixture_reconfigure, fixture_record_reconfigure,
+                wait_record, self.output / "native-audio-conversion-checks.json",
                 self.output / "native-host-checks.json", public_certificate, public_pin, persistent_certificate, persistent_pin, file_vectors, cpp_record, installer_metadata,
                 visual_record, managed_record, *crypto_products]
 

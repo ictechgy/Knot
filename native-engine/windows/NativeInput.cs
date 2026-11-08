@@ -29,13 +29,16 @@ namespace Knot.NativePreview
         private readonly CaptureRectangle rectangle;
         private readonly HashSet<ushort> keys = new HashSet<ushort>();
         private readonly HashSet<byte> buttons = new HashSet<byte>();
-        private bool closed;
+        private bool closed, suspended;
+        internal bool IsSuspended { get { lock (gate) return suspended || closed; } }
         internal InputSession(IInputSink sink, CaptureRectangle rectangle) { this.sink = sink; this.rectangle = rectangle; }
         internal void Accept(Packet packet)
         {
             lock (gate)
             {
                 if (closed) throw new ProtocolException("closed");
+                if (suspended && packet.Kind != 0x24 && packet.Kind != 0x25)
+                { ValidateSuspendedPacket(packet); return; }
                 if (!AdmitDuringExplorerDrag(packet)) return;
                 byte[] p = packet.Payload;
                 switch (packet.Kind)
@@ -93,6 +96,46 @@ namespace Knot.NativePreview
                 }
             }
         }
+        private static void ValidateSuspendedPacket(Packet packet)
+        {
+            byte[] p = packet.Payload;
+            switch (packet.Kind)
+            {
+                case 0x20:
+                    if (p.Length != 4 || p[0] > 1 || p[3] > 1 || NativeProtocol.U16(p, 1) < 1 || NativeProtocol.U16(p, 1) > 255) throw new ProtocolException("protocol");
+                    break;
+                case 0x21:
+                    if (p.Length < 1 || p.Length > 1024) throw new ProtocolException("protocol");
+                    string text;
+                    try { text = StrictJson.Utf8.GetString(p); } catch (System.Text.DecoderFallbackException) { throw new ProtocolException("protocol"); }
+                    StrictJson.ValidUnicode(text, false);
+                    if (text.Length > 512) throw new ProtocolException("protocol");
+                    break;
+                case 0x22: if (p.Length != 5 || p[0] > 6) throw new ProtocolException("protocol"); break;
+                case 0x23:
+                    if (p.Length != 8 || NativeProtocol.I32(p, 0) < -1200 || NativeProtocol.I32(p, 0) > 1200 || NativeProtocol.I32(p, 4) < -1200 || NativeProtocol.I32(p, 4) > 1200) throw new ProtocolException("protocol");
+                    break;
+                case 0x26: if (p.Length != 16) throw new ProtocolException("protocol"); break;
+                default: throw new ProtocolException("protocol");
+            }
+        }
+        // This gate also owns Explorer leases and clipboard shortcuts. Once
+        // suspended, no in-flight reader can inject after the release barrier.
+        internal bool Suspend()
+        {
+            lock (gate)
+            {
+                if (closed) return false;
+                suspended = true;
+                if (!CancelExplorerGesture() || !Release()) throw new ProtocolException("input");
+                System.Threading.Monitor.PulseAll(gate);
+                return true;
+            }
+        }
+        internal bool Resume()
+        {
+            lock (gate) { if (closed) return false; suspended = false; return true; }
+        }
         // Explicit clipboard gestures own a short atomic shortcut. No queued
         // worker may retain keys after cancellation or a partial SendInput.
         internal void ClipboardShortcut(byte operation)
@@ -101,7 +144,9 @@ namespace Knot.NativePreview
             {
                 try
                 {
-                    if (closed || operation < 1 || operation > 2) throw new ProtocolException("input");
+                    if (operation < 1 || operation > 2) throw new ProtocolException("input");
+                    if (closed) throw new ProtocolException("input");
+                    if (suspended) return;
                     if (!CancelExplorerGesture() || !Release()) throw new ProtocolException("input");
                     ushort scan = operation == 1 ? (ushort)0x2e : (ushort)0x2f;
                     try

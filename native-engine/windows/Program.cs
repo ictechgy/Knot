@@ -235,7 +235,7 @@ namespace Knot.NativePreview
             SetOwnedFont(qualityProfiles, PreviewStyle.Type(10, FontStyle.Regular, scale));
             qualityProfiles.Items.AddRange(new object[] { MediaQualityProfile.Sharp4K, MediaQualityProfile.Smooth4K, MediaQualityProfile.Compatible1080 });
             qualityProfiles.SelectedIndex = 0; qualityCard.Content.Controls.Add(qualityProfiles);
-            Label qualityHint = MakeLabel("Windows 원본을 최대 4K로 전송해요. 원본보다 확대하지 않으며, GPU가 지원해야 해요. 문제가 있으면 호환 모드로 다시 시작하세요.", 9, FontStyle.Regular);
+            Label qualityHint = MakeLabel("공유를 시작할 화질이에요. 연결한 Mac에서 최대 4K · 60fps · 40Mbps까지 바꿀 수 있어요. 원본보다 확대하지 않으며 GPU 지원이 필요해요.", 9, FontStyle.Regular);
             qualityHint.Margin = new Padding(0, P(10), 0, 0); qualityCard.Content.Controls.Add(qualityHint);
 
             networkCard = new PreviewCard(scale); networkCard.Dock = DockStyle.Top; body.Controls.Add(networkCard);

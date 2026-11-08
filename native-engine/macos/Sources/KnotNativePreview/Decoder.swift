@@ -5,7 +5,7 @@ import KnotNativeCore
 
 /// VideoToolbox emits synthetic or host-provided H.264 pixels only. No capture APIs.
 @MainActor
-final class NativeDecoder {
+final class NativeDecoder: NativeVideoDecoding {
     private var session: VTDecompressionSession?
     private var format: CMVideoFormatDescription?
     private var sps: [Data] = [], pps: [Data] = []

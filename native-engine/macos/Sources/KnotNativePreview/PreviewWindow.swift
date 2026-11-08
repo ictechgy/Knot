@@ -17,6 +17,7 @@ struct PreviewWindow: View {
     var simulatedFullscreen: Bool? = nil
     var simulatedFiles: FileTransferModel? = nil
     var simulatedAudio: NativeAudioSession? = nil
+    var simulatedVideo: VideoControlModel? = nil
     @StateObject private var windowState: NativeWindowState
     @StateObject private var enrollment: EnrollmentModel
     @State private var secret = ""
@@ -30,7 +31,7 @@ struct PreviewWindow: View {
     @State private var activeTarget: NativeTarget?
     @State private var deviceToForget: SavedNativeDevice?
 
-    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false, updates: NativeUpdateModel? = nil, simulatedAudio: NativeAudioSession? = nil) {
+    init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false, updates: NativeUpdateModel? = nil, simulatedAudio: NativeAudioSession? = nil, simulatedVideo: VideoControlModel? = nil) {
         self.model = model
         self.updates = updates
         _windowState = StateObject(wrappedValue: windowState ?? NativeWindowState())
@@ -40,6 +41,7 @@ struct PreviewWindow: View {
         self.simulatedFullscreen = simulatedFullscreen
         self.simulatedFiles = simulatedFiles
         self.simulatedAudio = simulatedAudio
+        self.simulatedVideo = simulatedVideo
         _showingFiles = State(initialValue: initialFiles)
         _showingHelp = State(initialValue: initialHelp)
         _showingOptions = State(initialValue: model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters.")
@@ -171,6 +173,9 @@ struct PreviewWindow: View {
                     Text("이 이름은 연결 요청의 참고 정보예요. 확인된 기기 신원을 뜻하지 않아요.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                     Toggle("등록 기기의 일시적인 끊김 자동 복구", isOn: $model.autoReconnect)
+                    Divider()
+                    NativeIdleVideoSettings(minutes: $model.idleVideoMinutes, backgroundOnly: $model.idleVideoBackgroundOnly,
+                        onInteraction: { model.acceptedLocalInteraction() })
                     Text("빠른 화면 전환 · Control+Option+Command+B").font(.system(size: 12)).foregroundStyle(.secondary)
                     if let updates { NativeUpdatesView(updates: updates, beforeExit: { model.prepareForUpdate() }) }
                 }.padding(.top, 12)
@@ -517,6 +522,11 @@ struct PreviewWindow: View {
                 else { NativeDesktop(model: model, onFilesDropped: { setFilesVisible(true) }, inputSuspended: showingFiles) }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay {
+                    if let video = simulatedVideo ?? model.videoControl, model.phase == .streaming {
+                        NativeVideoStateOverlay(video: video, beforeAction: { model.releaseInput(); model.acceptedLocalInteraction() })
+                    }
+                }
+                .overlay {
                     if model.phase != .streaming {
                         VStack(spacing: 16) {
                             ProgressView().controlSize(.regular)
@@ -588,14 +598,27 @@ struct PreviewWindow: View {
                 Text(verbatim: "\(Int(model.videoSize.width))×\(Int(model.videoSize.height))")
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
             }
-            NativeStatusChip(title: phaseTitle, symbol: model.phase == .streaming ? "display" : "clock", tint: model.phase == .streaming ? .blue : .secondary)
+            if model.phase == .streaming, let video = simulatedVideo ?? model.videoControl {
+                NativeVideoConnectionChip(video: video)
+            } else {
+                NativeStatusChip(title: phaseTitle, symbol: model.phase == .streaming ? "display" : "clock", tint: model.phase == .streaming ? .blue : .secondary)
+            }
+            if let video = simulatedVideo ?? model.videoControl {
+                NativeVideoControlsButton(video: video, quality: model.quality, idleMinutes: $model.idleVideoMinutes,
+                    idleBackgroundOnly: $model.idleVideoBackgroundOnly, beforeAction: { model.releaseInput(); model.acceptedLocalInteraction() })
+                    .disabled(model.phase != .streaming)
+            } else if let quality = model.quality {
+                Menu { NativeQualityActions(quality: quality) } label: { Label("화질", systemImage: "slider.horizontal.3") }
+                    .help("해상도 변경과 영상 절전은 두 앱 모두 Native.18 이상이 필요해요.")
+            }
             Button {
                 setFilesVisible(true)
                 if let files = model.files, !files.isBusy { files.refresh() }
             } label: { Label("파일", systemImage: "folder") }.disabled(model.phase != .streaming)
             Button { model.releaseInput(); windowState.toggleFullscreen() } label: {
                 Label(immersive ? "전체 화면 나가기" : "전체 화면", systemImage: "arrow.up.left.and.arrow.down.right")
-            }.disabled(!immersive && model.phase != .streaming)
+            }.labelStyle(.iconOnly).help(immersive ? "전체 화면 나가기" : "전체 화면")
+                .disabled(!immersive && model.phase != .streaming)
             Button("연결 종료") { model.disconnect() }.buttonStyle(.bordered)
         }.padding(.horizontal, 20).padding(.vertical, 14).background(NativeStyle.surface)
     }

@@ -11,7 +11,7 @@ namespace Knot.NativePreview
 {
     internal enum HostEnrollmentState { None, Number, Pending, RegisteredWaiting, Stopped }
 
-    internal sealed class HostServer : IDisposable
+    internal sealed partial class HostServer : IDisposable
     {
         private readonly object gate = new object();
         private readonly IPAddress address;
@@ -65,6 +65,9 @@ namespace Knot.NativePreview
         private bool registrationUsed, registeredSession, registeredAvailable;
         private ClipboardBridge clipboard;
         private NativeQualityController quality;
+        private VideoControlMailbox videoControl;
+        private bool claimedVideoControl, videoInputSuspended;
+        private readonly Func<bool> pausedDesktopAllowed;
         internal bool IsRegisteredSession { get { lock (gate) return registeredSession; } }
         internal bool HasRegisteredDevices { get { lock (gate) return registeredAvailable; } }
         private bool mayResumeRegisteredConnection, terminalFailure;
@@ -112,7 +115,7 @@ namespace Knot.NativePreview
                             Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null,
                             FileSharingOptions files = null, Action<int, int, int> syntheticAfterEnrollment = null,
                             bool allowAudio = false, IAudioCaptureFactory audioFactory = null, bool syntheticRegisteredDevices = false,
-                            INativeTrustedDeviceStore syntheticTrustedDevices = null, IClipboardText syntheticClipboard = null)
+                            INativeTrustedDeviceStore syntheticTrustedDevices = null, IClipboardText syntheticClipboard = null, Func<bool> syntheticPausedDesktopAllowed = null)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
@@ -123,6 +126,9 @@ namespace Knot.NativePreview
             if ((syntheticTrustedDevices != null && (!syntheticLoopback || !enrollmentMode || !IPAddress.IsLoopback(address))) ||
                 (syntheticClipboard != null && (!syntheticLoopback || !IPAddress.IsLoopback(address))))
                 throw new ArgumentException("Synthetic child adapters require owned loopback fixtures.");
+            if (syntheticPausedDesktopAllowed != null && (!syntheticLoopback || !IPAddress.IsLoopback(address)))
+                throw new ArgumentException("Synthetic desktop policy requires an owned loopback fixture.");
+            pausedDesktopAllowed = syntheticLoopback ? (syntheticPausedDesktopAllowed ?? new Func<bool>(delegate { return true; })) : new Func<bool>(WindowsPausedDesktopPolicy.Allowed);
             trustedDevices = syntheticLoopback ? syntheticTrustedDevices : NativeTrustedDevices.Production;
             this.syntheticClipboard = syntheticClipboard;
             this.address = address; this.syntheticLoopback = syntheticLoopback;
@@ -369,8 +375,15 @@ namespace Knot.NativePreview
                     Notify("Approved. Initializing the primary SDR display and hardware encoder.");
                     media = mediaFactory.Open(); // create/read/close all stay on this MTA writer.
                     byte[] ready = media.Info.Ready();
-                    if (media is WindowsMediaSource) {
+                    if (media is IAdaptiveMediaSource) {
                         quality = new NativeQualityController(media.Info); ready = NativeQualityController.WithOffer(ready);
+                    }
+                    IConfigurableMediaFactory configurable = mediaFactory as IConfigurableMediaFactory;
+                    if (claimedVideoControl && configurable != null && media is IDrainableMediaSource && quality != null)
+                    {
+                        media.Info.ValidateProfile(configurable.InitialConfig);
+                        videoControl = new VideoControlMailbox();
+                        ready = VideoControlProtocol.WithOffer(ready);
                     }
                     FileServer preparedFiles = null;
                     if (claimedFiles)
@@ -391,7 +404,7 @@ namespace Knot.NativePreview
                         if (inputSink is WindowsInputSink || syntheticClipboard != null)
                         {
                             clipboard = new ClipboardBridge(ApplyClipboardShortcut,
-                                delegate { lock (gate) return active && !isStopped; }, syntheticClipboard ?? new WindowsClipboardText());
+                                delegate { lock (gate) return active && !isStopped && !videoInputSuspended; }, syntheticClipboard ?? new WindowsClipboardText());
                             ready = ClipboardProtocol.WithOffer(ready);
                         }
                         files = preparedFiles;
@@ -448,42 +461,31 @@ namespace Knot.NativePreview
                     byte[] payload = new byte[NativeProtocol.VideoLimit];
                     ulong sequence = 0;
                     long lastHeartbeat = Stopwatch.GetTimestamp();
+                    MediaConfig requestedProfile = configurable != null ? configurable.InitialConfig : new MediaConfig {
+                        Width = media.Info.Width, Height = media.Info.Height, Fps = media.Info.Fps, Bitrate = media.Info.Bitrate };
+                    MediaInfo currentInfo = media.Info;
+                    ulong videoEpoch = 0;
                     while (!Stopping)
                     {
-                        if (quality != null)
-                        {
-                            quality.Apply(media);
-                            byte[] changed = quality.TakeStatus();
-                            if (changed != null) NativeProtocol.Write(tls, 0x34, changed);
-                        }
-                        byte[] clipboardResponse;
-                        if (clipboard != null && clipboard.TryTake(out clipboardResponse)) NativeProtocol.Write(tls, 0x31, clipboardResponse);
-                        uint written, flags;
-                        ulong timestamp;
-                        int status = media.Read(encoded, out written, out flags, out timestamp);
-                        // An in-flight read can finish after transport teardown.
-                        // Preserve a real media failure before honoring Stop so
-                        // it cannot be reclassified as resumable transport loss.
-                        if (status < 0) throw NativeMediaErrors.ForStatus(status);
-                        if (status != 0 && status != 1) throw new ProtocolException("capture");
-                        if (status == 0)
-                        {
-                            if (written == 0 || written > encoded.Length || sequence == ulong.MaxValue) throw new ProtocolException("encoder");
-                            AnnexB.Validate(encoded, (int)written, flags);
-                        }
+                        if (media == null && !pausedDesktopAllowed()) throw new ProtocolException("capture", "display");
+                        WriteVideoSidecars(tls, ref lastHeartbeat);
+                        VideoControlRequest request;
+                        if (videoControl != null && sequence != 0 && videoControl.TryTake(out request))
+                            ProcessVideoControl(request, ref media, ref requestedProfile, ref currentInfo, ref videoEpoch,
+                                ref sequence, tls, encoded, payload, ref lastHeartbeat);
                         if (Stopping) return;
-                        if (status == 0)
+                        WriteVideoSidecars(tls, ref lastHeartbeat);
+                        if (media == null)
                         {
-                            NativeProtocol.Put64(payload, 0, ++sequence); NativeProtocol.Put64(payload, 8, timestamp); payload[16] = (byte)flags;
-                            Buffer.BlockCopy(encoded, 0, payload, 17, (int)written);
-                            long writeStart = Stopwatch.GetTimestamp();
-                            NativeProtocol.Write(tls, 3, payload, (int)written + 17);
-                            if (quality != null) quality.ObserveWrite((Stopwatch.GetTimestamp() - writeStart) * 1000.0 / Stopwatch.Frequency);
+                            stopped.WaitOne(100);
+                            continue;
                         }
-                        if (Stopwatch.GetTimestamp() - lastHeartbeat >= 2L * Stopwatch.Frequency)
-                        {
-                            NativeProtocol.Write(tls, 4, new byte[0]); lastHeartbeat = Stopwatch.GetTimestamp();
-                        }
+                        if (quality != null) quality.Apply(media);
+                        uint written, flags; ulong timestamp;
+                        int status = media.Read(encoded, out written, out flags, out timestamp);
+                        ValidateMediaRead(status, written, flags, encoded, false);
+                        if (Stopping) return;
+                        if (status == 0) WriteVideoUnit(tls, encoded, payload, written, flags, timestamp, ref sequence);
                     }
                 }
             }
@@ -573,8 +575,8 @@ namespace Knot.NativePreview
                     tls.AuthenticateAsServer(certificate.Certificate, false, SslProtocols.Tls12, false);
                     Packet hello = NativeProtocol.ReadClient(tls, true);
                     byte[] candidate;
-                    bool wantsFiles;
-                    string name = NativeProtocol.HelloName(hello.Payload, out candidate, out wantsFiles);
+                    bool wantsFiles, wantsVideoControl;
+                    string name = NativeProtocol.HelloName(hello.Payload, out candidate, out wantsFiles, out wantsVideoControl);
                     try
                     {
                         lock (gate)
@@ -587,7 +589,7 @@ namespace Knot.NativePreview
                             // Token consumption and scope publication have one
                             // winner against last-key revocation on this gate.
                             isClaimed = true; peerName = name; claimed = true; registrationDeadline = 0;
-                            claimedPeer = observedRemote;
+                            claimedPeer = observedRemote; claimedVideoControl = wantsVideoControl;
                             claimedFiles = fileOptions != null && wantsFiles && (!enrollmentMode || enrollmentAllowsFiles);
                             approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
                             if (enrollmentMode) { approved = true; approval.Set(); }
@@ -626,6 +628,7 @@ namespace Knot.NativePreview
                 lock (gate)
                 {
                     if (!active || isStopped || input == null) throw new ProtocolException("closed");
+                    if (videoInputSuspended) return;
                     attempted = true;
                     try { input.ClipboardShortcut(operation); }
                     catch
@@ -663,6 +666,7 @@ namespace Knot.NativePreview
                     if (!rate.TryConsume()) throw new ProtocolException("input", "input-rate");
                     Interlocked.Exchange(ref lastRead, now);
                     if (packet.Kind == 0x30) { if (clipboard == null) throw new ProtocolException("protocol"); clipboard.Handle(packet.Payload); }
+                    else if (packet.Kind == 0x35) { if (videoControl == null) throw new ProtocolException("protocol"); videoControl.Submit(VideoControlProtocol.Request(packet.Payload)); }
                     else if (packet.Kind == 0x32 || packet.Kind == 0x33) { if (quality == null) throw new ProtocolException("protocol"); quality.Handle(packet); }
                     else { if (packet.Kind == 0x24 && clipboard != null) clipboard.Cancel(); input.Accept(packet); }
                 }
@@ -703,14 +707,14 @@ namespace Knot.NativePreview
             InputSession owned;
             lock (gate)
             {
-                if (!active || isStopped || !claimedFiles || files == null || !(inputSink is WindowsInputSink))
+                if (!active || isStopped || videoInputSuspended || !claimedFiles || files == null || !(inputSink is WindowsInputSink))
                     throw new FileTransferException("denied");
                 owned = input;
             }
             if (owned == null) throw new FileTransferException("denied");
             return WindowsDragBridge.Capture(owned.AcquireExplorerDrag(nonce), delegate
             {
-                lock (gate) return active && !isStopped && claimedFiles && input == owned;
+                lock (gate) return active && !isStopped && !videoInputSuspended && claimedFiles && input == owned;
             });
         }
         private void CancelExplorerDrag(string nonce)

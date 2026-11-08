@@ -92,7 +92,17 @@ struct NativeVisualFixture {
             ("audio-unavailable-compact", "audio-unavailable", 880, 620, false),
             ("fullscreen-audio-on-controls", "audio-on", 1920, 1080, false),
             ("fullscreen-audio-muted-controls", "audio-muted", 1920, 1080, false),
-            ("fullscreen-audio-unavailable-controls", "audio-unavailable", 1920, 1080, false)
+            ("fullscreen-audio-unavailable-controls", "audio-unavailable", 1920, 1080, false),
+            ("video-settings", "video-settings", 1200, 760, false),
+            ("video-settings-compact", "video-settings", 880, 620, false),
+            ("video-settings-dark", "video-settings", 1200, 760, true),
+            ("video-streaming", "video-streaming", 1200, 760, false),
+            ("video-paused-auto", "video-paused-auto", 1200, 760, false),
+            ("video-paused-manual-compact", "video-paused-manual", 880, 620, false),
+            ("fullscreen-video-applying", "video-applying", 1920, 1080, false),
+            ("fullscreen-video-paused", "video-paused-auto", 1920, 1080, false),
+            ("video-rollback-settings", "video-rollback", 1200, 760, false),
+            ("video-unsupported-settings", "video-unsupported", 1200, 760, false)
         ]
         var images: [[String: Any]] = []
         var fileAdapterAttempts = 0
@@ -102,6 +112,7 @@ struct NativeVisualFixture {
             let files = try makeFiles(state)
             let audio = try makeAudio(state)
             let convenience = state == "work-tools" ? FixtureConvenienceModels(effects: effects) : nil
+            let video = try FixtureVideoModels(state: state)
             let immersive = name.hasPrefix("fullscreen") || name == "files-fullscreen"
             let revealed = name.hasSuffix("controls")
             if name.contains("4k") { model.videoSize = CGSize(width: 3840, height: 2160) }
@@ -116,7 +127,7 @@ struct NativeVisualFixture {
                 else { Color(white: 0.045) }
             })
             let content = root(model: model, enrollment: enrollment, simulated: simulated, help: state == "help", manual: state == "manual-address", fullscreen: immersive,
-                width: width, height: height, dark: dark, files: files, convenience: convenience, audio: audio?.session)
+                width: width, height: height, dark: dark, files: files, convenience: convenience, audio: audio?.session, video: video, state: state)
             let view = NSHostingView(rootView: content)
             let rect = NSRect(x: 0, y: 0, width: width, height: height)
             let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -188,6 +199,10 @@ struct NativeVisualFixture {
             imageResult["pendingReconnect"] = model.hasPendingReconnect
             imageResult["convenienceActionsVisible"] = convenience != nil
             imageResult["convenienceActionsPresentation"] = convenience == nil ? "native-menu" : "inline-production-action-views"
+            imageResult["videoControlVisible"] = video != nil
+            imageResult["videoControlApplying"] = video?.model.isApplying ?? false
+            imageResult["videoControlPaused"] = video?.model.isPaused ?? false
+            imageResult["videoControlSyntheticOnly"] = video != nil
             imageResult["audioState"] = audio.map { String(describing: $0.session.state) } ?? "absent"
             imageResult["audioAvailable"] = audio?.session.isAvailable ?? false
             imageResult["audioMuted"] = audio?.session.muted ?? false
@@ -233,13 +248,19 @@ struct NativeVisualFixture {
 
     @MainActor private static func root(model: SessionModel, enrollment: EnrollmentModel, simulated: AnyView, help: Bool,
                                         manual: Bool, fullscreen: Bool, width: Int, height: Int, dark: Bool, files: FileTransferModel? = nil,
-                                        convenience: FixtureConvenienceModels? = nil, audio: NativeAudioSession? = nil) -> some View {
+                                        convenience: FixtureConvenienceModels? = nil, audio: NativeAudioSession? = nil,
+                                        video: FixtureVideoModels? = nil, state: String = "") -> some View {
         Group {
             if let convenience { FixtureConvenienceSurface(model: model, clipboard: convenience.clipboard, quality: convenience.quality) }
+            else if let video, ["video-settings", "video-rollback", "video-unsupported"].contains(state) {
+                NativeVideoSettingsPanel(video: video.model, quality: nil, idleMinutes: .constant(10),
+                    idleBackgroundOnly: .constant(true), beforeAction: {})
+                    .frame(maxWidth: .infinity, maxHeight: .infinity).background(NativeStyle.canvas)
+            }
             else {
                 PreviewWindow(model: model, simulatedDesktop: simulated, initialHelp: help, simulatedFullscreen: fullscreen,
                     enrollment: enrollment, initialManualAddress: manual, simulatedFiles: files, initialFiles: files != nil,
-                    simulatedAudio: audio)
+                    simulatedAudio: audio, simulatedVideo: video?.model)
             }
         }
             .environment(\.colorScheme, dark ? .dark : .light)
@@ -302,7 +323,7 @@ struct NativeVisualFixture {
         guard model.hasPendingReconnect == (["wake-reconnect", "sleep-recovery"].contains(state)) else { throw FixtureError.phase }
     }
     @MainActor private static func expectedPhase(_ state: String) -> SessionModel.Phase {
-        if state.hasPrefix("files") || state.hasPrefix("audio-") { return .streaming }
+        if state.hasPrefix("files") || state.hasPrefix("audio-") || state.hasPrefix("video-") { return .streaming }
         return switch state {
         case "connecting": .connecting
         case "approval": .approval
@@ -370,7 +391,7 @@ struct NativeVisualFixture {
             initialSavedDevices: saved, initialRegisteredDevice: ["wake-reconnect", "sleep-recovery"].contains(state) ? saved.first : nil)
         model.viewerLabel = "나의 Mac"
         model.rememberThisPC = state == "number-remembered"
-        if state.hasPrefix("files") || state.hasPrefix("audio-") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
+        if state.hasPrefix("files") || state.hasPrefix("audio-") || state.hasPrefix("video-") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
         switch state {
         case "sleep-recovery":
             model.phase = .streaming; model.systemWillSleep()
@@ -479,6 +500,35 @@ private final class FixtureEnrollmentEffects: @unchecked Sendable {
     var count: Int { lock.lock(); defer { lock.unlock() }; return value }
     var mediaCount: Int { lock.lock(); defer { lock.unlock() }; return media }
     var convenienceCount: Int { lock.lock(); defer { lock.unlock() }; return convenience }
+}
+
+/// Local state-machine commands and authored replies, never an adapter or socket.
+@MainActor private struct FixtureVideoModels {
+    let model: VideoControlModel
+    init?(state: String) throws {
+        guard state.hasPrefix("video-") else { return nil }
+        let profile = VideoProfile(width: 3840, height: 2160, fps: 30, bitrate: 40_000_000)
+        let value = VideoControlModel(actual: profile, send: { _ in true })
+        model = value
+        func reply(_ outcome: VideoControlOutcome, reason: VideoControlReason = .none,
+                   state: VideoControlState = .running, epoch: UInt64 = 0, next: UInt64 = 0) throws {
+            guard let request = value.pending else { throw FixtureError.phase }
+            var data = Data([1, request.operation.rawValue]); data.appendBE(request.requestID); data.appendBE(epoch)
+            data.append(contentsOf: [outcome.rawValue, reason.rawValue, state.rawValue])
+            data.appendBE(UInt32(profile.width)); data.appendBE(UInt32(profile.height))
+            data.appendBE(UInt32(profile.fps)); data.appendBE(UInt32(profile.bitrate)); data.appendBE(next)
+            value.accept(try VideoControlStatus(data))
+        }
+        if state.hasPrefix("video-paused") {
+            value.pause(manual: state == "video-paused-manual")
+            try reply(.preparing); try reply(.applied, state: .paused)
+        } else if ["video-applying", "video-rollback", "video-unsupported"].contains(state) {
+            guard value.requestProfile(width: 1920, height: 1080, fps: 60, bitrate: 20_000_000) else { throw FixtureError.phase }
+            try reply(.preparing)
+            if state == "video-rollback" { try reply(.rolledBack, reason: .initializationFailed, epoch: 1, next: 1); value.firstImageArrived() }
+            if state == "video-unsupported" { try reply(.rejected, reason: .unsupported) }
+        }
+    }
 }
 
 @MainActor private struct FixtureConvenienceModels {

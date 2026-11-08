@@ -15,11 +15,12 @@ struct KnotNativePreviewApp: App {
     @StateObject private var quick = NativeQuickActivation()
     @StateObject private var updates = NativeUpdateModel()
     @StateObject private var power = NativePowerMonitor()
+    @StateObject private var videoIdle = NativeVideoIdleMonitor()
     @StateObject private var lifecycle = NativeApplicationLifecycle()
     init() { NativeUpdateHandoff.runIfRequested() }
     var body: some Scene {
         Window("Knot Native Preview", id: "main") {
-            NativeMainContent(model: model, windowState: windowState, preferences: preferences, quick: quick, updates: updates, power: power, lifecycle: lifecycle)
+            NativeMainContent(model: model, windowState: windowState, preferences: preferences, quick: quick, updates: updates, power: power, videoIdle: videoIdle, lifecycle: lifecycle)
         }
             .defaultSize(width: 1200, height: 760)
             .commands {
@@ -47,12 +48,14 @@ private struct NativeMainContent: View {
     @ObservedObject var quick: NativeQuickActivation
     @ObservedObject var updates: NativeUpdateModel
     @ObservedObject var power: NativePowerMonitor
+    @ObservedObject var videoIdle: NativeVideoIdleMonitor
     @ObservedObject var lifecycle: NativeApplicationLifecycle
     var body: some View {
         PreviewWindow(model: model, windowState: windowState, updates: updates)
             .onAppear {
                 lifecycle.bind(model: model, quick: quick, updates: updates)
                 power.bind(model, notificationCenter: NSWorkspace.shared.notificationCenter)
+                videoIdle.bind(model, notificationCenter: NotificationCenter.default, initiallyActive: NSApp.isActive)
                 preferences.bind(model)
                 model.refreshSavedDevices(); model.resumeAfterUpdateIfRequested()
                 windowState.onFullscreenChanged = { preferences.preferFullscreen = $0 }

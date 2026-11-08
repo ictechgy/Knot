@@ -25,6 +25,20 @@ int32_t CaptureStatus(HRESULT hr) {
         hr == DXGI_ERROR_SESSION_DISCONNECTED) return KN_MEDIA_UNSUPPORTED_DISPLAY;
     return KN_MEDIA_DEVICE_FAILURE;
 }
+int32_t CopyAccessUnit(Session& session, const knot::AccessUnit& unit, uint8_t* buffer,
+    uint32_t capacity, uint32_t* written, uint32_t* flags, uint64_t* timestampMicros) {
+    if (unit.bytes.size() > capacity) return session.failure = KN_MEDIA_INVALID_ARGUMENT;
+    // Every flagged IDR must contain its decoder configuration, including old
+    // AUs emitted while draining before a configuration barrier.
+    bool idr = false, sps = false, pps = false, hasSlice = false;
+    if (!knot::AnalyzeH264(unit.bytes, idr, sps, pps, nullptr, &hasSlice) || !hasSlice ||
+        (idr && (!sps || !pps))) return session.failure = KN_MEDIA_DEVICE_FAILURE;
+    std::memcpy(buffer, unit.bytes.data(), unit.bytes.size());
+    *written = static_cast<uint32_t>(unit.bytes.size()); *flags = idr ? 1U : 0U;
+    *timestampMicros = unit.timestamp;
+    session.lastProgress = knot::Clock::now();
+    return KN_MEDIA_SAMPLE;
+}
 }
 
 extern "C" KN_MEDIA_API void* KN_MEDIA_CALL kn_media_create(const KnMediaConfig* config,
@@ -63,6 +77,7 @@ extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* opaque, uint8_
     if (!session || !buffer || capacity == 0 || !written || !flags || !timestampMicros ||
         session->owner != GetCurrentThreadId()) return KN_MEDIA_INVALID_ARGUMENT;
     if (session->failure != 0) return session->failure;
+    if (session->encoder.Draining()) return KN_MEDIA_INVALID_ARGUMENT;
     try {
         const auto deadline = knot::Clock::now() + std::chrono::milliseconds(450);
         while (knot::Clock::now() < deadline) {
@@ -72,17 +87,8 @@ extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* opaque, uint8_
             hr = session->encoder.Receive(unit);
             if (FAILED(hr)) return session->failure = KN_MEDIA_DEVICE_FAILURE;
             if (hr == S_OK && !unit.bytes.empty()) {
-                session->lastProgress = knot::Clock::now();
-                if (unit.bytes.size() > capacity) return session->failure = KN_MEDIA_INVALID_ARGUMENT;
-                // Every flagged IDR must contain its decoder configuration.
-                bool idr = false, sps = false, pps = false, hasSlice = false;
-                if (!knot::AnalyzeH264(unit.bytes, idr, sps, pps, nullptr, &hasSlice) || !hasSlice ||
-                    (idr && (!sps || !pps))) return session->failure = KN_MEDIA_DEVICE_FAILURE;
-                std::memcpy(buffer, unit.bytes.data(), unit.bytes.size());
-                *written = static_cast<uint32_t>(unit.bytes.size()); *flags = idr ? 1U : 0U;
-                *timestampMicros = unit.timestamp;
                 session->pacer.OutputObserved();
-                return KN_MEDIA_SAMPLE;
+                return CopyAccessUnit(*session, unit, buffer, capacity, written, flags, timestampMicros);
             }
             const auto now = knot::Clock::now();
             if (session->encoder.InFlight() != 0 && now - session->lastProgress > std::chrono::seconds(2))
@@ -119,6 +125,48 @@ extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* opaque, uint8_
     } catch (...) { return session->failure = KN_MEDIA_ERROR; }
 }
 
+extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_begin_drain(void* opaque) {
+    auto* session = static_cast<Session*>(opaque);
+    if (!session || session->owner != GetCurrentThreadId()) return KN_MEDIA_INVALID_ARGUMENT;
+    if (session->failure != 0) return session->failure;
+    try {
+        // Drain marks its one-way state before making any driver call. Even a
+        // failed drain can never resume capture or submit another frame.
+        if (FAILED(session->encoder.Drain())) return session->failure = KN_MEDIA_DEVICE_FAILURE;
+        return KN_MEDIA_SAMPLE;
+    } catch (...) { return session->failure = KN_MEDIA_ERROR; }
+}
+
+extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read_drain(void* opaque, uint8_t* buffer,
+    uint32_t capacity, uint32_t* written, uint32_t* flags, uint64_t* timestampMicros) {
+    if (written) *written = 0;
+    if (flags) *flags = 0;
+    if (timestampMicros) *timestampMicros = 0;
+    auto* session = static_cast<Session*>(opaque);
+    if (!session || !buffer || capacity == 0 || !written || !flags || !timestampMicros ||
+        session->owner != GetCurrentThreadId()) return KN_MEDIA_INVALID_ARGUMENT;
+    if (session->failure != 0) return session->failure;
+    if (!session->encoder.Draining()) return KN_MEDIA_INVALID_ARGUMENT;
+    try {
+        const auto deadline = knot::Clock::now() + std::chrono::milliseconds(450);
+        while (knot::Clock::now() < deadline) {
+            HRESULT hr = session->encoder.Poll();
+            if (FAILED(hr)) return session->failure = KN_MEDIA_DEVICE_FAILURE;
+            knot::AccessUnit unit;
+            hr = session->encoder.Receive(unit);
+            if (FAILED(hr)) return session->failure = KN_MEDIA_DEVICE_FAILURE;
+            if (hr == S_OK && !unit.bytes.empty())
+                return CopyAccessUnit(*session, unit, buffer, capacity, written, flags, timestampMicros);
+            if (session->encoder.DrainComplete()) return KN_MEDIA_DRAIN_COMPLETE;
+            // Intentionally no CapturePacer::Pump, DesktopCapture::Read or
+            // Encoder::Submit on this path. The managed owner enforces 2s total.
+            if (FAILED(session->pollWait.WaitUntil(deadline)))
+                return session->failure = KN_MEDIA_DEVICE_FAILURE;
+        }
+        return KN_MEDIA_TRY_AGAIN;
+    } catch (...) { return session->failure = KN_MEDIA_ERROR; }
+}
+
 extern "C" KN_MEDIA_API void KN_MEDIA_CALL kn_media_close(void* opaque) {
     auto* session = static_cast<Session*>(opaque);
     if (session && session->owner == GetCurrentThreadId()) delete session;
@@ -126,7 +174,8 @@ extern "C" KN_MEDIA_API void KN_MEDIA_CALL kn_media_close(void* opaque) {
 
 extern "C" KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_set_quality(void* opaque, uint32_t fps, uint32_t bitrate) {
     auto* session = static_cast<Session*>(opaque);
-    if (!session || session->owner != GetCurrentThreadId() || fps < 1 || fps > session->config.fps ||
+    if (!session || session->owner != GetCurrentThreadId() || session->encoder.Draining() ||
+        fps < 1 || fps > session->config.fps ||
         bitrate < 1000000U || bitrate > session->config.bitrate) return KN_MEDIA_INVALID_ARGUMENT;
     try {
         if (FAILED(session->encoder.SetBitrate(bitrate))) return KN_MEDIA_ERROR;

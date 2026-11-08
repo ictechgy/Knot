@@ -41,6 +41,16 @@ namespace Knot.NativePreview
         int Read(byte[] buffer, out uint written, out uint flags, out ulong timestampMicros);
     }
     internal interface IMediaFactory { IMediaSource Open(); }
+    internal interface IConfigurableMediaFactory : IMediaFactory
+    {
+        MediaConfig InitialConfig { get; }
+        IMediaSource Open(MediaConfig config);
+    }
+    internal interface IDrainableMediaSource : IMediaSource
+    {
+        int BeginDrain();
+        int ReadDrain(byte[] buffer, out uint written, out uint flags, out ulong timestampMicros);
+    }
 
     internal static class NativeMediaErrors
     {
@@ -50,7 +60,7 @@ namespace Knot.NativePreview
         }
     }
 
-    internal sealed class WindowsMediaFactory : IMediaFactory
+    internal sealed class WindowsMediaFactory : IConfigurableMediaFactory
     {
         private readonly MediaQualityProfile quality;
         internal WindowsMediaFactory() : this(MediaQualityProfile.Sharp4K) { }
@@ -59,12 +69,14 @@ namespace Knot.NativePreview
             if (quality == null) throw new ArgumentNullException("quality");
             this.quality = quality;
         }
-        public IMediaSource Open() { return new WindowsMediaSource(quality.Config); }
+        public MediaConfig InitialConfig { get { return quality.Config; } }
+        public IMediaSource Open() { return Open(InitialConfig); }
+        public IMediaSource Open(MediaConfig config) { return new WindowsMediaSource(config); }
     }
 
     // The owned DLL is resolved by absolute application path with dependency search
     // limited to that directory and System32. No PATH/current-directory probing.
-    internal sealed class WindowsMediaSource : IMediaSource, IAdaptiveMediaSource
+    internal sealed class WindowsMediaSource : IDrainableMediaSource, IAdaptiveMediaSource
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibraryEx(string name, IntPtr reserved, uint flags);
@@ -75,8 +87,10 @@ namespace Knot.NativePreview
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int ReadDelegate(IntPtr media, [Out] byte[] buffer, uint capacity, out uint written, out uint flags, out ulong timestamp);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void CloseDelegate(IntPtr media);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int QualityDelegate(IntPtr media, uint fps, uint bitrate);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int DrainDelegate(IntPtr media);
         private IntPtr library, media;
-        private ReadDelegate read;
+        private ReadDelegate read, readDrain;
+        private DrainDelegate beginDrain;
         private CloseDelegate close;
         private QualityDelegate quality;
         private MediaInfo info;
@@ -102,6 +116,8 @@ namespace Knot.NativePreview
                 if (library == IntPtr.Zero) throw new ProtocolException("capture");
                 CreateDelegate create = Export<CreateDelegate>("kn_media_create");
                 read = Export<ReadDelegate>("kn_media_read");
+                readDrain = Export<ReadDelegate>("kn_media_read_drain");
+                beginDrain = Export<DrainDelegate>("kn_media_begin_drain");
                 close = Export<CloseDelegate>("kn_media_close");
                 quality = Export<QualityDelegate>("kn_media_set_quality");
                 int error;
@@ -115,6 +131,16 @@ namespace Knot.NativePreview
         {
             if (ownerThread != System.Threading.Thread.CurrentThread.ManagedThreadId || media == IntPtr.Zero) throw new ProtocolException("capture");
             return read(media, buffer, (uint)buffer.Length, out written, out flags, out timestampMicros);
+        }
+        public int BeginDrain()
+        {
+            if (ownerThread != System.Threading.Thread.CurrentThread.ManagedThreadId || media == IntPtr.Zero) throw new ProtocolException("capture");
+            return beginDrain(media);
+        }
+        public int ReadDrain(byte[] buffer, out uint written, out uint flags, out ulong timestampMicros)
+        {
+            if (ownerThread != System.Threading.Thread.CurrentThread.ManagedThreadId || media == IntPtr.Zero) throw new ProtocolException("capture");
+            return readDrain(media, buffer, (uint)buffer.Length, out written, out flags, out timestampMicros);
         }
         public bool TrySetQuality(uint fps, uint bitrate)
         {

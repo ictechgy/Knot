@@ -2,7 +2,7 @@
 
 namespace knot {
 HRESULT Encoder::SetBitrate(uint32_t bitrate) {
-    if (bitrate < 1000000U || bitrate > 40000000U || !codec_) return E_INVALIDARG;
+    if (draining_ || bitrate < 1000000U || bitrate > 40000000U || !codec_) return E_INVALIDARG;
     // A capture-FPS-only adaptation must not depend on the codec accepting a
     // redundant live bitrate assignment (some hardware rejects that setter).
     if (bitrate == config_.bitrate) return S_OK;
@@ -44,7 +44,8 @@ void Encoder::Reset() {
     // Keep all transform interfaces alive until that shutdown has completed.
     activation_.Reset();
     events_.Reset(); codec_.Reset(); outputType_.Reset(); transform_.Reset();
-    async_ = hardware_ = draining_ = false;
+    async_ = hardware_ = draining_ = drainSignaled_ = false;
+    drainResult_ = S_OK;
     inputReady_ = outputReady_ = inFlight_ = 0;
     peakOutputScratch_ = outputMinimum_ = 0;
     timeline_ = MediaTimeline(1); stamps_.clear(); parameterSets_.clear();
@@ -196,8 +197,25 @@ HRESULT Encoder::Poll() {
         hr = event->GetType(&type);
         if (FAILED(hr)) return hr;
         if (type == MEError) return E_FAIL;
-        if (type == METransformNeedInput) { if (inputReady_ == 8) return E_FAIL; ++inputReady_; }
-        if (type == METransformHaveOutput) { if (outputReady_ == 8) return E_FAIL; ++outputReady_; }
+        // NeedInput events queued before END_OF_STREAM can still be observed.
+        // They grant no permission to submit once this owner begins draining.
+        if (type == METransformNeedInput && !draining_) {
+            if (inputReady_ == 8) return E_FAIL;
+            ++inputReady_;
+        }
+        if (type == METransformHaveOutput) {
+            if (drainSignaled_ || outputReady_ == 8) return E_FAIL;
+            ++outputReady_;
+        }
+        if (type == METransformDrainComplete) {
+            if (!draining_ || drainSignaled_) return E_FAIL;
+            UINT32 stream = 0;
+            hr = event->GetUINT32(MF_EVENT_MFT_INPUT_STREAM_ID, &stream);
+            if (FAILED(hr) || stream != inputId_) return E_FAIL;
+            // This follows the final HaveOutput event, which may still be
+            // pending in outputReady_. Do not announce completion yet.
+            drainSignaled_ = true;
+        }
     }
     return S_OK;
 }
@@ -248,7 +266,13 @@ HRESULT Encoder::Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros
 
 HRESULT Encoder::Receive(AccessUnit& output) {
     output = {};
-    if (async_ && outputReady_ == 0) return S_FALSE;
+    if (DrainComplete()) return S_FALSE;
+    if (async_ && outputReady_ == 0) {
+        // A complete NV12 frame was submitted for each stamp. A transform
+        // which loses one must fail rather than hide a missing predictive AU.
+        if (drainSignaled_ && (inFlight_ != 0 || !stamps_.empty())) return E_FAIL;
+        return S_FALSE;
+    }
     MFT_OUTPUT_STREAM_INFO info{};
     HRESULT hr = transform_->GetOutputStreamInfo(outputId_, &info);
     if (FAILED(hr)) return hr;
@@ -276,7 +300,16 @@ HRESULT Encoder::Receive(AccessUnit& output) {
     // MFT owns a new reference only when it supplies a different sample.
     ComPtr<IMFSample> supplied;
     if (result.pSample && result.pSample != owned.Get()) supplied.Attach(result.pSample);
-    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return S_FALSE;
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        // Async transforms advertise every output by event and must not use
+        // NEED_MORE_INPUT. For sync transforms it is the terminal drain signal.
+        if (async_) return E_FAIL;
+        if (draining_) {
+            if (inFlight_ != 0 || !stamps_.empty()) return E_FAIL;
+            drainSignaled_ = true;
+        }
+        return S_FALSE;
+    }
     if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
         ComPtr<IMFMediaType> type;
         hr = transform_->GetOutputAvailableType(outputId_, 0, &type);
@@ -331,10 +364,12 @@ HRESULT Encoder::Receive(AccessUnit& output) {
 }
 
 HRESULT Encoder::Drain() {
-    if (draining_) return S_OK;
+    if (!transform_) return E_UNEXPECTED;
+    if (draining_) return drainResult_;
     draining_ = true;
-    HRESULT hr = transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, inputId_);
-    if (FAILED(hr)) return hr;
-    return transform_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+    inputReady_ = 0;
+    drainResult_ = transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, inputId_);
+    if (FAILED(drainResult_)) return drainResult_;
+    return drainResult_ = transform_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, inputId_);
 }
 } // namespace knot

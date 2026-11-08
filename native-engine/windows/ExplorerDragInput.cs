@@ -59,10 +59,10 @@ namespace Knot.NativePreview
             long until = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
             lock (gate)
             {
-                while (!closed && explorerTicket == null && Stopwatch.GetTimestamp() < until)
+                while (!closed && !suspended && explorerTicket == null && Stopwatch.GetTimestamp() < until)
                     Monitor.Wait(gate, 20);
                 ExplorerTicket ticket = explorerTicket;
-                if (closed || ticket == null || ticket.Acquired || ticket.Nonce != nonce ||
+                if (closed || suspended || ticket == null || ticket.Acquired || ticket.Nonce != nonce ||
                     Stopwatch.GetTimestamp() >= ticket.Expires || !buttons.Contains(1))
                     throw new FileTransferException("denied");
                 ticket.Acquired = true;
@@ -112,7 +112,7 @@ namespace Knot.NativePreview
             { this.owner = owner; this.ticket = ticket; this.x = x; this.y = y; }
             public int X { get { return owner.rectangle.Left + (int)((long)x * Math.Max(0, owner.rectangle.Width - 1) / 65535); } }
             public int Y { get { return owner.rectangle.Top + (int)((long)y * Math.Max(0, owner.rectangle.Height - 1) / 65535); } }
-            private bool Live { get { return !disposed && !owner.closed && owner.explorerTicket == ticket && Stopwatch.GetTimestamp() < ticket.Expires; } }
+            private bool Live { get { return !disposed && !owner.closed && !owner.suspended && owner.explorerTicket == ticket && Stopwatch.GetTimestamp() < ticket.Expires; } }
             public bool IsActive { get { lock (owner.gate) return Live; } }
             public bool Nudge()
             {

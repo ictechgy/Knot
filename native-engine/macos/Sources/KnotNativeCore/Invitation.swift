@@ -50,9 +50,12 @@ public struct Invitation: Sendable, Equatable {
             }
         }
     }
-    public func hello(name: String = "Mac viewer") throws -> Packet {
+    public func hello(name: String = "Mac viewer", videoControlVersion: Int = 0) throws -> Packet {
         guard Self.validViewerLabel(name) else { throw NativeFailure.malformed }
-        let body = try JSONSerialization.data(withJSONObject: ["v": 1, "token": token, "name": name, "filesVersion": 2])
+        guard videoControlVersion == 0 || videoControlVersion == 1 else { throw NativeFailure.unsupported }
+        var fields: [String: Any] = ["v": 1, "token": token, "name": name, "filesVersion": 2]
+        if videoControlVersion == 1 { fields["videoControlVersion"] = 1 }
+        let body = try JSONSerialization.data(withJSONObject: fields)
         return Packet(kind: .hello, payload: body)
     }
 }

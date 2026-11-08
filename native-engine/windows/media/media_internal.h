@@ -65,11 +65,16 @@ public:
     // softwareOnly is reachable only by the separately linked synthetic test.
     HRESULT Start(const KnMediaConfig& config, bool softwareOnly);
     HRESULT Poll();
-    bool CanSubmit() const { return inFlight_ < Capacity && (!async_ || inputReady_ != 0); }
+    bool CanSubmit() const { return !draining_ && inFlight_ < Capacity && (!async_ || inputReady_ != 0); }
     bool KeyframeDue(uint64_t presentationMicros) const { return timeline_.KeyframeDue(presentationMicros); }
     HRESULT Submit(const std::vector<uint8_t>& nv12, uint64_t captureMicros, uint64_t presentationMicros);
     HRESULT Receive(AccessUnit& output); // S_FALSE = no output yet
     HRESULT Drain();
+    bool Draining() const { return draining_; }
+    bool DrainComplete() const {
+        return draining_ && SUCCEEDED(drainResult_) && drainSignaled_ && outputReady_ == 0 &&
+            inFlight_ == 0 && stamps_.empty();
+    }
     HRESULT SetBitrate(uint32_t bitrate);
     bool Hardware() const { return hardware_; }
     uint32_t InFlight() const { return inFlight_; }
@@ -87,7 +92,8 @@ private:
     ComPtr<ICodecAPI> codec_;
     ComPtr<IMFMediaType> outputType_;
     KnMediaConfig config_{};
-    bool async_ = false, hardware_ = false, draining_ = false;
+    bool async_ = false, hardware_ = false, draining_ = false, drainSignaled_ = false;
+    HRESULT drainResult_ = S_OK;
     uint32_t inputReady_ = 0, outputReady_ = 0, inFlight_ = 0;
     uint32_t peakOutputScratch_ = 0, outputMinimum_ = 0;
     MediaTimeline timeline_{1};

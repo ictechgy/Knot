@@ -22,6 +22,13 @@ final class NativePreferences: ObservableObject {
         model.$macShortcuts.dropFirst().sink { [weak self] in self?.defaults.set($0, forKey: "native.macShortcuts") }.store(in: &observations)
         if defaults.object(forKey: "native.autoReconnect") != nil { model.autoReconnect = defaults.bool(forKey: "native.autoReconnect") }
         model.$autoReconnect.dropFirst().sink { [weak self] in self?.defaults.set($0, forKey: "native.autoReconnect") }.store(in: &observations)
+        if let minutes = defaults.object(forKey: "native.videoIdleMinutes") as? Int,
+           NativeVideoIdlePolicy.allowedMinutes.contains(minutes) { model.idleVideoMinutes = minutes }
+        if defaults.object(forKey: "native.videoIdleBackgroundOnly") != nil {
+            model.idleVideoBackgroundOnly = defaults.bool(forKey: "native.videoIdleBackgroundOnly")
+        }
+        model.$idleVideoMinutes.dropFirst().sink { [weak self] in self?.defaults.set($0, forKey: "native.videoIdleMinutes") }.store(in: &observations)
+        model.$idleVideoBackgroundOnly.dropFirst().sink { [weak self] in self?.defaults.set($0, forKey: "native.videoIdleBackgroundOnly") }.store(in: &observations)
         model.$quality.sink { [weak self] quality in
             self?.qualityObservation = quality?.$preference.dropFirst().sink { [weak self] in self?.defaults.set(Int($0.rawValue), forKey: "native.quality") }
         }.store(in: &observations)

@@ -38,6 +38,17 @@ namespace Knot.NativePreview
             foreach (string key in exactKeys) if (!result.ContainsKey(key)) throw new ProtocolException("protocol");
             return result;
         }
+        internal static Dictionary<string, object> ParseOptional(byte[] bytes, string[] required, string[] optional)
+        {
+            string value;
+            try { value = Utf8.GetString(bytes); }
+            catch (DecoderFallbackException) { throw new ProtocolException("protocol"); }
+            Dictionary<string, object> result = new Parser(value).Object();
+            foreach (string key in required) if (!result.ContainsKey(key)) throw new ProtocolException("protocol");
+            foreach (string key in result.Keys)
+                if (Array.IndexOf(required, key) < 0 && Array.IndexOf(optional, key) < 0) throw new ProtocolException("protocol");
+            return result;
+        }
         internal static int Integer(Dictionary<string, object> obj, string key, int min, int max)
         {
             object v = obj[key];
@@ -201,7 +212,7 @@ namespace Knot.NativePreview
             bool valid = hello ? kind == 1 && length >= 1 && length <= 4096 :
                 kind == 0x20 && length == 4 || kind == 0x21 && length >= 1 && length <= 1024 ||
                 kind == 0x22 && length == 5 || kind == 0x23 && length == 8 || (kind == 0x24 || kind == 0x25) && length == 0 ||
-                kind == 0x26 && length == 16 || (kind == 0x32 || kind == 0x33) && length == 1 || kind == 0x30 && length >= 17 && length <= ClipboardProtocol.MaximumTextBytes + 17;
+                kind == 0x26 && length == 16 || kind == 0x35 && length == 26 || (kind == 0x32 || kind == 0x33) && length == 1 || kind == 0x30 && length >= 17 && length <= ClipboardProtocol.MaximumTextBytes + 17;
             if (!valid) throw new ProtocolException("protocol");
             return new Packet(kind, ReadExactly(stream, (int)length));
         }
@@ -223,14 +234,15 @@ namespace Knot.NativePreview
         }
         internal static void Write(Stream stream, byte kind, byte[] bytes, int count)
         {
-            int cap = kind == 2 ? 4096 : kind == 3 ? VideoLimit : kind == 4 ? 0 : kind == 0x34 ? 9 : kind == 0x31 ? ClipboardProtocol.MaximumTextBytes + 18 : kind == 127 ? 128 : -1;
-            if (cap < 0 || bytes == null || count < 0 || count > bytes.Length || count > cap || (kind != 4 && count == 0))
+            int cap = kind == 2 ? 4096 : kind == 3 ? VideoLimit : kind == 4 ? 0 : kind == 0x34 ? 9 : kind == 0x36 ? 45 : kind == 0x31 ? ClipboardProtocol.MaximumTextBytes + 18 : kind == 127 ? 128 : -1;
+            if (cap < 0 || bytes == null || count < 0 || count > bytes.Length || count > cap || (kind == 0x36 && count != 45) || (kind != 4 && count == 0))
                 throw new ProtocolException("protocol");
             byte[] header = new byte[5]; header[0] = kind; Put32(header, 1, (uint)count);
             stream.Write(header, 0, header.Length);
             if (count != 0) stream.Write(bytes, 0, count);
         }
         internal static uint U32(byte[] b, int p) { return ((uint)b[p] << 24) | ((uint)b[p + 1] << 16) | ((uint)b[p + 2] << 8) | b[p + 3]; }
+        internal static ulong U64(byte[] b, int p) { return ((ulong)U32(b, p) << 32) | U32(b, p + 4); }
         internal static int I32(byte[] b, int p) { return unchecked((int)U32(b, p)); }
         internal static ushort U16(byte[] b, int p) { return (ushort)(b[p] * 256 + b[p + 1]); }
         internal static void Put32(byte[] b, int p, uint n) { for (int i = 3; i >= 0; --i) { b[p + i] = (byte)n; n >>= 8; } }
@@ -253,20 +265,21 @@ namespace Knot.NativePreview
             }
         }
         internal static string HelloName(byte[] payload, out byte[] token)
-        { bool files; return HelloName(payload, out token, out files); }
+        { bool files, videoControl; return HelloName(payload, out token, out files, out videoControl); }
         internal static string HelloName(byte[] payload, out byte[] token, out bool files)
+        { bool videoControl; return HelloName(payload, out token, out files, out videoControl); }
+        internal static string HelloName(byte[] payload, out byte[] token, out bool files, out bool videoControl)
         {
-            Dictionary<string, object> hello;
-            try { hello = StrictJson.Parse(payload, "v", "token", "name"); files = false; }
-            catch (ProtocolException)
-            {
-                hello = StrictJson.Parse(payload, "v", "token", "name", "filesVersion");
-                StrictJson.Integer(hello, "filesVersion", 2, 2); files = true;
-            }
+            // Parse once, accepting only the four explicitly versioned shapes.
+            Dictionary<string, object> hello = StrictJson.ParseOptional(payload,
+                new string[] { "v", "token", "name" }, new string[] { "filesVersion", "videoControlVersion" });
+            files = hello.ContainsKey("filesVersion"); videoControl = hello.ContainsKey("videoControlVersion");
+            if (files) StrictJson.Integer(hello, "filesVersion", 2, 2);
+            if (videoControl) StrictJson.Integer(hello, "videoControlVersion", 1, 1);
             StrictJson.Integer(hello, "v", 1, 1);
-            token = DecodeToken(StrictJson.String(hello, "token"));
             string name = StrictJson.String(hello, "name");
             ValidDisplayName(name);
+            token = DecodeToken(StrictJson.String(hello, "token"));
             return name;
         }
         internal static byte[] Error(string code)

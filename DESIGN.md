@@ -1,5 +1,11 @@
 # Design
 
+## Native.18 connected video controls and idle optimization (2026-11-08)
+
+The user requests changing stream resolution, FPS and quality without ending an established connection, and configurable idle optimization. This supersedes the native convenience extension's fixed-dimensions restriction for negotiated native.18 peers only. Follow [native-engine/VIDEO-CONTROL.md](native-engine/VIDEO-CONTROL.md). Keep the Quiet Sidebar, semantic native controls and existing fullscreen behavior. Put **화질** directly in connected controls, with draft settings, one Apply action, actual host-confirmed values and explicit applying/rollback/unsupported states. Hold the last image during a video-only transition; preserve the current authenticated connection, registration, audio and files.
+
+Idle video suspension defaults to10minutes while this app is in the background, with off/1/5/10/15/30/60minute choices and a background-only setting. Resume automatically on return only for an automatic idle pause; manual pause needs explicit resume. Never replay the gesture that resumes into Windows. No capture/encoding or remote physical input runs while paused, but authenticated keepalive, files and optional audio continue. System sleep and manual termination retain native.17's existing lifecycle. Current registered transport recovery uses capped continuing retries; the earlier six-attempt/budget wording below is historical and superseded by native.17.
+
 ## Native.14 registered-session sleep recovery (2026-11-07)
 
 Observe Mac sleep/wake through an app-owned power adapter. Keep an explicit in-memory recovery intent for the current registered target, separate from UI selection. Sleep synchronously revokes the old connection, input and child sessions and pauses retries. Wake waits briefly for network readiness, resets the bounded retry budget and uses a fresh trusted challenge with the unchanged host pin. Duplicate wake and stale callbacks must not create parallel connections.
@@ -49,7 +55,7 @@ The user authorized remembered devices, reconnection, explicit text copy/paste, 
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-11-06
+- Last refreshed: 2026-11-08
 - Primary product surfaces: native macOS host connection, fullscreen desktop, SFTP file browser, Mac sharing setup, Windows sharing/client role chooser, drag-to-Applications Mac package.
 - Evidence reviewed: conversation requirements; pinned GlimmerEngine source; .omx/plans/deskbridge-v0.1.md; user-approved Concept A (Quiet Sidebar), selected 2026-10-19.
 - Approved visual references: ../design-concepts/previews/a-{desktop,files,setup}-window.png in the local deliverable; immutable copies under .omx/artifacts/visual-ralph/quiet-sidebar. Reproduce native synthetic snapshots with scripts/render_visual_fixture.py. No Local Media UI or existing user settings inspected.

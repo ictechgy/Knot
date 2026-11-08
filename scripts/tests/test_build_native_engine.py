@@ -21,6 +21,21 @@ import build_native_engine as native
 from test_windows_updates import stable_net8_runtime
 
 
+def inert_reconfiguration_codec():
+    """Record-shape fixture only; it never executes or proves an encoder."""
+    segments, units = [], []
+    for epoch, (width, height, fps, bitrate) in enumerate([(320, 180, 30, 2000000), (640, 360, 60, 4000000), (320, 180, 30, 2000000)]):
+        segments.append(dict(epoch=epoch, width=width, height=height, fps=fps, bitrate=bitrate,
+            firstSequence=epoch * 12 + 1, frames=12, drainComplete=True, drainInFlight=1, firstOutputIDR=True))
+        for index in range(12):
+            sequence = epoch * 12 + index + 1
+            units.append(dict(sequence=sequence, offset=sequence - 1, length=1, flags=int(index == 0),
+                timestampMicros=1000000 + epoch * 1000000 + index * 1000000 // fps, epoch=epoch))
+    return dict(v=1, synthetic=True, captureInvoked=False, hardwareEncoder=False, codec="h264-annexb",
+        frames=36, keyframes=3, parserChecks=True, reconfigurationFixture=True, drainChecks=True,
+        emptyDrainChecks=True, segments=segments, accessUnits=units)
+
+
 class CompilerAndCodecAdmissionTests(unittest.TestCase):
     def test_bad_explicit_compiler_does_not_select_installed_fallback(self):
         with tempfile.TemporaryDirectory(prefix="knot-compiler-admission-") as folder:
@@ -53,6 +68,21 @@ class CompilerAndCodecAdmissionTests(unittest.TestCase):
             (root / "8.0.5").rmdir(); (root / "8.0.12").rmdir()
             with self.assertRaisesRegex(ValueError, "stable .NET 8"):
                 stable_net8_runtime(root)
+
+    def test_reconfiguration_record_binds_three_drained_epochs_and_all_bytes(self):
+        with tempfile.TemporaryDirectory(prefix="knot-video-reconfigure-record-") as folder:
+            fixture = Path(folder) / "inert.h264"; fixture.write_bytes(b"x" * 36)
+            valid = inert_reconfiguration_codec()
+            native.validate_reconfiguration_fixture(valid, fixture)
+            changes = [lambda r: r.update(captureInvoked=True), lambda r: r.update(hardwareEncoder=True),
+                lambda r: r.update(emptyDrainChecks=False), lambda r: r.update(frames=True),
+                lambda r: r["segments"][1].update(width=1920), lambda r: r["segments"][2].update(drainComplete=False),
+                lambda r: r["segments"][0].update(drainInFlight=3), lambda r: r["accessUnits"][12].update(flags=0),
+                lambda r: r["accessUnits"][24].update(epoch=1), lambda r: r["accessUnits"][3].update(offset=0),
+                lambda r: r["accessUnits"][20].update(timestampMicros=1), lambda r: r["accessUnits"][-1].update(length=2)]
+            for change in changes:
+                invalid = copy.deepcopy(valid); change(invalid)
+                with self.assertRaises(ValueError): native.validate_reconfiguration_fixture(invalid, fixture)
 
 
 def inert_file_vectors():
@@ -199,6 +229,10 @@ class NativeRebuildTests(unittest.TestCase):
                 if invalid_four_k60 == "thirty-fps": data["fps"] = 30
                 elif invalid_four_k60 == "six-frames": data["frames"] = 6
                 Path(argv[-1]).write_text(json.dumps(data))
+            elif label == "native-media-synthetic-reconfigure":
+                self.assertEqual(argv[1], "--software-reconfigure")
+                Path(argv[-2]).write_bytes(b"x" * 36)
+                Path(argv[-1]).write_text(json.dumps(inert_reconfiguration_codec()))
             elif label == "native-wait-checks":
                 self.assertEqual(argv[1], "--json")
                 data = dict(schema=1, status="PASS", freshSyntheticOnly=True,
@@ -235,7 +269,7 @@ class NativeRebuildTests(unittest.TestCase):
                                        actualFreshTreeFixtures=9, actualFreshTreeTlsFixtures=28, actualPersistentCertificateFixtures=3,
                                        actualCrossProcessCertificateLeaseFixtures=1, actualFreshAudioFixtures=13,
                                        actualFreshAudioTlsFixtures=30, actualSyntheticAudioCaptureFixtures=6,
-                                       actualFreshAudioHostFixtures=3)).encode()
+                                       actualFreshAudioHostFixtures=3, actualFreshVideoControlTlsFixtures=8)).encode()
             elif label == "native-pairing-managed-checks":
                 return json.dumps(dict(status="passed", checks=7, freshSyntheticOnly=True,
                     networkInvoked=False, captureInvoked=False, actualInputInvoked=False)).encode()
@@ -483,11 +517,17 @@ class NativeRebuildTests(unittest.TestCase):
                       "audio-connecting", "audio-connecting-compact", "fullscreen-audio-connecting-controls",
                       "wake-reconnect", "wake-reconnect-compact",
                       "sleep-recovery-compact",
-                      "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls"]:
+                      "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls",
+                      "video-settings", "video-settings-compact", "video-settings-dark", "video-streaming", "video-paused-auto",
+                      "video-paused-manual-compact", "fullscreen-video-applying", "fullscreen-video-paused", "video-rollback-settings", "video-unsupported-settings"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
-            report["images"].append(dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,
-                                        width=640, height=480))
+            row = dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,
+                       width=640, height=480)
+            if state.startswith(("video-", "fullscreen-video-")):
+                row.update(videoControlVisible=True, videoControlSyntheticOnly=True,
+                           videoControlPaused="paused" in state, videoControlApplying="applying" in state)
+            report["images"].append(row)
         report_path.write_text(json.dumps(report))
         with self.assertRaisesRegex(ValueError, "without production effects"):
             builder.record_visual_checks(self.output / "visuals", [])

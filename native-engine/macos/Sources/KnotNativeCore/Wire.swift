@@ -2,7 +2,7 @@ import Foundation
 
 public enum Kind: UInt8, Sendable {
     case hello = 1, ready = 2, video = 3, hostHeartbeat = 4
-    case key = 0x20, text = 0x21, pointer = 0x22, wheel = 0x23, releaseAll = 0x24, heartbeat = 0x25, explorerDrag = 0x26, clipboardRequest = 0x30, clipboardResponse = 0x31, qualityPreference = 0x32, qualityFeedback = 0x33, qualityStatus = 0x34, error = 0x7f
+    case key = 0x20, text = 0x21, pointer = 0x22, wheel = 0x23, releaseAll = 0x24, heartbeat = 0x25, explorerDrag = 0x26, clipboardRequest = 0x30, clipboardResponse = 0x31, qualityPreference = 0x32, qualityFeedback = 0x33, qualityStatus = 0x34, videoControl = 0x35, videoControlStatus = 0x36, error = 0x7f
 }
 public struct Packet: Sendable, Equatable {
     public let kind: Kind
@@ -20,6 +20,7 @@ public struct Packet: Sendable, Equatable {
         case .video: guard (18...4_194_304).contains(size) else { throw NativeFailure.oversized }
         case .hostHeartbeat: guard size == 0 else { throw NativeFailure.malformed }
         case .qualityStatus: guard size == 9 else { throw NativeFailure.malformed }
+        case .videoControlStatus: guard size == 45 else { throw NativeFailure.malformed }
         case .clipboardResponse: guard (18...ClipboardProtocol.maximumTextBytes + 18).contains(size) else { throw NativeFailure.oversized }
         case .error: guard (1...128).contains(size) else { throw NativeFailure.oversized }
         default: throw NativeFailure.malformed
@@ -44,13 +45,14 @@ public struct Ready: Sendable, Equatable {
     public let clipboardVersion: Int
     public let qualityVersion: Int
     public let trustedVersion: Int
+    public let videoControlVersion: Int
     public init(_ bytes: Data) throws {
         let base: Set<String> = ["v", "codec", "width", "height", "fps", "bitrate", "hardwareEncoder"]
         let fileKeys: Set<String> = ["filesVersion", "filePort", "fileToken", "fileRootName"]
-        let extensions: [String] = ["clipboardVersion", "qualityVersion", "trustedVersion"]
+        let extensions: [String] = ["clipboardVersion", "qualityVersion", "trustedVersion", "videoControlVersion"]
         var parsed: [String: JSONValue]?
         // Only these complete schemas are accepted; unknown/partial features fail closed.
-        for mask in 0..<8 {
+        for mask in 0..<16 {
             let featureKeys = Set(extensions.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil })
             for files in [false, true] {
                 let keys = base.union(featureKeys).union(files ? fileKeys : [])
@@ -69,6 +71,8 @@ public struct Ready: Sendable, Equatable {
         clipboardVersion = try version("clipboardVersion")
         qualityVersion = try version("qualityVersion")
         trustedVersion = try version("trustedVersion")
+        videoControlVersion = try version("videoControlVersion")
+        guard videoControlVersion == 0 || qualityVersion == 1 else { throw NativeFailure.malformed }
         let width = try json.integer("width"), height = try json.integer("height")
         let fps = try json.integer("fps"), bitrate = try json.integer("bitrate")
         guard try json.integer("v") == 1, try json.string("codec") == "h264-annexb", try json.boolean("hardwareEncoder"),
@@ -94,17 +98,36 @@ public struct VideoPacket: Sendable {
 public struct ReceiveState: Sendable {
     public private(set) var ready: Ready?
     public private(set) var sequence: UInt64 = 0
-    public init() {}
+    public private(set) var videoControl = VideoControlReceiveState()
+    private let offeredVideoControlVersion: Int
+    public init(videoControlVersion: Int = 0) { offeredVideoControlVersion = videoControlVersion }
+    public mutating func expectVideoControl(_ request: VideoControlRequest) throws {
+        guard ready?.videoControlVersion == 1 else { throw NativeFailure.state }
+        try videoControl.expect(request)
+    }
     public mutating func accept(_ packet: Packet) throws -> VideoPacket? {
         switch packet.kind {
-        case .ready: guard ready == nil else { throw NativeFailure.state }; ready = try Ready(packet.payload)
-        case .video: guard ready != nil else { throw NativeFailure.state }; let video = try VideoPacket(packet.payload, after: sequence); sequence = video.sequence; return video
+        case .ready:
+            guard ready == nil else { throw NativeFailure.state }
+            let candidate = try Ready(packet.payload)
+            guard candidate.videoControlVersion <= offeredVideoControlVersion else { throw NativeFailure.state }
+            ready = candidate
+            videoControl.start(profile: VideoConfiguration(width: candidate.width, height: candidate.height, fps: candidate.fps, bitrate: candidate.bitrate))
+        case .video:
+            guard ready != nil else { throw NativeFailure.state }
+            let video = try VideoPacket(packet.payload, after: sequence)
+            try videoControl.acceptVideo(video)
+            sequence = video.sequence; return video
+        case .videoControlStatus:
+            guard ready?.videoControlVersion == 1 else { throw NativeFailure.state }
+            try videoControl.accept(VideoControlStatus(packet.payload), sequence: sequence)
         case .hostHeartbeat: guard packet.payload.isEmpty else { throw NativeFailure.malformed }
         case .qualityStatus:
             guard ready?.qualityVersion == 1, packet.payload.count == 9,
                   (1...60).contains(packet.payload.readBE(UInt32.self, at: 0)),
                   (1_000_000...40_000_000).contains(packet.payload.readBE(UInt32.self, at: 4)),
                   packet.payload.last! <= 1 else { throw NativeFailure.malformed }
+            videoControl.acceptQuality(fps: Int(packet.payload.readBE(UInt32.self, at: 0)), bitrate: Int(packet.payload.readBE(UInt32.self, at: 4)))
         case .clipboardResponse:
             guard ready?.clipboardVersion == 1 else { throw NativeFailure.state }
             _ = try ClipboardResponse(packet.payload)

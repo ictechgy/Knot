@@ -32,12 +32,13 @@ typedef struct KnMediaInfo {
 
 enum KnMediaStatus {
     KN_MEDIA_SAMPLE = 0, KN_MEDIA_TRY_AGAIN = 1,
+    KN_MEDIA_DRAIN_COMPLETE = 2, // Only kn_media_read_drain returns this status.
     KN_MEDIA_ERROR = -1, KN_MEDIA_UNSUPPORTED_DISPLAY = -2,
     KN_MEDIA_NO_HARDWARE_ENCODER = -3, KN_MEDIA_DEVICE_FAILURE = -4,
     KN_MEDIA_INVALID_ARGUMENT = -5
 };
 
-// All three functions must be called on the SAME dedicated MTA thread.
+// All session functions must be called on the SAME dedicated MTA thread.
 // create owns balanced COM/MF startup; normal creation ALWAYS requires hardware.
 // width/height are even bounds (16..3840/2160, <=8,294,400 pixels).
 // Output preserves display aspect and never upscales a smaller desktop.
@@ -48,6 +49,15 @@ KN_MEDIA_API void* KN_MEDIA_CALL kn_media_create(const KnMediaConfig* config,
 // AU <=4,194,287 bytes; flags bit0=actual IDR; monotonic host capture timestamp.
 // On non-sample: written/flags/timestamp are zero. No output is ever truncated.
 KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read(void* session, uint8_t* buffer,
+    uint32_t capacity, uint32_t* written, uint32_t* flags, uint64_t* timestampMicros);
+// One-way, idempotent transition: stops capture/submission immediately. Returns
+// KN_MEDIA_SAMPLE on success or a negative failure. Normal read/quality changes
+// are invalid after this call; close the drained source before creating another.
+KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_begin_drain(void* session);
+// Same output contract and <=450ms application poll budget as read. Emits every
+// accepted old AU before KN_MEDIA_DRAIN_COMPLETE, never captures/submits, and
+// requires begin_drain first. Caller owns the overall drain deadline (2s).
+KN_MEDIA_API int32_t KN_MEDIA_CALL kn_media_read_drain(void* session, uint8_t* buffer,
     uint32_t capacity, uint32_t* written, uint32_t* flags, uint64_t* timestampMicros);
 // null is allowed. Wrong-thread close is rejected (caller must close correctly).
 KN_MEDIA_API void KN_MEDIA_CALL kn_media_close(void* session);
