@@ -13,12 +13,19 @@ import KnotNativeCore
     private(set) var removals = 0
     private(set) var registered: [SavedNativeDevice] = []
     var duringRegistration: (() -> Void)?
+    var loadFails = false
+    var registrationFails = false
     init(_ devices: [SavedNativeDevice]) { self.devices = devices }
-    func load() -> [SavedNativeDevice] { loads += 1; return devices }
+    func load() throws -> [SavedNativeDevice] {
+        loads += 1
+        if loadFails { throw NativeFailure.trust }
+        return devices
+    }
     func save(_ devices: [SavedNativeDevice]) { saves += 1; self.devices = devices }
     func remove(_ id: String) { removals += 1; devices.removeAll { $0.id == id } }
     func register(_ device: SavedNativeDevice) async throws {
         registered.append(device)
+        if registrationFails { throw NativeFailure.transport }
         duringRegistration?()
     }
 }
@@ -61,10 +68,10 @@ private final class RegistrationChannel: NativeChannel, @unchecked Sendable {
     func forgetHeldKeys() {}
 }
 
-private func registrationDevice(_ index: UInt8) throws -> SavedNativeDevice {
+private func registrationDevice(_ index: UInt8, pin: String? = nil) throws -> SavedNativeDevice {
     let fields: [String: Any] = [
         "id": Invitation.encodeBase64URL(Data(repeating: index, count: 32)), "name": "Synthetic PC \(index)",
-        "address": "192.168.50.\(index)", "certificateSHA256": String(repeating: "a", count: 64),
+        "address": "192.168.50.\(index)", "certificateSHA256": pin ?? String(repeating: String(format: "%02x", index), count: 32),
         "secret": Data(repeating: index + 32, count: 32).base64EncodedString()
     ]
     return try JSONDecoder().decode(SavedNativeDevice.self, from: JSONSerialization.data(withJSONObject: fields)).validated()
@@ -90,7 +97,7 @@ private func registrationEnrollment(address: String = "192.168.50.200", pin: Str
 
 @MainActor private func registrationModel(_ store: RegistrationStore, channel: RegistrationChannel) -> SessionModel {
     SessionModel(makeChannel: { _ in channel }, initialSavedDevices: store.devices,
-        loadSavedDevices: { store.load() }, saveSavedDevices: { store.save($0) },
+        loadSavedDevices: { try store.load() }, saveSavedDevices: { store.save($0) },
         registerDevice: { device, _, _ in try await store.register(device) })
 }
 
@@ -121,15 +128,15 @@ struct SessionRegistrationTests {
         #expect(model.status.contains("16대") && model.status.contains("등록을 해제"))
     }
 
-    @Test @MainActor func existingHostCanBeRegisteredAgainAtLocalCapacity() async throws {
+    @Test @MainActor func existingHostAtLocalCapacityRetainsAuthorityWithoutRegisteringAgain() async throws {
         let store = RegistrationStore(try (1...16).map { try registrationDevice(UInt8($0)) })
         let existing = store.devices[3], channel = RegistrationChannel(), presenter = RegistrationPresenter()
         let model = registrationModel(store, channel: channel)
         defer { model.disconnect() }
         try await presentNumberSession(model, channel: channel, presenter: presenter,
             enrollment: registrationEnrollment(address: existing.address, pin: existing.certificateSHA256))
-        try await waitForRegistration { store.saves == 1 }
-        #expect(store.registered == [existing] && store.loads == 2)
+        #expect(store.registered.isEmpty && store.loads == 0 && store.saves == 0)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .saved)
         #expect(store.devices.count == 16 && Set(store.devices.map(\.id)).count == 16)
         #expect(model.savedDevices == store.devices && store.devices.contains(existing))
     }
@@ -200,12 +207,15 @@ private final class RegistrationProofClient: NativeTrustedConnecting, Sendable {
 
 @MainActor private func recoveryNumberModel(_ store: RegistrationStore, channels: RegistrationChannels,
                                           proof: RegistrationProof, retry: RegistrationWaitGate,
-                                          wake: RegistrationWaitGate) -> SessionModel {
-    SessionModel(makeChannel: { try channels.make($0) }, makeTrustedClient: { device, _ in proof.make(device) },
+                                          wake: RegistrationWaitGate, reloadStore: Bool = false,
+                                          initialDevices: [SavedNativeDevice]? = nil) -> SessionModel {
+    let reload: (@MainActor @Sendable () throws -> [SavedNativeDevice])?
+    if reloadStore { reload = { try store.load() } } else { reload = nil }
+    return SessionModel(makeChannel: { try channels.make($0) }, makeTrustedClient: { device, _ in proof.make(device) },
         waitForReconnect: { _ in try await retry.wait() }, waitForWakeReadiness: { try await wake.wait() },
-        initialSavedDevices: store.devices, removeSavedDevice: { store.remove($0) },
-        loadSavedDevices: { store.load() }, saveSavedDevices: { store.save($0) },
-        registerDevice: { device, _, _ in try await store.register(device) })
+        initialSavedDevices: initialDevices ?? store.devices, removeSavedDevice: { store.remove($0) },
+        loadSavedDevices: { try store.load() }, saveSavedDevices: { store.save($0) },
+        registerDevice: { device, _, _ in try await store.register(device) }, reloadSavedDevicesForNumber: reload)
 }
 
 @MainActor private func showRecoveryNumberSession(_ model: SessionModel, channels: RegistrationChannels,
@@ -239,7 +249,7 @@ struct SavedNumberRecoveryTests {
         #expect(model.savedDevices == store.devices && model.savedDevices.count == 16)
     }
 
-    @Test(arguments: ["address", "pin", "both", "unknown"])
+    @Test(arguments: ["pin", "both", "unknown"])
     @MainActor func unmatchedNumberHostRemainsTemporary(_ mismatch: String) async throws {
         let device = try registrationDevice(1)
         let store = RegistrationStore(mismatch == "unknown" ? [] : [device])
@@ -387,4 +397,205 @@ struct SavedNumberRecoveryTests {
         #expect(!model.hasPendingReconnect && proof.devices.isEmpty && channels.invitations.isEmpty)
         #expect(store.loads == 0 && store.saves == 0 && store.registered.isEmpty)
     }
+}
+
+struct AuthenticatedEndpointRecoveryTests {
+    @Test(arguments: [false, true], ["192.168.50.200", "100.88.1.2"])
+    @MainActor func freshNumberReusesUniqueSavedCredentialAtAuthenticatedSessionEndpoint(_ remember: Bool, _ address: String) async throws {
+        let device = try registrationDevice(1), store = RegistrationStore([device])
+        store.registrationFails = true // Existing identity must never enter registration.
+        let first = try registrationEnrollment(address: address, pin: device.certificateSHA256)
+        let fresh = try registrationEnrollment(address: address, pin: device.certificateSHA256, token: 9).offer.invitation
+        let channels = RegistrationChannels(), proof = RegistrationProof(.success(fresh))
+        let retry = RegistrationWaitGate(), wake = RegistrationWaitGate(), presenter = RegistrationPresenter()
+        let model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake)
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+        model.rememberThisPC = remember
+        try await showRecoveryNumberSession(model, channels: channels, presenter: presenter, enrollment: first)
+        #expect(model.savedDevices == [device] && store.devices == [device])
+        #expect(store.loads == 0 && store.saves == 0 && store.registered.isEmpty)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .authenticatedEndpoint)
+        #expect(model.diagnostics.latestRecoverySnapshot?.intent == .current)
+        #expect(!model.checkDeadlines(now: .now + .seconds(11)))
+        try await waitForRegistration { retry.count == 1 }
+        #expect(model.diagnostics.firstIssue?.issue == .silenceDeadline)
+        #expect(model.diagnostics.latestRecoverySnapshot?.intent == .transient)
+        #expect(model.diagnostics.latestRecoverySnapshot?.scheduled == true)
+        retry.advance()
+        try await waitForRegistration { proof.devices.count == 1 && model.phase == .approval }
+        let target = try #require(proof.devices.first)
+        #expect(target.address == address && target.hasSameCredential(as: device))
+        #expect(target == (try device.atAuthenticatedEndpoint(first.offer.invitation)))
+        #expect(channels.invitations.map(\.token) == [first.offer.invitation.token, fresh.token])
+        #expect(model.savedDevices == [device] && store.loads == 0 && store.saves == 0 && store.registered.isEmpty)
+    }
+
+    @Test @MainActor func existingExactHostWithRememberEnabledKeepsRecoveryWithoutRegisteringAgain() async throws {
+        let device = try registrationDevice(1), store = RegistrationStore([device])
+        store.registrationFails = true
+        let first = try registrationEnrollment(address: device.address, pin: device.certificateSHA256)
+        let fresh = try registrationEnrollment(address: device.address, pin: device.certificateSHA256, token: 9).offer.invitation
+        let channels = RegistrationChannels(), proof = RegistrationProof(.success(fresh)), retry = RegistrationWaitGate(), wake = RegistrationWaitGate()
+        let presenter = RegistrationPresenter(), model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake)
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+        model.rememberThisPC = true
+        try await showRecoveryNumberSession(model, channels: channels, presenter: presenter, enrollment: first)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .saved)
+        #expect(store.registered.isEmpty && store.loads == 0 && store.saves == 0)
+        try #require(channels.channels.first).close()
+        try await waitForRegistration { retry.count == 1 }
+        retry.advance()
+        try await waitForRegistration { proof.devices == [device] && model.phase == .approval }
+        #expect(store.registered.isEmpty && store.devices == [device])
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func ambiguousSavedCertificateNeverChoosesOrReRegistersCredential(_ remember: Bool) async throws {
+        let first = try registrationDevice(1), second = try registrationDevice(2, pin: first.certificateSHA256)
+        let store = RegistrationStore([first, second]), channels = RegistrationChannels(), proof = RegistrationProof(.failure(.trust))
+        let retry = RegistrationWaitGate(), wake = RegistrationWaitGate(), presenter = RegistrationPresenter()
+        let model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake)
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+        model.rememberThisPC = remember
+        try await showRecoveryNumberSession(model, channels: channels, presenter: presenter,
+            enrollment: registrationEnrollment(address: first.address, pin: first.certificateSHA256))
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .ambiguous)
+        #expect(model.diagnostics.latestRecoverySnapshot?.intent == NativeRecoveryIntent.none)
+        #expect(!model.checkDeadlines(now: .now + .seconds(11)))
+        model.systemWillSleep(); model.systemDidWake()
+        #expect(!model.hasPendingReconnect && retry.count == 0 && wake.count == 0 && proof.devices.isEmpty)
+        #expect(store.loads == 0 && store.saves == 0 && store.registered.isEmpty && store.devices == [first, second])
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func explicitNumberCanRetryUnavailableStoreOnlyThroughOptedInAdapter(_ retryLookup: Bool) async throws {
+        let device = try registrationDevice(1), store = RegistrationStore([device])
+        let fresh = try registrationEnrollment(address: device.address, pin: device.certificateSHA256, token: 9).offer.invitation
+        let channels = RegistrationChannels(), proof = RegistrationProof(.success(fresh)), retry = RegistrationWaitGate(), wake = RegistrationWaitGate()
+        let presenter = RegistrationPresenter(), model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake,
+            reloadStore: retryLookup, initialDevices: [])
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+        store.loadFails = true; model.refreshSavedDevices()
+        #expect(store.loads == 1 && model.savedDevices.isEmpty && model.diagnostics.firstIssue == nil)
+        store.loadFails = false
+        try await showRecoveryNumberSession(model, channels: channels, presenter: presenter,
+            enrollment: registrationEnrollment(address: device.address, pin: device.certificateSHA256))
+        #expect(store.loads == (retryLookup ? 2 : 1))
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == (retryLookup ? .saved : .storeUnavailable))
+        #expect(!model.checkDeadlines(now: .now + .seconds(11)))
+        if retryLookup { try await waitForRegistration { retry.count == 1 } }
+        #expect(model.hasPendingReconnect == retryLookup && store.saves == 0 && store.registered.isEmpty)
+    }
+
+    @Test @MainActor func stillUnavailableStoreDoesNotInventOrRegisterCredential() async throws {
+        let device = try registrationDevice(1), store = RegistrationStore([device]), channels = RegistrationChannels()
+        let proof = RegistrationProof(.failure(.trust)), retry = RegistrationWaitGate(), wake = RegistrationWaitGate(), presenter = RegistrationPresenter()
+        let model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake, reloadStore: true, initialDevices: [])
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+        store.loadFails = true; model.refreshSavedDevices(); model.rememberThisPC = true
+        try await showRecoveryNumberSession(model, channels: channels, presenter: presenter,
+            enrollment: registrationEnrollment(address: device.address, pin: device.certificateSHA256))
+        #expect(store.loads == 2 && store.saves == 0 && store.registered.isEmpty)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .storeUnavailable && model.savedDevices.isEmpty)
+        #expect(!model.checkDeadlines(now: .now + .seconds(11)))
+        #expect(!model.hasPendingReconnect && proof.devices.isEmpty && retry.count == 0)
+        #expect(model.diagnostics.report.contains("credential=store-unavailable"))
+        #expect(model.diagnostics.firstIssue?.issue == .silenceDeadline)
+    }
+
+    @Test(arguments: ["disconnect", "disabled", "forget", "refresh", "cancelSleep", "rejectedProof", "sleep"])
+    @MainActor func changedEndpointRecoveryRemainsBoundToOriginalAuthorizationAndOwnedIntent(_ action: String) async throws {
+        let device = try registrationDevice(1), store = RegistrationStore([device])
+        let endpoint = "100.88.1.2", first = try registrationEnrollment(address: endpoint, pin: device.certificateSHA256)
+        let fresh = try registrationEnrollment(address: endpoint, pin: device.certificateSHA256, token: 9).offer.invitation
+        let channels = RegistrationChannels(), proof = RegistrationProof(action == "rejectedProof" ? .failure(.trust) : .success(fresh))
+        let retry = RegistrationWaitGate(), wake = RegistrationWaitGate(), presenter = RegistrationPresenter()
+        let model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake)
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+        try await showRecoveryNumberSession(model, channels: channels, presenter: presenter, enrollment: first)
+        if action == "sleep" {
+            model.systemWillSleep()
+            #expect(model.isSystemSleeping && model.hasPendingReconnect)
+            #expect(model.diagnostics.latestRecoverySnapshot?.intent == .suspended)
+            model.systemDidWake(); try await waitForRegistration { wake.count == 1 }; wake.advance()
+            try await waitForRegistration { proof.devices.count == 1 && model.phase == .approval }
+            #expect(proof.devices.first?.address == endpoint && proof.devices.first?.hasSameCredential(as: device) == true)
+        } else {
+            try #require(channels.channels.first).close(); try await waitForRegistration { retry.count == 1 }
+            switch action {
+            case "disconnect": model.disconnect()
+            case "disabled": model.autoReconnect = false
+            case "forget": model.forgetSaved(device.id)
+            case "refresh": store.devices = []; model.refreshSavedDevices()
+            case "cancelSleep": model.systemWillSleep(); model.disconnect(); model.systemDidWake()
+            default: break
+            }
+            retry.advance()
+            if action == "rejectedProof" {
+                try await waitForRegistration { model.phase == .failed && proof.devices.count == 1 }
+                #expect(proof.devices.first?.address == endpoint && proof.devices.first?.hasSameCredential(as: device) == true)
+                model.systemWillSleep(); model.systemDidWake()
+            }
+            for _ in 0..<20 { await Task.yield() }
+            #expect(!model.hasPendingReconnect && wake.count == 0)
+            #expect(proof.devices.count == (action == "rejectedProof" ? 1 : 0))
+        }
+        #expect(store.saves == 0 && store.registered.isEmpty)
+        #expect(action == "refresh" || action == "forget" || model.savedDevices == [device])
+    }
+
+    @Test @MainActor func persistedDisabledRecoveryIsHonoredAndRecordedForAuthenticatedEndpoint() async throws {
+        let device = try registrationDevice(1), store = RegistrationStore([device]), channels = RegistrationChannels()
+        let proof = RegistrationProof(.failure(.trust)), retry = RegistrationWaitGate(), wake = RegistrationWaitGate(), presenter = RegistrationPresenter()
+        let model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake)
+        defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+        model.autoReconnect = false
+        try await showRecoveryNumberSession(model, channels: channels, presenter: presenter,
+            enrollment: registrationEnrollment(address: "100.88.1.2", pin: device.certificateSHA256))
+        #expect(model.diagnostics.latestRecoverySnapshot?.autoReconnect == false)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .authenticatedEndpoint)
+        #expect(!model.checkDeadlines(now: .now + .seconds(11)))
+        model.systemWillSleep(); model.systemDidWake()
+        #expect(!model.hasPendingReconnect && proof.devices.isEmpty && retry.count == 0 && wake.count == 0)
+        #expect(model.diagnostics.report.contains("autoReconnect=false"))
+    }
+}
+
+@Test func authenticatedEndpointCopyRequiresTheExistingExactCertificateAndPreservesCredential() throws {
+    let device = try registrationDevice(1)
+    let matched = try registrationEnrollment(address: "100.88.1.2", pin: device.certificateSHA256).offer.invitation
+    let copy = try device.atAuthenticatedEndpoint(matched)
+    #expect(copy.address == matched.address && copy.id == device.id && copy.name == device.name)
+    #expect(copy.certificateSHA256 == device.certificateSHA256 && copy.hasSameCredential(as: device))
+    let changed = try registrationEnrollment(address: matched.address, pin: String(repeating: "f", count: 64)).offer.invitation
+    #expect(throws: NativeFailure.trust) { try device.atAuthenticatedEndpoint(changed) }
+    #expect(!copy.hasSameCredential(as: try registrationDevice(2, pin: device.certificateSHA256)))
+}
+
+@Test(arguments: [false, true]) @MainActor
+func registrationStoreRereadReusesUniqueSavedIdentityAndRefusesAmbiguousIdentity(_ ambiguous: Bool) async throws {
+    let device = try registrationDevice(1), second = try registrationDevice(2, pin: device.certificateSHA256)
+    let store = RegistrationStore(ambiguous ? [device, second] : [device])
+    store.registrationFails = true
+    let address = "100.88.1.2", first = try registrationEnrollment(address: address, pin: device.certificateSHA256)
+    let fresh = try registrationEnrollment(address: address, pin: device.certificateSHA256, token: 9).offer.invitation
+    let channels = RegistrationChannels(), proof = RegistrationProof(.success(fresh)), retry = RegistrationWaitGate(), wake = RegistrationWaitGate()
+    let presenter = RegistrationPresenter(), model = recoveryNumberModel(store, channels: channels, proof: proof, retry: retry, wake: wake, initialDevices: [])
+    defer { model.disconnect(); retry.releaseAll(); wake.releaseAll() }
+    model.rememberThisPC = true
+    // The view's stale empty list predates the explicit registration-stage
+    // store read. That read must reuse a found credential, never replace it.
+    try await showRecoveryNumberSession(model, channels: channels, presenter: presenter, enrollment: first)
+    #expect(store.loads == 1 && store.saves == 0 && store.registered.isEmpty)
+    #expect(model.diagnostics.latestRecoverySnapshot?.credential == (ambiguous ? .ambiguous : .authenticatedEndpoint))
+    #expect(!model.checkDeadlines(now: .now + .seconds(11)))
+    if ambiguous {
+        #expect(!model.hasPendingReconnect && proof.devices.isEmpty && retry.count == 0)
+    } else {
+        try await waitForRegistration { retry.count == 1 }; retry.advance()
+        try await waitForRegistration { proof.devices.count == 1 && model.phase == .approval }
+        #expect(proof.devices.first?.address == address && proof.devices.first?.hasSameCredential(as: device) == true)
+        #expect(model.savedDevices == [device] && store.devices == [device])
+    }
+    #expect(store.loads == 1 && store.saves == 0 && store.registered.isEmpty)
 }

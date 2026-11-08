@@ -103,7 +103,9 @@ struct TrustedReconnectTests {
             #expect(await waitForTrustedState { attempts.count == 1 && model.phase == .failed })
             #expect(!model.hasPendingReconnect)
             #expect(model.reconnectAttemptCount == 0)
-            #expect(failure == .trust ? model.status.contains("새 번호로 다시 등록") : !model.status.contains("새 번호로 다시 등록"))
+            if failure == .trust {
+                #expect(model.status.contains("이 Mac의 등록을 해제한 뒤") && model.status.contains("새 번호로 직접 등록"))
+            } else { #expect(!model.status.contains("새 번호로 직접 등록")) }
             model.disconnect()
         }
     }

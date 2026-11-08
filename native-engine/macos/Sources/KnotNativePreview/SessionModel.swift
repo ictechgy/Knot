@@ -24,6 +24,7 @@ final class SessionModel: ObservableObject {
                 let wasRecovering: Bool
                 switch registeredRecovery { case .transient, .suspended: wasRecovering = true; default: wasRecovering = false }
                 clearAutomaticRecovery()
+                recordRecovery(.recoveryDisabled)
                 if !active {
                     endConnectionActivity()
                     if wasRecovering { status = "자동 재연결을 껐어요. ‘내 PC’에서 직접 다시 연결할 수 있어요." }
@@ -31,6 +32,7 @@ final class SessionModel: ObservableObject {
             }
             else if active, let device = selectedTrustedDevice, savedDevices.contains(device) {
                 registeredRecovery = .current(device)
+                recordRecovery(.recoveryEnabled)
             }
         }
     }
@@ -55,6 +57,11 @@ final class SessionModel: ObservableObject {
     private let writeUpdateResume: @MainActor @Sendable (String?, TimeInterval) -> Void
     private let takeUpdateResume: @MainActor @Sendable () -> (String, TimeInterval)?
     private var selectedTrustedDevice: SavedNativeDevice?
+    // Selection is the exact persisted authorization record. A fresh number
+    // can authorize another endpoint for this session without editing it.
+    private var authenticatedRecoveryEndpoint: SavedNativeDevice?
+    private var savedDeviceLoadUnavailable = false
+    private var recoveryCredential: NativeRecoveryCredential = .none
     private var pendingRegistration: Invitation?
     private var trustedClient: (any NativeTrustedConnecting)?
     private var trustedTask: Task<Void, Never>?
@@ -85,6 +92,7 @@ final class SessionModel: ObservableObject {
     private let waitForWakeReadiness: @MainActor @Sendable () async throws -> Void
     private let removeSavedDevice: @MainActor @Sendable (String) throws -> Void
     private let loadSavedDevices: @MainActor @Sendable () throws -> [SavedNativeDevice]
+    private let reloadSavedDevicesForNumber: (@MainActor @Sendable () throws -> [SavedNativeDevice])?
     private let saveSavedDevices: @MainActor @Sendable ([SavedNativeDevice]) throws -> Void
     private let registerDevice: @MainActor @Sendable (SavedNativeDevice, String, Invitation) async throws -> Void
     @Published var showFullscreenControls = false
@@ -142,6 +150,7 @@ final class SessionModel: ObservableObject {
          },
          makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)? = nil,
          makeConnectionActivity: (@MainActor () -> any NativeConnectionActivityHolding)? = nil,
+         reloadSavedDevicesForNumber: (@MainActor @Sendable () throws -> [SavedNativeDevice])? = nil,
          writeUpdateResume: @escaping @MainActor @Sendable (String?, TimeInterval) -> Void = { id, expiry in
              let defaults = UserDefaults(suiteName: "io.knot.native-preview")
              defaults?.removeObject(forKey: "updateResumeDevice"); defaults?.removeObject(forKey: "updateResumeExpiry")
@@ -160,6 +169,7 @@ final class SessionModel: ObservableObject {
         self.makeChannel = makeChannel
         self.makeAudioSession = makeAudioSession
         self.makeConnectionActivity = makeConnectionActivity
+        self.reloadSavedDevicesForNumber = reloadSavedDevicesForNumber
         self.waitForInputDeadline = waitForInputDeadline
         self.makeTrustedClient = makeTrustedClient; self.waitForReconnect = waitForReconnect
         self.waitForWakeReadiness = waitForWakeReadiness; self.removeSavedDevice = removeSavedDevice
@@ -169,6 +179,7 @@ final class SessionModel: ObservableObject {
         selectedTrustedDevice = initialRegisteredDevice
         if initialRegisteredDevice != nil { reconnectMethod = .registered }
         registeredRecovery = initialRegisteredDevice.map(RegisteredRecovery.current)
+        recoveryCredential = initialRegisteredDevice == nil ? .none : .saved
     }
 
     func prepareForUpdate() {
@@ -191,7 +202,7 @@ final class SessionModel: ObservableObject {
     }
     func refreshSavedDevices() {
         do {
-            savedDevices = try loadSavedDevices()
+            savedDevices = try readDeviceStore()
             // A successful refresh can observe a removal or replacement made
             // by another app instance. Retire the old target immediately so a
             // completed retry task cannot keep its UI/activity ownership alive.
@@ -210,7 +221,7 @@ final class SessionModel: ObservableObject {
             phase = .failed; status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return
         }
         reconnectMethod = .registered
-        selectedTrustedDevice = device; pendingRegistration = nil
+        selectedTrustedDevice = device; authenticatedRecoveryEndpoint = nil; recoveryCredential = .saved; pendingRegistration = nil
         beginTrustedConnection(device)
     }
     func prepareForNewTarget() {
@@ -220,11 +231,14 @@ final class SessionModel: ObservableObject {
         disconnect(); invitation = nil; numberAuthorized = false
     }
     private func beginTrustedConnection(_ device: SavedNativeDevice) {
-        guard !active, !isSystemSleeping else { return }
+        guard !active, !isSystemSleeping,
+              let authorization = selectedTrustedDevice, savedDevices.contains(authorization),
+              device.hasSameCredential(as: authorization) else { return }
         beginConnectionActivity()
-        registeredRecovery = autoReconnect ? .current(device) : nil
+        registeredRecovery = autoReconnect ? .current(authorization) : nil
         let id = UUID(); identity = id; phase = .connecting
         status = "등록된 PC와 보안 연결을 확인하고 있어요…"
+        recordRecovery(.retryStarted)
         do {
             let client = try makeTrustedClient(device, viewerLabel); trustedClient = client
             trustedTask = Task { [weak self] in
@@ -268,32 +282,51 @@ final class SessionModel: ObservableObject {
         guard rememberThisPC, numberAuthorized, selectedTrustedDevice == nil else { return }
         pendingRegistration = nil
         do {
-            let stored = try loadSavedDevices()
-            let existing = stored.first { $0.certificateSHA256 == invitation.certificateSHA256 && $0.address == invitation.address }
-            guard existing != nil || stored.count < 16 else {
+            let stored = try readDeviceStore()
+            let matches = stored.filter { $0.certificateSHA256 == invitation.certificateSHA256 }
+            if matches.count == 1, let existing = matches.first {
+                let target = try existing.atAuthenticatedEndpoint(invitation)
+                savedDevices = stored; selectedTrustedDevice = existing; authenticatedRecoveryEndpoint = target
+                recoveryCredential = target.address == existing.address ? .saved : .authenticatedEndpoint
+                registeredRecovery = autoReconnect ? .current(existing) : nil
+                recordRecovery(target.address == existing.address ? .numberAdoptedSaved : .numberAdoptedEndpoint)
+                updateStreamingStatus(); return
+            }
+            if matches.count > 1 {
+                recoveryCredential = .ambiguous; recordRecovery(.numberAmbiguous)
+                status = "같은 호스트의 기존 등록을 여러 개 찾았어요. ‘내 PC’의 등록을 확인하세요. 이번 화면 연결은 유지해요."
+                return
+            }
+            guard stored.count < 16 else {
                 status = "등록된 PC는 16대까지 저장할 수 있어요. 기존 PC 등록을 해제한 뒤 다시 시도하세요."
                 return
             }
-            let device = try existing ?? NativeTrustedClient.newDevice(invitation: invitation, name: savedDeviceLabel)
+            let device = try NativeTrustedClient.newDevice(invitation: invitation, name: savedDeviceLabel)
             let run = identity
+            recordRecovery(.registrationStarted)
             registrationTask = Task { [weak self, registerDevice, viewerLabel] in
                 do {
                     try await registerDevice(device, viewerLabel, invitation)
                     guard let self, self.identity == run, !Task.isCancelled else { return }
-                    var devices = try self.loadSavedDevices()
+                    var devices = try self.readDeviceStore()
                     devices.removeAll { $0.id == device.id }
                     guard devices.count < 16 else { throw NativeFailure.state }
                     devices.append(device); try self.saveSavedDevices(devices)
                     self.savedDevices = devices; self.selectedTrustedDevice = device; self.registrationTask = nil
+                    self.authenticatedRecoveryEndpoint = nil; self.recoveryCredential = .saved
                     self.registeredRecovery = self.autoReconnect ? .current(device) : nil
+                    self.recordRecovery(.registrationSaved)
                     self.updateStreamingStatus()
                 } catch {
                     guard let self, self.identity == run, !Task.isCancelled else { return }
                     self.status = "화면은 연결됐지만 PC 등록을 저장하지 못했어요. Windows의 등록 기기를 확인해주세요."
-                    self.registrationTask = nil
+                    self.registrationTask = nil; self.recordRecovery(.registrationFailed)
                 }
             }
-        } catch { status = "PC 등록을 준비하지 못했어요. 화면 연결은 계속돼요." }
+        } catch {
+            status = "PC 등록을 준비하지 못했어요. 화면 연결은 계속돼요."
+            recordRecovery(.registrationFailed)
+        }
     }
     private func scheduleReconnect(_ device: SavedNativeDevice) {
         guard !isSystemSleeping, !active, recoveryDevice == device else { return }
@@ -312,26 +345,63 @@ final class SessionModel: ObservableObject {
                   !self.active, self.recoveryDevice == device else { return }
             self.reconnectTask = nil; self.beginTrustedConnection(device)
         }
+        recordRecovery(.retryScheduled)
     }
     private func transportFailed(reason: NativeConnectionIssue = .transport) {
         diagnostics.record(reason)
+        recordRecovery(.transportFailure)
         let device = recoveryDevice
         let message: String
         if device != nil { message = "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인하세요." }
         else if selectedTrustedDevice != nil { message = "연결이 끊겼어요. Windows의 공유 상태와 네트워크를 확인한 뒤 등록된 PC를 선택해 다시 연결하세요." }
         else { message = "The network connection stopped. Check Windows sharing and the network before reconnecting." }
         close(message: message, failed: true, retainingActivity: device != nil && !isSystemSleeping)
-        if let device, !isSystemSleeping { registeredRecovery = .transient(device); scheduleReconnect(device) }
+        if let device, !isSystemSleeping, let authorization = selectedTrustedDevice,
+           savedDevices.contains(authorization), device.hasSameCredential(as: authorization) {
+            authenticatedRecoveryEndpoint = device
+            registeredRecovery = .transient(authorization); scheduleReconnect(device)
+        }
     }
     private var recoveryDevice: SavedNativeDevice? {
-        guard autoReconnect, let device = registeredRecovery?.device,
-              selectedTrustedDevice == device, savedDevices.contains(device) else { return nil }
-        return device
+        guard autoReconnect, let authorization = registeredRecovery?.device,
+              selectedTrustedDevice == authorization, savedDevices.contains(authorization) else { return nil }
+        let target = authenticatedRecoveryEndpoint ?? authorization
+        guard target.hasSameCredential(as: authorization) else { return nil }
+        return target
     }
     private func clearAutomaticRecovery() {
+        let cancelledRetry = reconnectTask != nil
+        let cancelledWake: Bool
+        if case .suspended = registeredRecovery { cancelledWake = true }
+        else { cancelledWake = wakeReconnectTask != nil }
         registeredRecovery = nil
         reconnectTask?.cancel(); reconnectTask = nil
         wakeReconnectTask?.cancel(); wakeReconnectTask = nil
+        if cancelledRetry { recordRecovery(.retryCancelled) }
+        if cancelledWake { recordRecovery(.wakeCancelled) }
+    }
+    private func readDeviceStore() throws -> [SavedNativeDevice] {
+        do {
+            let devices = try loadSavedDevices()
+            savedDeviceLoadUnavailable = false; recordRecovery(.savedDevicesLoaded)
+            return devices
+        } catch {
+            savedDeviceLoadUnavailable = true
+            if selectedTrustedDevice == nil { recoveryCredential = .storeUnavailable }
+            recordRecovery(.savedDevicesLoadFailed); throw error
+        }
+    }
+    private func recordRecovery(_ event: NativeRecoveryEvent) {
+        let intent: NativeRecoveryIntent
+        switch registeredRecovery {
+        case .current: intent = .current
+        case .transient: intent = .transient
+        case .suspended: intent = .suspended
+        case nil: intent = .none
+        }
+        diagnostics.recordRecovery(event, snapshot: NativeRecoverySnapshot(autoReconnect: autoReconnect,
+            credential: recoveryCredential, isSystemSleeping: isSystemSleeping, intent: intent,
+            scheduled: reconnectTask != nil || wakeReconnectTask != nil, attempt: reconnectAttempt))
     }
     private func beginConnectionActivity() {
         guard connectionActivity == nil, !isSystemSleeping else { return }
@@ -351,15 +421,21 @@ final class SessionModel: ObservableObject {
         }
         let hadConnection = active || hasPendingReconnect || candidate != nil
         isSystemSleeping = true
+        recordRecovery(.willSleep)
         if hadConnection {
             close(message: candidate == nil ? "잠자기로 연결을 종료했어요. 새 번호로 다시 연결하세요." :
                 "Mac이 잠자기 상태예요. 복귀하면 등록된 PC에 다시 연결해요.", failed: false)
         } else { clearAutomaticRecovery() }
-        if let candidate { registeredRecovery = .suspended(candidate) }
+        if let candidate, let authorization = selectedTrustedDevice,
+           savedDevices.contains(authorization), candidate.hasSameCredential(as: authorization) {
+            authenticatedRecoveryEndpoint = candidate; registeredRecovery = .suspended(authorization)
+            recordRecovery(.willSleep)
+        }
     }
     func systemDidWake() {
-        guard isSystemSleeping else { return }
+        guard isSystemSleeping else { recordRecovery(.didWake); return }
         isSystemSleeping = false
+        recordRecovery(.didWake)
         guard case .suspended = registeredRecovery, let device = recoveryDevice else {
             clearAutomaticRecovery(); return
         }
@@ -373,10 +449,12 @@ final class SessionModel: ObservableObject {
                   !self.active, case .suspended = self.registeredRecovery,
                   self.recoveryDevice == device else { return }
             self.wakeReconnectTask = nil; self.reconnectAttempt = 0
+            self.recordRecovery(.wakeStarted)
             // The trusted client issues a fresh challenge; no one-use invitation
             // or previous media/sidecar capability survives close().
             self.beginTrustedConnection(device)
         }
+        recordRecovery(.wakeScheduled)
     }
     private func connectionFailed(_ error: any Error) {
         switch error as? NativeFailure {
@@ -392,7 +470,7 @@ final class SessionModel: ObservableObject {
         case .trust:
             diagnostics.record(.trust)
             fail(selectedTrustedDevice == nil ? "Invitation was rejected or expired. Create a new invitation." :
-                "등록된 PC의 연결 권한을 확인하지 못했어요. Windows의 등록 기기를 확인하고 새 번호로 다시 등록하세요.")
+                "등록된 PC의 연결 권한을 확인하지 못했어요. 기존 등록을 확인하고 필요하면 이 Mac의 등록을 해제한 뒤 새 번호로 직접 등록하세요.")
         case .decoder:
             diagnostics.record(.decoder)
             fail("The native decoder stopped. Create a new invitation to reconnect.")
@@ -426,15 +504,36 @@ final class SessionModel: ObservableObject {
             close(message: "Invitation was rejected or expired. Create a new invitation.", failed: true, numberConnection: true); return
         }
         let authenticatedInvitation = enrollment.offer.invitation
-        // A fresh number authenticates this host, but must not recreate or
-        // rotate a saved key that Windows may have revoked. Reconnect will
-        // still require a fresh proof using that exact existing credential.
-        selectedTrustedDevice = rememberThisPC ? nil : savedDevices.first {
-            $0.address == authenticatedInvitation.address && $0.certificateSHA256 == authenticatedInvitation.certificateSHA256
+        if savedDeviceLoadUnavailable, let reloadSavedDevicesForNumber {
+            // Only production opts into this store adapter. Default models and
+            // fixtures cannot acquire Keychain effects through fresh enrollment.
+            do {
+                savedDevices = try reloadSavedDevicesForNumber(); savedDeviceLoadUnavailable = false
+                recordRecovery(.savedDevicesLoaded)
+            } catch { recordRecovery(.savedDevicesLoadFailed) }
         }
+        let matches = savedDeviceLoadUnavailable ? [] : savedDevices.filter {
+            $0.certificateSHA256 == authenticatedInvitation.certificateSHA256
+        }
+        selectedTrustedDevice = nil; authenticatedRecoveryEndpoint = nil
+        let adoptionEvent: NativeRecoveryEvent
+        if savedDeviceLoadUnavailable {
+            recoveryCredential = .storeUnavailable; adoptionEvent = .numberStoreUnavailable
+        } else if matches.count == 1, let existing = matches.first,
+                  let target = try? existing.atAuthenticatedEndpoint(authenticatedInvitation) {
+            selectedTrustedDevice = existing; authenticatedRecoveryEndpoint = target
+            recoveryCredential = target.address == existing.address ? .saved : .authenticatedEndpoint
+            adoptionEvent = target.address == existing.address ? .numberAdoptedSaved : .numberAdoptedEndpoint
+        } else if matches.count > 1 {
+            recoveryCredential = .ambiguous; adoptionEvent = .numberAmbiguous
+        } else { recoveryCredential = .none; adoptionEvent = .numberTemporary }
         registeredRecovery = autoReconnect ? selectedTrustedDevice.map(RegisteredRecovery.current) : nil
         reconnectAttempt = 0
-        pendingRegistration = rememberThisPC ? authenticatedInvitation : nil
+        // An already saved identity needs a fresh proof on recovery, never an
+        // implicit re-registration or key rotation, even when Remember is on.
+        pendingRegistration = rememberThisPC && matches.isEmpty && !savedDeviceLoadUnavailable ? authenticatedInvitation : nil
+        recordRecovery(adoptionEvent)
+        if !autoReconnect { recordRecovery(.recoveryDisabled) }
         invitation = authenticatedInvitation
         viewerLabel = enrollment.viewerName
         numberAuthorized = true
@@ -872,6 +971,7 @@ final class SessionModel: ObservableObject {
         else if active { reconnectMethod = selectedTrustedDevice != nil ? .registered : numberAuthorized ? .number : .invitation }
         identity = UUID(); inputEpoch &+= 1
         clearAutomaticRecovery()
+        authenticatedRecoveryEndpoint = nil
         trustedTask?.cancel(); trustedTask = nil; trustedClient?.close(); trustedClient = nil
         registrationTask?.cancel(); registrationTask = nil; pendingRegistration = nil
         clipboard?.cancel(); clipboard = nil; quality = nil
@@ -893,6 +993,7 @@ final class SessionModel: ObservableObject {
         numberAuthorized = false
         presentationBackpressureSince = nil; displayBehind = false; receiverPressure.reset()
         phase = failed ? .failed : .idle; status = message
+        recordRecovery(.connectionClosed)
         if !retainingActivity { endConnectionActivity() }
     }
 }

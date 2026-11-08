@@ -11,6 +11,17 @@ struct SavedNativeDevice: Codable, Identifiable, Equatable, Sendable {
     let address: String
     let certificateSHA256: String
     fileprivate let secret: Data
+    /// A fresh authenticated number may select another private route to this
+    /// exact pinned host. This copy changes session routing, never credentials.
+    func atAuthenticatedEndpoint(_ invitation: Invitation) throws -> SavedNativeDevice {
+        guard invitation.certificateSHA256 == certificateSHA256,
+              Invitation.isPrivateIPv4(invitation.address) else { throw NativeFailure.trust }
+        return try SavedNativeDevice(id: id, name: name, address: invitation.address,
+            certificateSHA256: certificateSHA256, secret: secret).validated()
+    }
+    func hasSameCredential(as other: SavedNativeDevice) -> Bool {
+        id == other.id && certificateSHA256 == other.certificateSHA256 && secret == other.secret
+    }
     func validated() throws -> SavedNativeDevice {
         guard try Invitation.base64URL(id).count == 32, Invitation.validViewerLabel(name),
               Invitation.isPrivateIPv4(address), certificateSHA256.count == 64,
