@@ -584,18 +584,16 @@ namespace Knot.NativePreview
                             if (!budget.TryComplete()) throw new ProtocolException("timeout");
                             claimInvitation.Claim(candidate);
                             if (audioAllowed) sessionAudioKey = NativeAudioProtocol.DeriveKey(candidate);
+                            // Token consumption and scope publication have one
+                            // winner against last-key revocation on this gate.
+                            isClaimed = true; peerName = name; claimed = true; registrationDeadline = 0;
+                            claimedPeer = observedRemote;
+                            claimedFiles = fileOptions != null && wantsFiles && (!enrollmentMode || enrollmentAllowsFiles);
+                            approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
+                            if (enrollmentMode) { approved = true; approval.Set(); }
                         }
                     }
                     finally { Array.Clear(candidate, 0, candidate.Length); }
-                    lock (gate)
-                    {
-                        if (isStopped) return false;
-                        isClaimed = true; peerName = name; claimed = true; registrationDeadline = 0;
-                        claimedPeer = observedRemote;
-                        claimedFiles = fileOptions != null && wantsFiles && (!enrollmentMode || enrollmentAllowsFiles);
-                        approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
-                        if (enrollmentMode) { approved = true; approval.Set(); }
-                    }
                 }
                 return true;
             }
