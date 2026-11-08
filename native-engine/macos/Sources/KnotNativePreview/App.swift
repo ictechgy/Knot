@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 #if !arch(arm64)
 #error("Knot Native Preview requires Apple Silicon.")
@@ -13,10 +14,11 @@ struct KnotNativePreviewApp: App {
     @StateObject private var quick = NativeQuickActivation()
     @StateObject private var updates = NativeUpdateModel()
     @StateObject private var power = NativePowerMonitor()
+    @StateObject private var lifecycle = NativeApplicationLifecycle()
     init() { NativeUpdateHandoff.runIfRequested() }
     var body: some Scene {
         Window("Knot Native Preview", id: "main") {
-            NativeMainContent(model: model, windowState: windowState, preferences: preferences, quick: quick, updates: updates, power: power)
+            NativeMainContent(model: model, windowState: windowState, preferences: preferences, quick: quick, updates: updates, power: power, lifecycle: lifecycle)
         }
             .defaultSize(width: 1200, height: 760)
             .commands {
@@ -44,9 +46,11 @@ private struct NativeMainContent: View {
     @ObservedObject var quick: NativeQuickActivation
     @ObservedObject var updates: NativeUpdateModel
     @ObservedObject var power: NativePowerMonitor
+    @ObservedObject var lifecycle: NativeApplicationLifecycle
     var body: some View {
         PreviewWindow(model: model, windowState: windowState, updates: updates)
             .onAppear {
+                lifecycle.bind(model: model, quick: quick, updates: updates)
                 power.bind(model, notificationCenter: NSWorkspace.shared.notificationCenter)
                 preferences.bind(model)
                 model.refreshSavedDevices(); model.resumeAfterUpdateIfRequested()
@@ -76,7 +80,21 @@ private struct NativeMenuContent: View {
             if updates.available { Button("업데이트하고 다시 열기") { updates.install { model.prepareForUpdate() } } }
             Divider()
             Button("연결 종료") { model.disconnect() }.disabled(!model.active && !model.hasPendingReconnect)
-            Button("Knot 종료") { model.disconnect(); quick.stop(); NSApp.terminate(nil) }
+            Button("Knot 종료") { model.disconnect(); updates.stop(); quick.stop(); NSApp.terminate(nil) }
+        }
+    }
+}
+
+
+/// App-scoped ownership survives closing the main window. Installation hands
+/// its committed stage to the helper; stop only reclaims inactive parent work.
+@MainActor
+private final class NativeApplicationLifecycle: ObservableObject {
+    private var termination: AnyCancellable?
+    func bind(model: SessionModel, quick: NativeQuickActivation, updates: NativeUpdateModel) {
+        guard termination == nil else { return }
+        termination = NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification).sink { [weak model, weak quick, weak updates] _ in
+            MainActor.assumeIsolated { model?.disconnect(); updates?.stop(); quick?.stop() }
         }
     }
 }

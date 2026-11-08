@@ -17,6 +17,14 @@ class NativeUpdates(unittest.TestCase):
         for changes in [dict(platform='windows-x64'),dict(size=0),dict(size=u.MAXIMUM_BYTES+1),dict(sha256='A'*64),dict(expires=99),dict(expires=100+30*86400+1)]:
             args = dict(current_version='0.1.0-native.11', platform='macos-arm64', url='https://example.com/Knot-Native-0.1.0-native.11-macos-arm64.zip', size=10, sha256='a'*64, expires=150, now=100); args.update(changes)
             with self.assertRaises(ValueError): u.manifest(**args)
+    def test_exact_artifact_basename_matches_both_clients(self):
+        for platform, suffix in [('macos-arm64', '-macos-arm64.zip'), ('windows-x64', '-windows-x64-setup.exe')]:
+            expected = 'Knot-Native-0.1.0-native.16' + suffix
+            args = dict(current_version='0.1.0-native.16', platform=platform, size=5, sha256='a'*64, expires=150, now=100)
+            self.assertTrue(u.manifest(url='https://example.com/releases/' + expected, **args))
+            for name in ['x' + expected, expected + '/extra', '%4b' + expected[1:], expected + '/']:
+                with self.assertRaises(ValueError):
+                    u.manifest(url='https://example.com/releases/' + name, **args)
     def test_unconfigured_and_partial_rejected(self):
         with tempfile.TemporaryDirectory() as t:
             p=Path(t)/'packaging/updates'; p.mkdir(parents=True); f=p/'native-publisher.json'

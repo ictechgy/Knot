@@ -633,7 +633,7 @@ class BuildSnapshotTests(unittest.TestCase):
         hidden.parent.mkdir(); hidden.write_text("struct Hidden {}\n")
         self.snapshot_now()
         self.assertEqual(self.git("status", "--porcelain"), b"")
-        with self.assertRaisesRegex(BuildSnapshotError, "Missing from archive.*Hidden.swift"): self.validate()
+        with self.assertRaisesRegex(BuildSnapshotError, "Remove or move ignored generated inputs.*Hidden.swift.*Missing from archive"): self.validate()
 
     def test_index_only_input_present_before_build_is_rejected(self):
         (self.source.parent / "Staged.swift").write_text("struct Staged {}\n")

@@ -90,7 +90,7 @@ private final class ClipboardGestureChannel: NativeChannel, @unchecked Sendable 
         try #require(model.send(control)); presenter.ownsControl = true
         try await awaitClipboardGesture { channel.inputPackets().count == 1 }
         let clipboard = ClipboardModel(send: { model.sendControl($0) }, readText: { rejected }, writeText: { _ in false })
-        try #require(model.prepareClipboardGesture()); clipboard.pasteToRemote()
+        model.performClipboardGesture(paste: true, clipboard: clipboard)
         #expect(!presenter.ownsControl && !model.inputRecovery && !clipboard.busy)
         // Command-up now has no local ownership. The queued remote release must
         // still clear the accepted Ctrl-down before ordinary lowercase typing.

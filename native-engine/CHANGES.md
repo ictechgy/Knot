@@ -1,5 +1,15 @@
 # Native preview changes
 
+## 0.1.0-native.16
+
+- Classify registered startup silence consistently with transport loss while retaining bounded reconnect attempts and explicit terminal media, protocol and certificate failures. Keep saved-PC recovery guidance separate from temporary connection numbers.
+- Revoke sharing on clipboard-originated input failure; serialize Windows trust mutations across processes and keep one production host owner per user. Expose explicit expired-identity renewal with registration revocation instead of silent certificate replacement.
+- Start the bounded registration window when media is ready. Reconcile expired temporary grants and last-device revocation without leaving stale preparation/listener state.
+- Share one clipboard gesture preparation path between Mac menus and keyboard shortcuts. Observe owned audio-engine configuration loss as an audio-only failure; retain video and explicit retry controls.
+- Reserve file operations before Explorer input barriers, show over-limit drop guidance and reject supplementary Unicode format characters consistently on both platforms.
+- Revoke failed update handoffs, keep disk/process work off the UI, dispose only owned inactive stages and allow fresh checks after a failed pending update. Publisher configuration remains disabled.
+- Tighten compiler override, codec fixture and publisher-input CI admission. Synthetic regression checks do not certify two-device sleep/wake, physical hardware or long-session performance.
+
 ## 0.1.0-native.15
 
 - Reject a new saved-PC registration before contacting Windows when the Mac's saved-PC list is already full. Keep the second capacity check after registration to handle concurrent local changes.

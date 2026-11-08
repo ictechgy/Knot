@@ -94,10 +94,11 @@ final class FileTransferModel: ObservableObject {
             }
         } catch { status = NativeFileError.authored(error).message }
     }
+    func rejectExcessDrop() { status = NativeFileDrop.tooManyItems }
     func send(urls: [URL]) {
         if fixtureMode { fixtureOperationAttempts += 1 }
         guard !urls.isEmpty, urls.count <= 32, urls.allSatisfy({ $0.isFileURL && FileWire.validName($0.lastPathComponent) }) else {
-            status = urls.count > 32 ? "한 번에 파일 32개까지 보낼 수 있어요." : NativeFileError.unsupported.message; return
+            status = urls.count > 32 ? NativeFileDrop.tooManyItems : NativeFileError.unsupported.message; return
         }
         do {
             let (id, operation, client) = try begin()
@@ -132,7 +133,7 @@ final class FileTransferModel: ObservableObject {
             }
         } catch { status = NativeFileError.authored(error).message }
     }
-    func captureExplorer(nonce: String) async throws -> [NativeFileEntry] {
+    func captureExplorer(nonce: String, beforeRequest: () throws -> Void = {}) async throws -> [NativeFileEntry] {
         if fixtureMode { fixtureOperationAttempts += 1; status = NativeFileError.unsupported.message; throw NativeFileError.unsupported }
         guard FileWire.isHex(nonce, count: 32) else { throw NativeFileError.protocolViolation }
         guard queuedReceives.isEmpty else { throw NativeFileError.busy }
@@ -140,13 +141,16 @@ final class FileTransferModel: ObservableObject {
         let (id, operation, client) = try begin(), live = lifetime
         captureNonce = nonce; captureOperation = operation
         status = "Windows 탐색기에서 끌어온 항목을 확인하고 있어요…"
-        let task = Task { try await client.captureExplorer(nonce: nonce, operation: operation) }
-        captureWork = task
         defer {
             gate.end(operation)
             if captureOperation == operation { captureOperation = nil; captureNonce = nil; captureWork = nil }
         }
         do {
+            // Reserve the actual gate before granting the ordered input barrier.
+            // Hidden cancellation work can own the gate while isBusy is false.
+            try beforeRequest()
+            let task = Task { try await client.captureExplorer(nonce: nonce, operation: operation) }
+            captureWork = task
             let listing = try await withTaskCancellationHandler { try await task.value } onCancel: { [gate] in task.cancel(); gate.cancel(operation) }
             try gate.check(operation)
             guard lifetime == live, generation == id, captureNonce == nonce, !Task.isCancelled,

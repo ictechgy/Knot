@@ -133,7 +133,15 @@ def validate_corresponding_source(root, expected, revision="HEAD"):
         missing = sorted(expected.keys() - archived.keys())
         extra = sorted(archived.keys() - expected.keys())
         changed = sorted(k for k in expected.keys() & archived.keys() if expected[k] != archived[k])
-        raise BuildSnapshotError("Build inputs do not match corresponding source; commit inputs and rebuild. " +
+        ignored = []
+        if missing:
+            result = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=root,
+                                    input=("\0".join(missing) + "\0").encode(), capture_output=True)
+            if result.returncode in (0, 1):
+                ignored = [name for name in result.stdout.decode().split("\0") if name]
+        advice = ("Remove or move ignored generated inputs, then rebuild: " + repr(ignored) + ". " if ignored else "")
+        raise BuildSnapshotError("Build inputs do not match corresponding source; " + advice +
+                                 "commit intended source inputs and rebuild. " +
                                  "Missing from archive: " + repr(missing) + "; extra: " + repr(extra) +
                                  "; changed: " + repr(changed))
 

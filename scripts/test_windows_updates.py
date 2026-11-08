@@ -16,6 +16,14 @@ from update_windows import prepare_windows_updates
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def stable_net8_runtime(runtime_root):
+    candidates = [item.name for item in Path(runtime_root).iterdir()
+                  if item.is_dir() and re.fullmatch(r"8\.\d+\.\d+", item.name)]
+    if not candidates:
+        raise ValueError("A stable .NET 8 runtime is required for the net8.0 synthetic updater checks")
+    return max(candidates, key=lambda value: tuple(map(int, value.split('.'))))
+
+
 def check(compiler, references, dotnet=None):
     prefix = ([str(dotnet)] if dotnet else []) + [str(compiler)]
     with tempfile.TemporaryDirectory(prefix='knot-update-check-') as temporary:
@@ -36,10 +44,9 @@ def check(compiler, references, dotnet=None):
             run_argv = [str(executable)]
         elif dotnet:
             runtime_root = Path(dotnet).resolve().parent / 'shared/Microsoft.NETCore.App'
-            versions = sorted((item.name for item in runtime_root.iterdir() if item.is_dir()),
-                              key=lambda value: tuple(int(part) for part in value.split('.')))
+            version = stable_net8_runtime(runtime_root)
             (folder / 'checks.runtimeconfig.json').write_text(json.dumps({'runtimeOptions': {
-                'tfm': 'net8.0', 'framework': {'name': 'Microsoft.NETCore.App', 'version': versions[-1]}}}))
+                'tfm': 'net8.0', 'framework': {'name': 'Microsoft.NETCore.App', 'version': version}}}))
             run_argv = [str(dotnet), str(executable)]
         else:
             raise ValueError('Supply --dotnet to execute pure checks outside Windows')

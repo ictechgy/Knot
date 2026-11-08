@@ -15,6 +15,11 @@ namespace Knot.NativePreview
         internal CertificateCompatibilityException() : base("The registered host certificate requires explicit compatibility conversion. Previously registered Macs must remove this host and pair again.") { }
     }
 
+    internal sealed class CertificateRenewalRequiredException : CryptographicException
+    {
+        internal CertificateRenewalRequiredException() : base("The registered host certificate has expired and requires explicit renewal and re-pairing.") { }
+    }
+
     internal static class PersistentCertificateFactory
     {
         internal const int MaximumValidityDays = 397;
@@ -56,8 +61,20 @@ namespace Knot.NativePreview
         internal static void Validate(X509Certificate2 certificate)
         {
             DateTime now = DateTime.UtcNow;
+            if (now >= certificate.NotAfter.ToUniversalTime())
+            {
+                // Validate the same identity at the end of its validity before
+                // offering renewal. Corrupt/keyless/wrong-purpose input is not
+                // permission to replace a stored pin.
+                ValidateAt(certificate, certificate.NotAfter.ToUniversalTime().AddSeconds(-1));
+                throw new CertificateRenewalRequiredException();
+            }
+            ValidateAt(certificate, now);
+        }
+        private static void ValidateAt(X509Certificate2 certificate, DateTime now)
+        {
             if (!certificate.HasPrivateKey || now < certificate.NotBefore.ToUniversalTime() || now >= certificate.NotAfter.ToUniversalTime())
-                throw new CryptographicException("Registered host identity must be explicitly renewed.");
+                throw new CryptographicException("Invalid registered host identity validity.");
             string pin;
             using (SHA256 sha = SHA256.Create()) pin = BitConverter.ToString(sha.ComputeHash(certificate.RawData)).Replace("-", "").ToLowerInvariant();
             if (!RunCertificate.VerifyPinned(certificate, System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors, pin, now))
@@ -81,13 +98,17 @@ namespace Knot.NativePreview
     {
         private Mutex mutex;
         private PersistentCertificateLease(Mutex mutex) { this.mutex = mutex; }
-        internal static IDisposable Acquire(string directory)
+        internal static IDisposable Acquire(string directory) { return Acquire(directory, "Certificate", 10000); }
+        // Application ownership has a distinct lease: holding it must not block
+        // background store transactions on the certificate/store lease.
+        internal static IDisposable TryAcquireHostOwner(string directory) { return Acquire(directory, "HostOwner", 0); }
+        private static IDisposable Acquire(string directory, string purpose, int waitMilliseconds)
         {
             SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
             string suffix;
             using (SHA256 sha = SHA256.Create())
                 suffix = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()))).Replace("-", "");
-            string name = "Global\\KnotNativeCertificate_" + user.Value + "_" + suffix;
+            string name = "Global\\KnotNative" + purpose + "_" + user.Value + "_" + suffix;
             MutexSecurity security = new MutexSecurity(); security.SetAccessRuleProtection(true, false); security.SetOwner(user);
             security.AddAccessRule(new MutexAccessRule(user, MutexRights.FullControl, AccessControlType.Allow));
             bool created;
@@ -101,7 +122,7 @@ namespace Knot.NativePreview
                 foreach (MutexAccessRule rule in actual.GetAccessRules(true, true, typeof(SecurityIdentifier)))
                     if (!user.Equals(rule.IdentityReference) || rule.AccessControlType != AccessControlType.Allow)
                         throw new CryptographicException("Invalid certificate operation lease access.");
-                try { acquired = candidate.WaitOne(10000); }
+                try { acquired = candidate.WaitOne(waitMilliseconds); }
                 catch (AbandonedMutexException)
                 {
                     // WaitOne acquired the abandoned mutex. Release it while
@@ -110,7 +131,11 @@ namespace Knot.NativePreview
                     candidate.ReleaseMutex();
                     throw new CryptographicException("A previous certificate operation did not finish. Retry explicitly.");
                 }
-                if (!acquired) throw new CryptographicException("Another certificate operation is still running. Retry explicitly.");
+                if (!acquired)
+                {
+                    if (waitMilliseconds == 0) return null;
+                    throw new CryptographicException("Another certificate operation is still running. Retry explicitly.");
+                }
                 PersistentCertificateLease lease = new PersistentCertificateLease(candidate); candidate = null; return lease;
             }
             finally { if (candidate != null) { if (acquired) candidate.ReleaseMutex(); candidate.Dispose(); } }

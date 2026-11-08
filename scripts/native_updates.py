@@ -48,7 +48,7 @@ def build_resource(root, current_version):
 def manifest(current_version, platform, url, size, sha256, expires, now=None):
     build = version(current_version); https(url); now = int(time.time()) if now is None else now
     suffix = '-macos-arm64.zip' if platform == 'macos-arm64' else '-windows-x64-setup.exe'
-    if platform not in ('macos-arm64', 'windows-x64') or not urlsplit(url).path.endswith('Knot-Native-' + current_version + suffix):
+    if platform not in ('macos-arm64', 'windows-x64') or urlsplit(url).path.rsplit('/', 1)[-1] != 'Knot-Native-' + current_version + suffix:
         raise ValueError('Native artifact identity/platform mismatch')
     if type(size) is not int or not 1 <= size <= MAXIMUM_BYTES or not re.fullmatch('[0-9a-f]{64}', sha256):
         raise ValueError('Invalid artifact size/hash')

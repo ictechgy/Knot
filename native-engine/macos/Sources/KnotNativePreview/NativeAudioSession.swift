@@ -83,6 +83,8 @@ enum NativeAudioSessionState: Sendable, Equatable {
                     case .ready:
                         let player = makePlayer(); ownedPlayer = player; self.player = player
                         let initialMuted = muted
+                        await player.setFailureHandler { [weak self] in await self?.playerFailed(generation: current) }
+                        guard current == generation else { await player.stop(); return }
                         try await player.start(muted: initialMuted)
                         guard current == generation else { await player.stop(); return }
                         isAvailable = true; state = .playing; refreshStatus(); onChange?()
@@ -106,6 +108,14 @@ enum NativeAudioSessionState: Sendable, Equatable {
             }
         }
         if let ownedPlayer { await ownedPlayer.stop() }
+    }
+
+    private func playerFailed(generation current: UUID) {
+        guard current == generation, state != .stopped else { return }
+        generation = UUID(); operation?.cancel(); operation = nil; cancelMuteDelivery()
+        channel?.close(); channel = nil; player = nil
+        isAvailable = false; state = .unavailable; status = "소리 출력 장치가 바뀌었어요. 소리 연결을 다시 시도해주세요."
+        onChange?()
     }
 
     /// One five-second budget covers header and body together; fragmentation

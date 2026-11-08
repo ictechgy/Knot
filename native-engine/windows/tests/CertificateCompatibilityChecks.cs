@@ -178,6 +178,31 @@ namespace Knot.NativePreview
                 stage = "persistent-certificate-expired-fails-closed";
                 byte[] expired = PersistentCertificateFactory.CreatePfx(now.AddYears(-6), now.AddDays(-1));
                 try { InvalidPersistentCertificate(root, "expired", expired); } finally { Array.Clear(expired, 0, expired.Length); }
+                stage = "persistent-certificate-explicit-expired-renewal";
+                byte[] renewable = PersistentCertificateFactory.CreatePfx(now.AddDays(-2), now.AddDays(-1));
+                try
+                {
+                    ObservedCertificateStorage renewal = new ObservedCertificateStorage(Path.Combine(root, "renewal")); renewal.Inner.Write(renewable);
+                    Check(RunCertificate.RequiresRenewal(renewal));
+                    Check(renewal.Writes == 0 && renewal.Revocations == 0 && SameCertificateStore(renewal, renewable));
+                    string expiredPin;
+                    using (X509Certificate2 oldIdentity = PersistentCertificateFactory.Inspect(renewable))
+                    using (SHA256 sha = SHA256.Create()) expiredPin = BitConverter.ToString(sha.ComputeHash(oldIdentity.RawData)).Replace("-", "").ToLowerInvariant();
+                    renewal.RequireRevocation = true;
+                    RunCertificate.RenewExpiredPersistent(renewal);
+                    Check(renewal.Writes == 1 && renewal.Revocations == 1 && !RunCertificate.RequiresRenewal(renewal));
+                    using (RunCertificate current = RunCertificate.Persistent(renewal)) Check(current.Pin != expiredPin);
+                    RunCertificate.RenewExpiredPersistent(renewal); // Stale owner action must not rotate twice.
+                    Check(renewal.Writes == 1 && renewal.Revocations == 1);
+                    ObservedCertificateStorage failedRenewal = new ObservedCertificateStorage(Path.Combine(root, "renewal-failure")); failedRenewal.Inner.Write(renewable); failedRenewal.FailRevocation = true;
+                    RejectCertificateIo(delegate { RunCertificate.RenewExpiredPersistent(failedRenewal); });
+                    Check(failedRenewal.Revocations == 1 && failedRenewal.Writes == 0 && SameCertificateStore(failedRenewal, renewable));
+                    Check(RunCertificate.RequiresRenewal(failedRenewal));
+                    ObservedCertificateStorage failedWrite = new ObservedCertificateStorage(Path.Combine(root, "renewal-write-failure")); failedWrite.Inner.Write(renewable); failedWrite.FailPublication = true;
+                    RejectCertificateIo(delegate { RunCertificate.RenewExpiredPersistent(failedWrite); });
+                    Check(failedWrite.Revocations == 1 && failedWrite.Writes == 1 && SameCertificateStore(failedWrite, renewable));
+                }
+                finally { Array.Clear(renewable, 0, renewable.Length); }
                 stage = "persistent-certificate-future-fails-closed";
                 byte[] future = PersistentCertificateFactory.CreatePfx(now.AddDays(1), now.AddDays(366));
                 try { InvalidPersistentCertificate(root, "future", future); } finally { Array.Clear(future, 0, future.Length); }

@@ -19,9 +19,9 @@ namespace Knot.NativePreview
     // capabilities remain single-use; a fresh challenge is required on every use.
     internal static class NativeTrustedDevices
     {
-        private static readonly object gate = new object();
+        private static readonly NativeTrustedDeviceStore production = new NativeTrustedDeviceStore(new ProtectedTrustedDeviceStorage());
+        internal static INativeTrustedDeviceStore Production { get { return production; } }
         internal static string DirectoryPath { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Knot", "NativeTrust"); } }
-        private static string StorePath { get { return Path.Combine(DirectoryPath, "devices.dpapi"); } }
         internal static void PrepareDirectory()
         {
             string path = DirectoryPath;
@@ -49,11 +49,56 @@ namespace Knot.NativePreview
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); Array.Clear(encrypted, 0, encrypted.Length); }
         }
-        private static Dictionary<string, string[]> Load()
+        internal static void Validate(string id, string name, string key)
+        { if (NativeProtocol.DecodeToken(id).Length != 32 || NativeProtocol.DecodeToken(key).Length != 32) throw new ProtocolException("auth"); EnrollmentProtocol.ValidName(name); }
+        internal static void Add(string id, string name, string key) { production.Add(id, name, key); }
+        internal static byte[] Key(string id) { return production.Key(id); }
+        internal static Dictionary<string, string> List() { return production.List(); }
+        internal static void Revoke(string id) { production.Revoke(id); }
+        internal static void RevokeAll() { production.RevokeAll(); }
+        internal static byte[] Proof(byte[] key, string id, string nonce, string name, string pin, string operation = "connect")
+        { using (HMACSHA256 hmac = new HMACSHA256(key)) return hmac.ComputeHash(Encoding.UTF8.GetBytes("KnotNativeTrusted:v1\n" + operation + "\n" + id + "\n" + nonce + "\n" + name + "\n" + pin)); }
+    }
+
+    internal interface INativeTrustedDeviceStore
+    {
+        bool HasDevices { get; }
+        void Add(string id, string name, string key);
+        byte[] Key(string id);
+        Dictionary<string, string> List();
+        void Revoke(string id);
+        void RevokeAll();
+    }
+    internal interface ITrustedDeviceStorage
+    {
+        IDisposable AcquireLease();
+        bool Exists { get; }
+        byte[] Read();
+        void Write(byte[] bytes);
+    }
+    internal sealed class ProtectedTrustedDeviceStorage : ITrustedDeviceStorage
+    {
+        private string PathName { get { return Path.Combine(NativeTrustedDevices.DirectoryPath, "devices.dpapi"); } }
+        public IDisposable AcquireLease() { return PersistentCertificateLease.Acquire(NativeTrustedDevices.DirectoryPath); }
+        public bool Exists { get { return File.Exists(PathName); } }
+        public byte[] Read() { return NativeTrustedDevices.ReadProtected(PathName); }
+        public void Write(byte[] bytes) { NativeTrustedDevices.WriteProtected(PathName, bytes); }
+    }
+    // The same read/mutate/publish implementation is used by production DPAPI
+    // and fresh fixture storage. The shared lease precedes the process gate and
+    // is also used by certificate replacement, so no stale registration can
+    // undo a concurrent revoke or an identity's revoke-and-publish transaction.
+    internal sealed class NativeTrustedDeviceStore : INativeTrustedDeviceStore
+    {
+        private readonly object gate = new object();
+        private readonly ITrustedDeviceStorage storage;
+        internal NativeTrustedDeviceStore(ITrustedDeviceStorage storage)
+        { if (storage == null) throw new ArgumentNullException("storage"); this.storage = storage; }
+        private Dictionary<string, string[]> Load()
         {
             Dictionary<string, string[]> entries = new Dictionary<string, string[]>(StringComparer.Ordinal);
-            if (!File.Exists(StorePath)) return entries;
-            byte[] bytes = ReadProtected(StorePath);
+            if (!storage.Exists) return entries;
+            byte[] bytes = storage.Read();
             try
             {
                 using (BinaryReader reader = new BinaryReader(new MemoryStream(bytes), Encoding.UTF8))
@@ -63,7 +108,7 @@ namespace Knot.NativePreview
                     for (int i = 0; i < count; ++i)
                     {
                         string id = reader.ReadString(), name = reader.ReadString(), key = reader.ReadString();
-                        Validate(id, name, key); entries.Add(id, new string[] { name, key });
+                        NativeTrustedDevices.Validate(id, name, key); entries.Add(id, new string[] { name, key });
                     }
                     if (reader.BaseStream.Position != reader.BaseStream.Length) throw new IOException("Invalid trust storage.");
                 }
@@ -71,7 +116,7 @@ namespace Knot.NativePreview
             }
             finally { Array.Clear(bytes, 0, bytes.Length); }
         }
-        private static void Save(Dictionary<string, string[]> entries)
+        private void Save(Dictionary<string, string[]> entries)
         {
             using (MemoryStream stream = new MemoryStream())
             {
@@ -80,21 +125,20 @@ namespace Knot.NativePreview
                     writer.Write(1); writer.Write(entries.Count);
                     foreach (KeyValuePair<string, string[]> entry in entries) { writer.Write(entry.Key); writer.Write(entry.Value[0]); writer.Write(entry.Value[1]); }
                 }
-                byte[] bytes = stream.ToArray(); try { WriteProtected(StorePath, bytes); } finally { Array.Clear(bytes, 0, bytes.Length); }
+                byte[] bytes = stream.ToArray(); try { storage.Write(bytes); } finally { Array.Clear(bytes, 0, bytes.Length); }
             }
         }
-        internal static void Validate(string id, string name, string key)
-        { if (NativeProtocol.DecodeToken(id).Length != 32 || NativeProtocol.DecodeToken(key).Length != 32) throw new ProtocolException("auth"); EnrollmentProtocol.ValidName(name); }
-        internal static void Add(string id, string name, string key)
-        { lock (gate) { Validate(id, name, key); var entries = Load(); if (!entries.ContainsKey(id) && entries.Count >= 16) throw new ProtocolException("busy"); entries[id] = new string[] { name, key }; Save(entries); } }
-        internal static byte[] Key(string id)
-        { lock (gate) { var entries = Load(); string[] entry; if (!entries.TryGetValue(id, out entry)) throw new ProtocolException("auth"); return NativeProtocol.DecodeToken(entry[1]); } }
-        internal static Dictionary<string, string> List()
-        { lock (gate) { var entries = Load(); var result = new Dictionary<string, string>(); foreach (var item in entries) result.Add(item.Key, item.Value[0]); return result; } }
-        internal static void Revoke(string id) { lock (gate) { var entries = Load(); if (entries.Remove(id)) Save(entries); } }
-        internal static void RevokeAll() { lock (gate) { Save(new Dictionary<string, string[]>()); } }
-        internal static byte[] Proof(byte[] key, string id, string nonce, string name, string pin, string operation = "connect")
-        { using (HMACSHA256 hmac = new HMACSHA256(key)) return hmac.ComputeHash(Encoding.UTF8.GetBytes("KnotNativeTrusted:v1\n" + operation + "\n" + id + "\n" + nonce + "\n" + name + "\n" + pin)); }
+        public bool HasDevices { get { return List().Count != 0; } }
+        public void Add(string id, string name, string key)
+        { using (storage.AcquireLease()) lock (gate) { NativeTrustedDevices.Validate(id, name, key); var entries = Load(); if (!entries.ContainsKey(id) && entries.Count >= 16) throw new ProtocolException("busy"); entries[id] = new string[] { name, key }; Save(entries); } }
+        public byte[] Key(string id)
+        { using (storage.AcquireLease()) lock (gate) { var entries = Load(); string[] entry; if (!entries.TryGetValue(id, out entry)) throw new ProtocolException("auth"); return NativeProtocol.DecodeToken(entry[1]); } }
+        public Dictionary<string, string> List()
+        { using (storage.AcquireLease()) lock (gate) { var entries = Load(); var result = new Dictionary<string, string>(); foreach (var item in entries) result.Add(item.Key, item.Value[0]); return result; } }
+        public void Revoke(string id)
+        { using (storage.AcquireLease()) lock (gate) { var entries = Load(); if (entries.Remove(id)) Save(entries); } }
+        public void RevokeAll()
+        { using (storage.AcquireLease()) lock (gate) { Save(new Dictionary<string, string[]>()); } }
     }
 
     internal sealed class TrustedDeviceServer : IDisposable
@@ -109,6 +153,7 @@ namespace Knot.NativePreview
         private readonly Func<bool> authorize;
         private readonly Func<string, byte[]> lookupKey;
         private readonly Action<string> revoke;
+        private readonly Action revokeFinished;
         private readonly bool syntheticLoopback;
         internal int ListeningPort { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
         private readonly object gate = new object();
@@ -116,13 +161,13 @@ namespace Knot.NativePreview
         private TcpClient client;
         internal TrustedDeviceServer(IPAddress address, X509Certificate2 certificate, string pin,
             Func<IPAddress, string, string, string, string, bool> register, Func<IPAddress, string, string> issue, Func<bool> authorize,
-            bool syntheticLoopback = false, int port = Port, Func<string, byte[]> lookupKey = null, Action<string> revoke = null)
+            bool syntheticLoopback = false, int port = Port, Func<string, byte[]> lookupKey = null, Action<string> revoke = null, Action revokeFinished = null)
         {
             this.certificate = certificate; this.pin = pin; this.register = register; this.issue = issue; this.authorize = authorize;
             this.syntheticLoopback = syntheticLoopback;
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose private address.");
             if (port != Port && !syntheticLoopback) throw new ArgumentException("Invalid trusted port.");
-            this.lookupKey = lookupKey ?? NativeTrustedDevices.Key; this.revoke = revoke ?? NativeTrustedDevices.Revoke;
+            this.lookupKey = lookupKey ?? NativeTrustedDevices.Key; this.revoke = revoke ?? NativeTrustedDevices.Revoke; this.revokeFinished = revokeFinished;
             listener = new TcpListener(address, port); listener.Start(1);
             worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot registered devices";
         }
@@ -181,7 +226,11 @@ namespace Knot.NativePreview
                                 var response = Read(tls, "proof");
                                 byte[] expected = NativeTrustedDevices.Proof(key, id, nonce, name, pin, op);
                                 if (!NativeProtocol.Equal(expected, NativeProtocol.DecodeToken(StrictJson.String(response, "proof")))) throw new ProtocolException("auth");
-                                if (op == "revoke") { revoke(id); Write(tls, "{\"ok\":true}"); }
+                                if (op == "revoke")
+                                {
+                                    try { revoke(id); Write(tls, "{\"ok\":true}"); }
+                                    finally { if (revokeFinished != null) revokeFinished(); }
+                                }
                                 else { string invitation = issue(remote, name); Write(tls, "{\"invitation\":" + StrictJson.Quote(invitation) + "}"); }
                             }
                             finally { Array.Clear(key, 0, key.Length); }

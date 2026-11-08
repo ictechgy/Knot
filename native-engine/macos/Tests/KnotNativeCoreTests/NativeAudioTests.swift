@@ -177,6 +177,9 @@ private actor AudioFixturePlayer: NativeAudioPlaying {
     private(set) var frames = 0
     private(set) var muted = false
     private(set) var stopped = false
+    private var failure: (@Sendable () async -> Void)?
+    func setFailureHandler(_ handler: @escaping @Sendable () async -> Void) async { failure = handler }
+    func failOutput() async { await failure?() }
     func start(muted: Bool) { starts += 1; self.muted = muted }
     func enqueue(_ pcm: NativeAudioPCM) { frames += pcm.frames }
     func setMuted(_ muted: Bool) { self.muted = muted }
@@ -297,4 +300,18 @@ private actor AudioSuspendedFixturePlayer: NativeAudioPlaying {
     await player.finishStart(); await task.value
     #expect(!becameAvailable && session.state == .stopped && !session.isAvailable && channel.snapshot().closed)
     #expect(await player.stopped)
+}
+
+
+@Test @MainActor func ownedOutputFailureBecomesUnavailableEvenWithoutAnotherAudioPacket() async throws {
+    let channel = AudioFixtureChannel(try audioFixtureReady().encoded), factory = AudioFixtureFactory()
+    let session = try NativeAudioSession(invitation: audioFixtureInvitation(), makeChannel: { _ in channel }, makePlayer: { factory.make() })
+    defer { session.stop() }
+    let task = try #require(session.start())
+    try #require(await audioEventually { session.state == .playing && channel.snapshot().waiting })
+    await factory.player.failOutput()
+    await task.value
+    #expect(session.state == .unavailable && !session.isAvailable && channel.snapshot().closed)
+    #expect(session.status.contains("출력 장치"))
+    #expect((await factory.player.snapshot()).stopped)
 }

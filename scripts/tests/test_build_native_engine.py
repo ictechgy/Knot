@@ -18,6 +18,41 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_native_engine as native
+from test_windows_updates import stable_net8_runtime
+
+
+class CompilerAndCodecAdmissionTests(unittest.TestCase):
+    def test_bad_explicit_compiler_does_not_select_installed_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="knot-compiler-admission-") as folder:
+            root = Path(folder)
+            fallback = root / "Inno Setup 7/ISCC.exe"
+            fallback.parent.mkdir(); fallback.write_bytes(b"inert fixture")
+            for override in ["", str(root / "missing")]:
+                with patch.dict(os.environ, {"ProgramFiles": folder, "INNO_COMPILER": override}), self.assertRaisesRegex(ValueError, "Explicit INNO_COMPILER"):
+                    native.inno_compiler()
+            with patch.dict(os.environ, {"INNO_COMPILER": str(fallback)}):
+                self.assertEqual(native.inno_compiler(), fallback)
+
+    def test_small_codec_metadata_is_not_software_boolean_only(self):
+        with tempfile.TemporaryDirectory(prefix="knot-codec-admission-") as folder:
+            fixture = Path(folder) / "inert.h264"; fixture.write_bytes(b"not executed")
+            valid = dict(v=1, synthetic=True, captureInvoked=False, hardwareEncoder=False,
+                         codec="h264-annexb", width=320, height=180, fps=30,
+                         bitrate=2000000, frames=120, keyframes=2, parserChecks=True)
+            native.validate_codec_fixture(valid, fixture, 320, 180, 30, 120, 2000000)
+            for delta in [dict(captureInvoked=True), dict(width=1920), dict(frames=True),
+                          dict(keyframes=1), dict(parserChecks=False), dict(synthetic=False)]:
+                with self.subTest(delta=delta), self.assertRaises(ValueError):
+                    native.validate_codec_fixture(dict(valid, **delta), fixture, 320, 180, 30, 120, 2000000)
+
+    def test_legacy_runtime_selection_ignores_prerelease_and_other_majors(self):
+        with tempfile.TemporaryDirectory(prefix="knot-runtime-admission-") as folder:
+            root = Path(folder)
+            for name in ["8.0.5", "8.0.12", "9.0.0-preview.7", "10.0.1"]: (root / name).mkdir()
+            self.assertEqual(stable_net8_runtime(root), "8.0.12")
+            (root / "8.0.5").rmdir(); (root / "8.0.12").rmdir()
+            with self.assertRaisesRegex(ValueError, "stable .NET 8"):
+                stable_net8_runtime(root)
 
 
 def inert_file_vectors():
@@ -138,7 +173,9 @@ class NativeRebuildTests(unittest.TestCase):
         def inert_run(label, argv, **kwargs):
             if label == "native-synthetic-codec":
                 Path(argv[-2]).write_bytes(b"INERT synthetic codec fixture")
-                Path(argv[-1]).write_text('{"hardwareEncoder":false}')
+                Path(argv[-1]).write_text(json.dumps(dict(v=1, synthetic=True, captureInvoked=False,
+                    hardwareEncoder=False, codec="h264-annexb", width=320, height=180, fps=30,
+                    bitrate=2000000, frames=120, keyframes=2, parserChecks=True)))
             elif label == "native-media-synthetic-4k":
                 self.assertEqual(argv[1], "--software-4k")
                 Path(argv[-2]).write_bytes(b"INERT 4K codec fixture; no media executed")

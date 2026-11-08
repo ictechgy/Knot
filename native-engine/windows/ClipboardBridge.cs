@@ -12,12 +12,17 @@ namespace Knot.NativePreview
         string ReadText();
         void WriteText(string text);
     }
+    // Only an OS resource temporarily unavailable is retriable. Malformed,
+    // oversized content remains a permanent gesture failure. A format absent
+    // while the owner publishes its selection spends only the same deadline.
+    internal sealed class ClipboardUnavailableException : ExternalException { }
     internal sealed class WindowsClipboardText : IClipboardText
     {
         [DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
         [DllImport("user32.dll", SetLastError = true)] private static extern bool OpenClipboard(IntPtr owner);
         [DllImport("user32.dll")] private static extern bool CloseClipboard();
         [DllImport("user32.dll")] private static extern IntPtr GetClipboardData(uint format);
+        [DllImport("user32.dll")] private static extern bool IsClipboardFormatAvailable(uint format);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern UIntPtr GlobalSize(IntPtr handle);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GlobalLock(IntPtr handle);
         [DllImport("kernel32.dll")] private static extern bool GlobalUnlock(IntPtr handle);
@@ -25,20 +30,21 @@ namespace Knot.NativePreview
         public string ReadText()
         {
             // Never materialize an unbounded external OLE object or follow files.
-            if (!OpenClipboard(IntPtr.Zero)) throw new ExternalException();
+            if (!OpenClipboard(IntPtr.Zero)) throw new ClipboardUnavailableException();
             try
             {
+                if (!IsClipboardFormatAvailable(13)) throw new ClipboardUnavailableException();
                 IntPtr handle = GetClipboardData(13); // CF_UNICODETEXT only.
-                if (handle == IntPtr.Zero) throw new ExternalException();
+                if (handle == IntPtr.Zero) throw new ClipboardUnavailableException();
                 ulong size = GlobalSize(handle).ToUInt64();
-                if (size < 2 || size > (ulong)(ClipboardProtocol.MaximumTextBytes + 1) * 2 || size % 2 != 0) throw new ExternalException();
+                if (size < 2 || size > (ulong)(ClipboardProtocol.MaximumTextBytes + 1) * 2 || size % 2 != 0) throw new ProtocolException("protocol");
                 IntPtr address = GlobalLock(handle);
-                if (address == IntPtr.Zero) throw new ExternalException();
+                if (address == IntPtr.Zero) throw new ClipboardUnavailableException();
                 try
                 {
                     int units = (int)size / 2, length = 0;
                     while (length < units && Marshal.ReadInt16(address, length * 2) != 0) ++length;
-                    if (length == units) throw new ExternalException();
+                    if (length == units) throw new ProtocolException("protocol");
                     string text = Marshal.PtrToStringUni(address, length);
                     byte[] bytes = StrictJson.Utf8.GetBytes(text);
                     return ClipboardProtocol.Text(bytes, 0, bytes.Length);
@@ -104,7 +110,16 @@ namespace Knot.NativePreview
                     while (Allowed(ownedGeneration) && clipboard.Sequence == before && Stopwatch.GetTimestamp() < deadline) Thread.Sleep(10);
                     if (!Allowed(ownedGeneration)) { status = 2; return; }
                     if (clipboard.Sequence == before) return;
-                    text = clipboard.ReadText();
+                    while (true)
+                    {
+                        if (!Allowed(ownedGeneration)) { status = 2; return; }
+                        try { text = clipboard.ReadText(); break; }
+                        catch (ClipboardUnavailableException)
+                        {
+                            if (Stopwatch.GetTimestamp() >= deadline) return;
+                            Thread.Sleep(10);
+                        }
+                    }
                     if (!Allowed(ownedGeneration)) { text = ""; status = 2; return; }
                     byte[] bytes = StrictJson.Utf8.GetBytes(text); ClipboardProtocol.Text(bytes, 0, bytes.Length);
                 }

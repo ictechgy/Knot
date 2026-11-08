@@ -4,10 +4,11 @@ struct NativeWorkToolsActions: View {
     @Binding var macShortcuts: Bool
     let clipboard: ClipboardModel?
     let quality: QualityModel?
+    let clipboardAction: (Bool) -> Void
     var body: some View {
         Group {
             Toggle("Mac 단축키 · ⌘를 Ctrl로", isOn: $macShortcuts)
-            if let clipboard { NativeClipboardActions(clipboard: clipboard) }
+            if let clipboard { NativeClipboardActions(clipboard: clipboard, action: clipboardAction) }
             if let quality { NativeQualityActions(quality: quality) }
         }
     }
@@ -15,10 +16,11 @@ struct NativeWorkToolsActions: View {
 
 struct NativeClipboardActions: View {
     @ObservedObject var clipboard: ClipboardModel
+    let action: (Bool) -> Void
     var body: some View {
         Divider()
-        Button("Windows에서 텍스트 복사 · ⌘C") { clipboard.copyFromRemote() }.disabled(clipboard.busy)
-        Button("Mac 텍스트 붙여넣기 · ⌘V") { clipboard.pasteToRemote() }.disabled(clipboard.busy)
+        Button("Windows에서 텍스트 복사 · ⌘C") { action(false) }.disabled(clipboard.busy)
+        Button("Mac 텍스트 붙여넣기 · ⌘V") { action(true) }.disabled(clipboard.busy)
         Text(clipboard.status)
     }
 }

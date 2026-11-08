@@ -33,33 +33,67 @@ final class NativePreferences: ObservableObject {
     }
 }
 
-/// One registered chord; no event monitor, event tap or Accessibility permission.
+/// Owns one app-scoped registration. Tests supply an inert registrar.
 @MainActor
-final class NativeQuickActivation: ObservableObject {
-    @Published private(set) var shortcutAvailable = false
+protocol NativeActivationRegistering: AnyObject {
+    func register(action: @escaping () -> Void) -> Bool
+    func stop()
+}
+
+@MainActor
+private final class NativeCarbonActivationRegistration: NativeActivationRegistering {
     private var hotkey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var action: (() -> Void)?
-    func register(action: @escaping () -> Void) {
+    func register(action: @escaping () -> Void) -> Bool {
         self.action = action
-        guard handler == nil else { return }
-        var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let pointer = Unmanaged.passUnretained(self).toOpaque()
-        guard InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
-            guard let context, let event else { return OSStatus(eventNotHandledErr) }
-            var id = EventHotKeyID()
-            guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
-                                    MemoryLayout<EventHotKeyID>.size, nil, &id) == noErr,
-                  id.signature == 0x4B4E4F54, id.id == 1 else { return OSStatus(eventNotHandledErr) }
-            MainActor.assumeIsolated { Unmanaged<NativeQuickActivation>.fromOpaque(context).takeUnretainedValue().action?() }
-            return noErr
-        }, 1, &type, pointer, &handler) == noErr else { return }
-        shortcutAvailable = RegisterEventHotKey(UInt32(kVK_ANSI_B), UInt32(controlKey | optionKey | cmdKey),
+        if hotkey != nil { return true }
+        // A chord conflict does not invalidate an already installed handler.
+        // Retry the chord independently when the window appears again.
+        if handler == nil {
+            var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            let pointer = Unmanaged.passUnretained(self).toOpaque()
+            guard InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
+                guard let context, let event else { return OSStatus(eventNotHandledErr) }
+                var id = EventHotKeyID()
+                guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                                        MemoryLayout<EventHotKeyID>.size, nil, &id) == noErr,
+                      id.signature == 0x4B4E4F54, id.id == 1 else { return OSStatus(eventNotHandledErr) }
+                MainActor.assumeIsolated { Unmanaged<NativeCarbonActivationRegistration>.fromOpaque(context).takeUnretainedValue().action?() }
+                return noErr
+            }, 1, &type, pointer, &handler) == noErr else { return false }
+        }
+        return RegisterEventHotKey(UInt32(kVK_ANSI_B), UInt32(controlKey | optionKey | cmdKey),
             EventHotKeyID(signature: 0x4B4E4F54, id: 1), GetApplicationEventTarget(), 0, &hotkey) == noErr
     }
     func stop() {
         if let hotkey { UnregisterEventHotKey(hotkey) }; hotkey = nil
         if let handler { RemoveEventHandler(handler) }; handler = nil
-        shortcutAvailable = false; action = nil
+        action = nil
+    }
+}
+
+/// One registered chord; no event monitor, event tap or Accessibility permission.
+@MainActor
+final class NativeQuickActivation: ObservableObject {
+    @Published private(set) var shortcutAvailable = false
+    private let registration: any NativeActivationRegistering
+    private var termination: AnyCancellable?
+    private let notificationCenter: NotificationCenter
+    init(registration: (any NativeActivationRegistering)? = nil, notificationCenter: NotificationCenter = .default) {
+        self.registration = registration ?? NativeCarbonActivationRegistration()
+        self.notificationCenter = notificationCenter
+    }
+    func register(action: @escaping () -> Void) {
+        if termination == nil {
+            termination = notificationCenter.publisher(for: NSApplication.willTerminateNotification).sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.stop() }
+            }
+        }
+        shortcutAvailable = registration.register(action: action)
+    }
+    func stop() {
+        registration.stop(); shortcutAvailable = false
+        termination?.cancel(); termination = nil
     }
 }

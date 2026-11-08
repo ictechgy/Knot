@@ -5,6 +5,43 @@ import UniformTypeIdentifiers
 import KnotNativeCore
 @testable import KnotNativePreview
 
+private actor ExplorerAdmissionWorker: NativeFileWorking {
+    private(set) var captures = 0
+    func captureExplorer(nonce: String, operation: UUID) async throws -> NativeFileListing {
+        captures += 1
+        return NativeFileListing(entries: [try NativeFileEntry(id: String(repeating: "e", count: 32), name: "synthetic.txt", size: 0)], truncated: false)
+    }
+    func list(operation: UUID) async throws -> NativeFileListing { throw NativeFileError.unsupported }
+    func upload(url: URL, operation: UUID, progress: @escaping NativeFileProgress) async throws -> NativeFileReceipt { throw NativeFileError.unsupported }
+    func download(entry: NativeFileEntry, destination: URL, operation: UUID, progress: @escaping NativeFileProgress) async throws -> URL { throw NativeFileError.unsupported }
+}
+
+@MainActor @Test func explorerFileAdmissionPrecedesInputBarrierAndRollsBackFailedBarrier() async throws {
+    let gate = FileRunGate(), worker = ExplorerAdmissionWorker()
+    let model = FileTransferModel(rootName: "Synthetic", client: worker, gate: gate)
+    let pendingCancellation = try gate.begin()
+    var barriers = 0
+    do {
+        _ = try await model.captureExplorer(nonce: String(repeating: "a", count: 32)) { barriers += 1 }
+        Issue.record("busy operation must reject before granting the input barrier")
+    } catch { #expect(error as? NativeFileError == .busy) }
+    #expect(barriers == 0)
+    #expect(await worker.captures == 0)
+    gate.end(pendingCancellation)
+    do {
+        _ = try await model.captureExplorer(nonce: String(repeating: "b", count: 32)) { throw NativeFileError.cancelled }
+        Issue.record("failed input barrier must roll back file admission")
+    } catch { #expect(error as? NativeFileError == .cancelled) }
+    #expect(!model.isBusy)
+    #expect(await worker.captures == 0)
+    let result = try await model.captureExplorer(nonce: String(repeating: "c", count: 32)) { barriers += 1 }
+    #expect(result.count == 1)
+    #expect(barriers == 1)
+    #expect(await worker.captures == 1)
+    #expect(!model.isBusy)
+    model.close()
+}
+
 @Test func explorerBarrierPreservesDownMoveOrderingAndCannotCoalesceAcrossCapture() throws {
     var queue = InputBuffer()
     let down = try Input.pointer(action: 1, x: 10, y: 20)

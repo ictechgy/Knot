@@ -28,6 +28,7 @@ struct PreviewWindow: View {
     @StateObject private var filePromises = NativeFilePromiseOwner()
     @FocusState private var codeFocused: Bool
     @State private var activeTarget: NativeTarget?
+    @State private var deviceToForget: SavedNativeDevice?
 
     init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false, updates: NativeUpdateModel? = nil, simulatedAudio: NativeAudioSession? = nil) {
         self.model = model
@@ -83,6 +84,9 @@ struct PreviewWindow: View {
             .onDisappear { enrollment.cancel(); secret = "" }
             .onChange(of: enrollment.selectedID) { _, selected in
                 codeFocused = selected != nil
+            }
+            .onChange(of: model.isSystemSleeping) { _, sleeping in
+                if sleeping, enrollment.busy { enrollment.interruptForSleep() }
             }
             .onChange(of: model.active) { _, active in
                 enrollment.cancel()
@@ -188,10 +192,16 @@ struct PreviewWindow: View {
                         guard !model.active, !model.isSystemSleeping else { return }
                         enrollment.cancel(); model.connectSaved(device.id)
                     }.buttonStyle(.borderedProminent)
-                    Button("등록 해제") { model.forgetSaved(device.id) }
+                    Button("등록 해제", role: .destructive) { deviceToForget = device }
                 }
             }
         }.padding(20).nativePanel()
+            .confirmationDialog("PC 등록을 해제할까요?", isPresented: Binding(get: { deviceToForget != nil }, set: { if !$0 { deviceToForget = nil } }), presenting: deviceToForget) { device in
+                Button("등록 해제", role: .destructive) { model.forgetSaved(device.id); deviceToForget = nil }
+                Button("취소", role: .cancel) { deviceToForget = nil }
+            } message: { device in
+                Text("\(device.name)의 저장된 연결을 해제해요. 다시 등록하려면 Windows의 새 8자리 번호가 필요해요.")
+            }
     }
 
     private var connectionStep: Int {
@@ -374,7 +384,9 @@ struct PreviewWindow: View {
         codeFocused = false
         secret = ""; model.invitation = nil
         enrollment.connect(name: model.viewerLabel) { result in
-            guard !model.active, !model.isSystemSleeping else { return }
+            guard !model.active, !model.isSystemSleeping else {
+                enrollment.interruptForSleep(); return
+            }
             let value = result.offer.invitation
             model.savedDeviceLabel = enrollment.selected?.name ?? "Windows PC"
             activeTarget = NativeTarget(address: value.address, port: value.port, pin: value.certificateSHA256)
@@ -599,7 +611,7 @@ struct PreviewWindow: View {
             }.menuStyle(.borderlessButton).fixedSize()
                 .onChange(of: model.textMode) { _, _ in model.releaseInput() }
             Menu {
-                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: model.clipboard, quality: model.quality)
+                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: model.clipboard, quality: model.quality, clipboardAction: { model.performClipboardGesture(paste: $0) })
             } label: { Label("작업 도구", systemImage: "slider.horizontal.3") }.menuStyle(.borderlessButton).fixedSize()
                 .onChange(of: model.macShortcuts) { _, _ in model.releaseInput() }
             if let audio = simulatedAudio ?? model.audio {

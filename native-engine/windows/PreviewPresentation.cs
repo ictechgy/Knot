@@ -3,7 +3,7 @@ using System;
 
 namespace Knot.NativePreview
 {
-    internal enum HostViewPhase { Idle, Invitation, Request, Preparing, Sharing, Stopping, Stopped, Failed }
+    internal enum HostViewPhase { Idle, Invitation, Request, Preparing, Sharing, Stopping, Stopped, Failed, RegisteredWaiting }
 
     // Presentation-only data: no invitation capability, certificate private key,
     // host lifecycle object, or network action is stored in a view snapshot.
@@ -25,6 +25,15 @@ namespace Knot.NativePreview
         internal const string CertificateConversionAction = "호환 인증서로 전환하고 공유";
         internal const string CertificateConversionTitle = "Mac 연결용 인증서를 전환해주세요";
         internal const string CertificateConversionDisclosure = "이전 인증서의 키 또는 유효기간은 Mac 보안 기준에 맞지 않아요. 아래 버튼을 누르면 호환 인증서로 교체하고 공유를 시작해요.\r\n등록한 Mac은 초기화되므로 새 8자리 번호로 다시 등록해야 해요.";
+        internal const string CertificateRenewalAction = "만료 인증서 갱신하고 공유";
+        internal const string CertificateRenewalTitle = "공유 인증서가 만료됐어요";
+        internal const string CertificateRenewalDisclosure = "아래 버튼을 누르면 이전 Mac 등록을 모두 해제하고 새 인증서를 만들어요.\r\nMac에서도 이전 PC를 지운 뒤 새 8자리 번호로 다시 등록해주세요.";
+        internal static string Privacy(bool enrollment, bool files)
+        {
+            string scope = files ? "화면·입력, 표시한 공유 폴더와 직접 끈 탐색기 항목을 허용해요." : "화면과 입력을 허용해요.";
+            return enrollment ? scope + " 번호를 아는 Mac과 등록된 Mac이 접속할 수 있어요. Mac에서 ‘내 PC로 등록’을 선택하면 이후 번호 없이 접속해요. 연결 안내에서 등록을 해제할 수 있어요." :
+                scope + " 이 연결은 Windows에서 직접 허용해야 해요. 중지하면 이번 연결 권한을 종료해요.";
+        }
         internal const string ShareTitle = "이 Windows의 화면을 Mac으로 공유";
         internal const string Onboarding = "1  이 Windows에서 ‘화면 공유 시작’\r\n2  Mac에서 ‘주변 PC 찾기’ → 이 PC 선택\r\n3  선택한 PC의 8자리 번호를 Mac에 입력";
         internal const string NumberTitle = "Mac에서 이 PC를 먼저 선택하세요";
@@ -41,6 +50,7 @@ namespace Knot.NativePreview
         {
             switch (phase)
             {
+                case HostViewPhase.RegisteredWaiting: return "등록된 Mac 대기 중";
                 case HostViewPhase.Invitation: return "연결 코드 준비됨";
                 case HostViewPhase.Request: return "연결 요청 도착";
                 case HostViewPhase.Preparing: return "화면 준비 중";
@@ -81,6 +91,10 @@ namespace Knot.NativePreview
                     return "입력 요청이 너무 많아 공유를 중지했어요. 새 코드로 연결해주세요.";
                 case "Session timed out. Click Share for a fresh invitation.":
                     return "연결 대기 시간이 끝났어요. 새 코드를 만들어주세요.";
+                case "Connection ended. Waiting to reconnect a registered device.":
+                    return "연결이 끝났어요. 등록된 Mac의 재연결을 기다리고 있어요.";
+                case "Session stopped. Check the host before reconnecting.":
+                    return "안전하게 연결을 계속할 수 없어 공유를 중지했어요. Windows의 공유 상태를 확인해주세요.";
                 case "Session stopped. Click Share for a fresh invitation.":
                 case "Connection ended. Create a new invitation.":
                     return "연결이 종료됐어요. 다시 연결하려면 새 코드를 만들어주세요.";

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Testing
 import KnotNativeCore
 @testable import KnotNativePreview
@@ -48,4 +49,24 @@ private actor RetryFixture: NativeFileWorking {
         return .init(name: url.lastPathComponent, size: 0, hash: String(repeating: "0", count: 64))
     }
     func download(entry: NativeFileEntry, destination: URL, operation: UUID, progress: @escaping NativeFileProgress) async throws -> URL { throw NativeFileError.unsupported }
+}
+
+
+@MainActor private final class InertActivationRegistration: NativeActivationRegistering {
+    var calls = 0, stops = 0
+    var action: (() -> Void)?
+    func register(action: @escaping () -> Void) -> Bool { calls += 1; self.action = action; return calls > 1 }
+    func stop() { stops += 1; action = nil }
+}
+@Test @MainActor func quickActivationRetriesFailedChordAndCleansItsOwnerOnTermination() {
+    let registration = InertActivationRegistration(), center = NotificationCenter()
+    let quick = NativeQuickActivation(registration: registration, notificationCenter: center)
+    var activations = 0
+    quick.register { activations += 1 }
+    #expect(!quick.shortcutAvailable)
+    quick.register { activations += 1 }
+    #expect(quick.shortcutAvailable && registration.calls == 2)
+    registration.action?(); #expect(activations == 1)
+    center.post(name: NSApplication.willTerminateNotification, object: nil)
+    #expect(!quick.shortcutAvailable && registration.stops == 1 && registration.action == nil)
 }

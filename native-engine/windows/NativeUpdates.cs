@@ -82,7 +82,7 @@ namespace Knot.NativePreview
                 !System.Text.RegularExpressions.Regex.IsMatch(a[6], @"\A[0-9a-f]{64}\z") ||
                 !Int64.TryParse(a[7], NumberStyles.None, CultureInfo.InvariantCulture, out expiry) || expiry.ToString(CultureInfo.InvariantCulture) != a[7]) throw new InvalidDataException();
             Uri url = Https(a[4]); string suffix = platform == "windows-x64" ? "-windows-x64-setup.exe" : "-macos-arm64.zip";
-            if (Path.GetFileName(url.AbsolutePath) != "Knot-Native-" + a[1] + suffix || expiry <= now || expiry - now > 30 * 86400) throw new InvalidDataException();
+            if (a[4].Substring(a[4].LastIndexOf('/') + 1) != "Knot-Native-" + a[1] + suffix || expiry <= now || expiry - now > 30 * 86400) throw new InvalidDataException();
             if (build <= VersionBuild(c.Version)) throw new NativeUpdateCurrentException();
             return new NativeUpdateManifest(a[1], build, platform, url, size, a[6], expiry);
         }
@@ -131,19 +131,44 @@ namespace Knot.NativePreview
             return "\"" + text + "\"";
         }
     }
+    // One launched child owns one nonce. Revocation is published before waiting
+    // for that exact child; an unconfirmed exit never licenses stage deletion.
+    internal sealed class NativeUpdateAttempt : IDisposable
+    {
+        private readonly Action revoke, cleanup;
+        private readonly Func<bool> exited;
+        private readonly Action kill;
+        private readonly Func<int, bool> wait;
+        private readonly IDisposable child;
+        internal NativeUpdateAttempt(Action revoke, Action cleanup, Func<bool> exited, Action kill, Func<int, bool> wait, IDisposable child)
+        { this.revoke = revoke; this.cleanup = cleanup; this.exited = exited; this.kill = kill; this.wait = wait; this.child = child; }
+        internal bool RevokeAuthority() { try { revoke(); return true; } catch (Exception) { return false; } }
+        internal bool RevokeAndStop()
+        {
+            RevokeAuthority();
+            bool stopped = false;
+            try { if (!exited()) kill(); stopped = wait(5000) && exited(); } catch (Exception) { }
+            if (stopped) { cleanup(); Dispose(); }
+            // A cancellation marker also removes publication authority if child
+            // termination fails. Keep its stage because it may still be reading.
+            return stopped;
+        }
+        public void Dispose() { if (child != null) child.Dispose(); }
+    }
     internal sealed class NativeUpdates : IDisposable
     {
         private readonly NativeUpdateConfiguration configuration;
         private readonly object gate = new object();
-        private CancellationTokenSource lifetime = new CancellationTokenSource();
+        private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
         private Timer timer;
         private string stage;
         private NativeUpdateManifest pending;
-        private bool busy, installing;
+        private bool busy, installing, transferred, unconfirmedHelper;
+        private NativeUpdateAttempt retainedAttempt;
         internal event Action Changed;
         internal bool Configured { get { return configuration != null && configuration.Configured; } }
         internal bool Available { get { lock (gate) return pending != null && !installing; } }
-        internal bool Busy { get { lock (gate) return busy; } }
+        internal bool Busy { get { lock (gate) return busy || installing || unconfirmedHelper; } }
         internal string Status { get; private set; }
         internal NativeUpdates()
         {
@@ -154,8 +179,15 @@ namespace Knot.NativePreview
         { lock (gate) if (Configured && timer == null && !lifetime.IsCancellationRequested) timer = new Timer(delegate { CheckAsync(); }, null, 0, 86400000); }
         internal Task CheckAsync()
         {
-            lock (gate) { if (!Configured || busy || pending != null || lifetime.IsCancellationRequested) return Task.FromResult(false); busy = true; }
+            string stale = null;
+            lock (gate) {
+                if (!Configured || busy || installing || unconfirmedHelper || lifetime.IsCancellationRequested) return Task.FromResult(false);
+                if (pending != null && pending.Expires <= NativeUpdateManifest.Now) { stale = stage; stage = null; pending = null; }
+                if (pending != null) return Task.FromResult(false);
+                busy = true;
+            }
             return Task.Run(delegate {
+                DeleteOwnedStage(stale);
                 string holding = null;
                 try {
                     SetStatus("업데이트를 확인하고 있습니다."); holding = NativeUpdatePaths.CreateStage();
@@ -163,38 +195,104 @@ namespace Knot.NativePreview
                     NativeUpdateManifest m = NativeUpdateManifest.Verify(File.ReadAllBytes(feed), configuration, "windows-x64", NativeUpdateManifest.Now);
                     string package = Path.Combine(holding, "payload.exe"); Download(m.Url, package, m.Bytes, lifetime.Token); m.VerifyFile(package);
                     lifetime.Token.ThrowIfCancellationRequested();
-                    lock (gate) { pending = m; stage = holding; holding = null; }
+                    lock (gate) { lifetime.Token.ThrowIfCancellationRequested(); pending = m; stage = holding; holding = null; }
                     SetStatus(m.Version + " 준비 완료 · 설치 후 자동으로 다시 엽니다.");
                 } catch (NativeUpdateCurrentException) { SetStatus("현재 최신 버전을 사용하고 있습니다."); }
                 catch (OperationCanceledException) { }
                 catch (Exception) { SetStatus("업데이트를 확인하지 못했습니다. 현재 버전은 계속 사용할 수 있습니다."); }
-                finally { if (holding != null) try { Directory.Delete(holding, true); } catch (Exception) { } lock (gate) busy = false; Notify(); }
+                finally { DeleteOwnedStage(holding); lock (gate) busy = false; CleanupIfStopped(); Notify(); }
             });
         }
-        internal bool Install(Action beforeExit)
+        // Await from the WinForms event handler. Only the small state/exit action
+        // resumes on its context; file hashes, copies and READY waits run off UI.
+        internal async Task<bool> InstallAsync(Action beforeExit)
         {
             string holding; NativeUpdateManifest m;
-            lock (gate) { if (pending == null || busy || installing || lifetime.IsCancellationRequested) return false; installing = true; holding = stage; m = pending; }
+            lock (gate) { if (pending == null || busy || installing || unconfirmedHelper || lifetime.IsCancellationRequested) return false; installing = true; holding = stage; m = pending; }
+            SetStatus("업데이트를 설치할 준비를 하고 있습니다.");
+            NativeUpdateAttempt attempt = null;
+            string nonce = Guid.NewGuid().ToString("N");
             try {
-                NativeUpdatePaths.ValidateStage(holding);
+                Exception failure = null;
+                try {
+                    attempt = await Task.Run(delegate { return Prepare(holding, m, nonce, lifetime.Token); });
+                    lifetime.Token.ThrowIfCancellationRequested();
+                    NativeUpdateHandoff.WriteSignal(holding, nonce, "commit");
+                    // Close() disposes this model. Ownership transfers before that
+                    // callback so Dispose cannot remove a committed helper's files.
+                    lock (gate) transferred = true;
+                    beforeExit();
+                    lock (gate) { pending = null; stage = null; }
+                    attempt.Dispose(); return true;
+                } catch (Exception error) { failure = error; }
+                // This await is outside catch, preserving the shipped C#5
+                // compiler contract while keeping child waits off the UI.
+                var uncertain = failure as NativeUpdateUnconfirmedCancellation;
+                if (uncertain != null) attempt = uncertain.Attempt;
+                // Publish cancellation synchronously before yielding the UI exit
+                // callback's stack. A late READY/COMMIT cannot outlive failure.
+                bool authorityRevoked = true;
+                if (attempt != null) {
+                    NativeUpdateAttempt owned = attempt;
+                    authorityRevoked = owned.RevokeAuthority() ? await Task.Run(delegate { return owned.RevokeAndStop(); }) : owned.RevokeAndStop();
+                }
+                lock (gate) {
+                    transferred = false; unconfirmedHelper = !authorityRevoked;
+                    if (!authorityRevoked) retainedAttempt = attempt;
+                    if (authorityRevoked) { pending = null; stage = null; }
+                }
+                if (authorityRevoked) await Task.Run(delegate { DeleteOwnedStage(holding); });
+                SetStatus(authorityRevoked ? "업데이트 준비를 취소했습니다. 새 버전을 다시 확인해 주세요." : "업데이트 작업의 취소를 확인하지 못해 추가 업데이트를 중단했습니다. 현재 앱은 계속 사용할 수 있습니다.");
+                return false;
+            } finally { lock (gate) installing = false; CleanupIfStopped(); Notify(); }
+        }
+        private NativeUpdateAttempt Prepare(string holding, NativeUpdateManifest m, string nonce, CancellationToken cancellation)
+        {
+            Process process = null; NativeUpdateAttempt attempt = null;
+            string helper = Path.Combine(holding, "KnotNativeUpdateHandoff-" + nonce + ".exe");
+            try {
+                cancellation.ThrowIfCancellationRequested(); NativeUpdatePaths.ValidateStage(holding);
                 NativeUpdateManifest fresh = NativeUpdateManifest.Verify(File.ReadAllBytes(Path.Combine(holding, "manifest.feed")), configuration, "windows-x64", NativeUpdateManifest.Now);
                 if (fresh.Build != m.Build) throw new InvalidDataException(); fresh.VerifyFile(Path.Combine(holding, "payload.exe"));
-                string executable = Assembly.GetExecutingAssembly().Location, helper = Path.Combine(holding, "KnotNativeUpdateHandoff.exe");
+                string executable = Assembly.GetExecutingAssembly().Location;
                 NativeUpdatePaths.Ordinary(executable); File.Copy(executable, helper, false);
-                Process current = Process.GetCurrentProcess();
-                string args = "--knot-native-update-v1 " + current.Id.ToString(CultureInfo.InvariantCulture) + " " + current.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) + " " + NativeUpdatePaths.Quote(executable) + " " + NativeUpdatePaths.Quote(holding);
-                using (var process = Process.Start(new ProcessStartInfo(helper, args) { UseShellExecute = false, WorkingDirectory = holding, CreateNoWindow = true }))
-                {
-                    if (process == null) throw new IOException();
-                    DateTime deadline = DateTime.UtcNow.AddSeconds(10);
-                    while (!File.Exists(Path.Combine(holding, "ready")))
-                    { if (process.HasExited || DateTime.UtcNow >= deadline) throw new IOException(); Thread.Sleep(25); }
+                cancellation.ThrowIfCancellationRequested();
+                using (Process current = Process.GetCurrentProcess()) {
+                    string args = "--knot-native-update-v2 " + current.Id.ToString(CultureInfo.InvariantCulture) + " " + current.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) + " " + NativeUpdatePaths.Quote(executable) + " " + NativeUpdatePaths.Quote(holding) + " " + nonce;
+                    process = Process.Start(new ProcessStartInfo(helper, args) { UseShellExecute = false, WorkingDirectory = holding, CreateNoWindow = true });
                 }
-                beforeExit(); return true;
-            } catch (Exception) { lock (gate) installing = false; SetStatus("안전하게 업데이트를 시작하지 못했습니다. 다시 확인해 주세요."); return false; }
+                if (process == null) throw new IOException();
+                Process owned = process;
+                attempt = new NativeUpdateAttempt(
+                    delegate { NativeUpdateHandoff.WriteSignal(holding, nonce, "cancel"); },
+                    delegate { /* Whole stage is deleted only by its model owner. */ },
+                    delegate { return owned.HasExited; }, delegate { owned.Kill(); },
+                    delegate(int timeout) { return owned.WaitForExit(timeout); }, owned);
+                long deadline = Stopwatch.GetTimestamp() + 45L * Stopwatch.Frequency;
+                while (!NativeUpdateHandoff.HasSignal(holding, nonce, "ready")) {
+                    cancellation.ThrowIfCancellationRequested();
+                    if (process.HasExited || Stopwatch.GetTimestamp() >= deadline) throw new IOException();
+                    Thread.Sleep(25);
+                }
+                cancellation.ThrowIfCancellationRequested(); return attempt;
+            } catch {
+                if (attempt != null) { if (!attempt.RevokeAndStop()) throw new NativeUpdateUnconfirmedCancellation(attempt); }
+                else if (process != null) process.Dispose();
+                throw;
+            }
         }
         private void SetStatus(string value) { lock (gate) Status = value; Notify(); }
         private void Notify() { Action handler = Changed; if (handler != null) try { handler(); } catch (Exception) { } }
+        private static void DeleteOwnedStage(string owned)
+        { if (owned == null) return; try { NativeUpdatePaths.ValidateStage(owned); Directory.Delete(owned, true); } catch (Exception) { } }
+        private void CleanupIfStopped()
+        {
+            string owned = null;
+            lock (gate) {
+                if (lifetime.IsCancellationRequested && !busy && !installing && !transferred && !unconfirmedHelper) { owned = stage; stage = null; pending = null; }
+            }
+            if (owned != null) DeleteOwnedStage(owned);
+        }
         private static void Download(Uri url, string target, long maximum, CancellationToken cancellation)
         {
             var request = (HttpWebRequest)WebRequest.Create(url); request.AllowAutoRedirect = false; request.Timeout = 60000; request.ReadWriteTimeout = 60000; request.CookieContainer = null;
@@ -213,50 +311,118 @@ namespace Knot.NativePreview
         }
         public void Dispose()
         {
-            lock (gate) { lifetime.Cancel(); if (timer != null) { timer.Dispose(); timer = null; } }
+            NativeUpdateAttempt retained;
+            lock (gate) { lifetime.Cancel(); if (timer != null) { timer.Dispose(); timer = null; } retained = retainedAttempt; }
+            if (retained != null && retained.RevokeAndStop()) {
+                lock (gate) { retainedAttempt = null; unconfirmedHelper = false; }
+            }
+            CleanupIfStopped();
         }
     }
+    internal sealed class NativeUpdateUnconfirmedCancellation : Exception
+    { internal readonly NativeUpdateAttempt Attempt; internal NativeUpdateUnconfirmedCancellation(NativeUpdateAttempt attempt) { Attempt = attempt; } }
     internal static class NativeUpdateHandoff
     {
-        // Called before WinForms/capture initialization. Configuration is embedded in the copied helper.
+        internal static bool ValidNonce(string nonce)
+        { Guid parsed; return nonce != null && nonce.Length == 32 && Guid.TryParseExact(nonce, "N", out parsed) && parsed.ToString("N") == nonce; }
+        private static string Signal(string stage, string nonce, string kind)
+        { if (!ValidNonce(nonce) || (kind != "ready" && kind != "commit" && kind != "cancel")) throw new InvalidDataException(); return Path.Combine(stage, "handoff-" + nonce + "." + kind); }
+        internal static void WriteSignal(string stage, string nonce, string kind)
+        {
+            if (kind == "cancel" && HasSignal(stage, nonce, kind)) return;
+            string target = Signal(stage, nonce, kind), temporary = target + "." + Guid.NewGuid().ToString("N") + ".writing";
+            try {
+                byte[] bytes = Encoding.ASCII.GetBytes(nonce);
+                using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
+                    output.Write(bytes, 0, bytes.Length); output.Flush(true);
+                }
+                // A reader sees absent or the complete receipt, never a newly
+                // created zero/partial-length record while another thread writes.
+                File.Move(temporary, target);
+            } catch (IOException) {
+                if (kind != "cancel" || !HasSignal(stage, nonce, kind)) throw;
+            } finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
+        internal static bool HasSignal(string stage, string nonce, string kind)
+        {
+            string path = Signal(stage, nonce, kind); if (!File.Exists(path)) return false; NativeUpdatePaths.Ordinary(path);
+            using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                if (input.Length != 32) throw new InvalidDataException();
+                byte[] bytes = new byte[32]; int offset = 0, count;
+                while (offset < bytes.Length && (count = input.Read(bytes, offset, bytes.Length - offset)) > 0) offset += count;
+                return offset == bytes.Length && Encoding.ASCII.GetString(bytes) == nonce;
+            }
+        }
+        internal static bool MayInstall(string stage, string nonce)
+        { return HasSignal(stage, nonce, "commit") && !HasSignal(stage, nonce, "cancel"); }
+        // Called before WinForms/capture initialization. No v1 helper is accepted:
+        // the parent and child must both implement explicit commit/revocation.
         internal static bool TryRun(string[] a)
         {
-            if (a == null || a.Length == 0 || a[0] != "--knot-native-update-v1") return false;
+            if (a == null || a.Length == 0 || a[0] != "--knot-native-update-v2") return false;
             try { Run(a); Environment.ExitCode = 0; } catch (Exception) { Environment.ExitCode = 1; }
             return true;
+        }
+        private static string Digest(string path)
+        { NativeUpdatePaths.Ordinary(path); using (var input = File.OpenRead(path)) using (var hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(input)); }
+        private static void Relaunch(string executable)
+        {
+            NativeUpdatePaths.Ordinary(executable);
+            if (AssemblyName.GetAssemblyName(executable).Name != Assembly.GetExecutingAssembly().GetName().Name) throw new InvalidDataException();
+            using (var process = Process.Start(new ProcessStartInfo(executable, "--knot-native-update-resume") { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(executable) }))
+            { if (process == null) throw new IOException(); }
         }
         private static void Run(string[] a)
         {
             int pid; long start;
-            if (a.Length != 5 || !Int32.TryParse(a[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) || pid < 1 ||
-                !Int64.TryParse(a[2], NumberStyles.None, CultureInfo.InvariantCulture, out start)) throw new InvalidDataException();
-            string executable = Path.GetFullPath(a[3]), stage = Path.GetFullPath(a[4]); NativeUpdatePaths.ValidateStage(stage); NativeUpdatePaths.Ordinary(executable);
+            if (a.Length != 6 || !Int32.TryParse(a[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) || pid < 1 ||
+                !Int64.TryParse(a[2], NumberStyles.None, CultureInfo.InvariantCulture, out start) || !ValidNonce(a[5])) throw new InvalidDataException();
+            string executable = Path.GetFullPath(a[3]), stage = Path.GetFullPath(a[4]), nonce = a[5]; NativeUpdatePaths.ValidateStage(stage); NativeUpdatePaths.Ordinary(executable);
             string allowed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Knot Native Preview", "Knot-Native-Preview.exe");
             if (!String.Equals(executable, allowed, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException();
             NativeUpdateConfiguration c = NativeUpdateConfiguration.Load();
             NativeUpdateManifest m = NativeUpdateManifest.Verify(File.ReadAllBytes(Path.Combine(stage, "manifest.feed")), c, "windows-x64", NativeUpdateManifest.Now);
             string package = Path.Combine(stage, "payload.exe"); m.VerifyFile(package);
+            string originalDigest = Digest(executable);
             using (var original = Process.GetProcessById(pid))
             {
                 if (original.StartTime.ToUniversalTime().Ticks != start || !String.Equals(original.MainModule.FileName, executable, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException();
-                // Parent waits for this acknowledgement before closing, so a fast exit
-                // cannot make the child lose the process identity it must validate.
-                using (var ready = new FileStream(Path.Combine(stage, "ready"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) ready.WriteByte(1);
-                if (!original.WaitForExit(180000)) throw new IOException();
+                WriteSignal(stage, nonce, "ready");
+                long deadline = Stopwatch.GetTimestamp() + 180L * Stopwatch.Frequency;
+                while (!HasSignal(stage, nonce, "commit")) {
+                    if (HasSignal(stage, nonce, "cancel") || original.HasExited || Stopwatch.GetTimestamp() >= deadline) throw new IOException();
+                    Thread.Sleep(25);
+                }
+                if (HasSignal(stage, nonce, "cancel") || !original.WaitForExit(180000)) throw new IOException();
             }
-            // Keep a read-only/no-delete lease through installer launch. Inno owns rollback/replacement.
-            using (var locked = new FileStream(package, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                m.VerifyFile(package);
-                string args = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS /KNOTNATIVEUPDATE=1 /DIR=" + NativeUpdatePaths.Quote(Path.GetDirectoryName(executable));
-                using (var installer = Process.Start(new ProcessStartInfo(package, args) { UseShellExecute = false, WorkingDirectory = stage }))
-                { if (installer == null || !installer.WaitForExit(300000) || installer.ExitCode != 0) throw new IOException(); }
+            if (!MayInstall(stage, nonce)) throw new IOException();
+            bool installerStarted = false, installerTerminal = false, succeeded = false;
+            try {
+                using (var locked = new FileStream(package, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    m.VerifyFile(package);
+                    if (!MayInstall(stage, nonce)) throw new IOException();
+                    string args = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS /KNOTNATIVEUPDATE=1 /DIR=" + NativeUpdatePaths.Quote(Path.GetDirectoryName(executable));
+                    using (var installer = Process.Start(new ProcessStartInfo(package, args) { UseShellExecute = false, WorkingDirectory = stage }))
+                    {
+                        if (installer == null) throw new IOException(); installerStarted = true;
+                        installerTerminal = installer.WaitForExit(300000);
+                        if (!installerTerminal || installer.ExitCode != 0) throw new IOException();
+                        succeeded = true;
+                    }
+                }
+                Relaunch(executable);
+                try { File.Delete(package); File.Delete(Path.Combine(stage, "manifest.feed")); } catch (Exception) { }
+            } catch {
+                // A timed-out installer can still be changing files. Never open
+                // the app then. On a terminal failure, only reopen byte-identical
+                // original code; do not assume installer rollback succeeded.
+                if (!succeeded && (!installerStarted || installerTerminal)) {
+                    try { if (Digest(executable) == originalDigest) Relaunch(executable); } catch (Exception) { }
+                    try { File.Delete(package); File.Delete(Path.Combine(stage, "manifest.feed")); } catch (Exception) { }
+                }
+                throw;
             }
-            NativeUpdatePaths.Ordinary(executable);
-            using (var process = Process.Start(new ProcessStartInfo(executable, "--knot-native-update-resume") { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(executable) }))
-            { if (process == null) throw new IOException(); }
-            // The running helper prevents deleting itself until it exits; leave only that inert file for OS temp cleanup.
-            try { File.Delete(package); File.Delete(Path.Combine(stage, "manifest.feed")); } catch (Exception) { }
         }
     }
 }

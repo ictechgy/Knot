@@ -50,12 +50,14 @@ namespace Knot.NativePreview
                 name.StartsWith(".knot-", StringComparison.OrdinalIgnoreCase)) throw new FileTransferException("protocol");
             try { StrictJson.ValidUnicode(name, true); } catch (ProtocolException) { throw new FileTransferException("protocol"); }
             if (StrictJson.Utf8.GetByteCount(name) > 255) throw new FileTransferException("protocol");
-            foreach (char c in name)
+            for (int index = 0; index < name.Length; ++index)
             {
-                UnicodeCategory category = CharUnicodeInfo.GetUnicodeCategory(c);
+                char c = name[index];
+                UnicodeCategory category = CharUnicodeInfo.GetUnicodeCategory(name, index);
                 if (c == '/' || c == '\\' || c == ':' || c == '<' || c == '>' || c == '"' || c == '|' || c == '?' || c == '*' ||
                     category == UnicodeCategory.Control || category == UnicodeCategory.Format || category == UnicodeCategory.LineSeparator || category == UnicodeCategory.ParagraphSeparator)
                     throw new FileTransferException("protocol");
+                if (char.IsHighSurrogate(c)) ++index; // ValidUnicode already checked the pair.
             }
             string stem = name.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
             if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || stem == "CLOCK$" ||

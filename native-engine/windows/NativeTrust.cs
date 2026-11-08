@@ -90,6 +90,60 @@ namespace Knot.NativePreview
                 finally { Array.Clear(previous, 0, previous.Length); if (replacement != null) Array.Clear(replacement, 0, replacement.Length); }
             }
         }
+        internal static bool RequiresRenewal() { return RequiresRenewal(ProtectedCertificateStorage.Production()); }
+        internal static bool RequiresRenewal(IPersistentCertificateStorage storage)
+        {
+            using (storage.AcquireLease())
+            lock (persistentGate)
+            {
+                if (!storage.Exists) return false;
+                byte[] pfx = storage.Read();
+                try
+                {
+                    using (X509Certificate2 saved = PersistentCertificateFactory.Inspect(pfx))
+                    {
+                        try { PersistentCertificateFactory.Validate(saved); return false; }
+                        catch (CertificateRenewalRequiredException) { return true; }
+                    }
+                }
+                finally { Array.Clear(pfx, 0, pfx.Length); }
+            }
+        }
+        // Only the disclosed owner action calls this. Ordinary sharing, resume,
+        // inspection and compatibility conversion continue to reject expiry.
+        internal static void RenewExpiredPersistent() { RenewExpiredPersistent(ProtectedCertificateStorage.Production()); }
+        internal static void RenewExpiredPersistent(IPersistentCertificateStorage storage)
+        {
+            using (storage.AcquireLease())
+            lock (persistentGate)
+            {
+                if (!storage.Exists) throw new CryptographicException("No registered host identity is available to renew.");
+                byte[] previous = storage.Read(), replacement = null;
+                try
+                {
+                    using (X509Certificate2 old = PersistentCertificateFactory.Inspect(previous))
+                    {
+                        bool expired = false;
+                        try { PersistentCertificateFactory.Validate(old); }
+                        catch (CertificateRenewalRequiredException) { expired = true; }
+                        if (!expired)
+                        {
+                            if (PersistentCertificateFactory.RequiresMigration(old)) throw new CertificateCompatibilityException();
+                            return; // A prior owner already renewed; do not rotate again.
+                        }
+                    }
+                    replacement = PersistentCertificateFactory.CreatePfx(DateTimeOffset.UtcNow);
+                    using (X509Certificate2 fresh = PersistentCertificateFactory.Import(replacement))
+                    { PersistentCertificateFactory.Validate(fresh); if (PersistentCertificateFactory.RequiresMigration(fresh)) throw new CryptographicException("Incompatible replacement identity."); }
+                    byte[] current = storage.Read();
+                    try { if (!NativeProtocol.Equal(previous, current)) throw new CryptographicException("The registered host identity changed before renewal."); }
+                    finally { Array.Clear(current, 0, current.Length); }
+                    storage.RevokeCredentials();
+                    storage.Write(replacement);
+                }
+                finally { Array.Clear(previous, 0, previous.Length); if (replacement != null) Array.Clear(replacement, 0, replacement.Length); }
+            }
+        }
         private RunCertificate(X509Certificate2 saved) { Certificate = saved; OwnedKeyContainerName = ""; }
         internal static RunCertificate CreateSyntheticClientPurpose() { return new RunCertificate("1.3.6.1.5.5.7.3.2"); }
         private RunCertificate(string purpose)

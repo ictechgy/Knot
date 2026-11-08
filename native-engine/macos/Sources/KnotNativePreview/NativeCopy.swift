@@ -15,6 +15,11 @@ enum NativeCopy {
         }
     }
     static func status(_ source: String, reconnectMethod: SessionModel.ReconnectMethod = .invitation) -> String {
+        if reconnectMethod == .registered, let reason = numberReconnectReasons[source] {
+            let registeredReason = source == "Invitation was rejected or expired. Create a new invitation."
+                ? "Windows에서 연결을 허용하지 않았거나 연결 정보가 만료됐어요." : reason
+            return registeredReason + " Windows의 공유 상태를 확인한 뒤 ‘내 PC’에서 다시 연결하세요."
+        }
         if reconnectMethod == .number, let reason = numberReconnectReasons[source] {
             return reason + " Windows에서 공유를 다시 시작하고 새 8자리 번호로 연결하세요."
         }

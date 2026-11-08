@@ -31,6 +31,13 @@ namespace Knot.NativePreview
         private byte[] sessionAudioKey;
         internal Action<string> AudioStatusChanged;
         private TrustedDeviceServer trustedServer;
+        private readonly INativeTrustedDeviceStore trustedDevices;
+        private readonly IClipboardText syntheticClipboard;
+        private long trustedRefreshAt, trustedRevision;
+        private bool trustedRevocationPending;
+        internal int TrustedPort { get { return trustedServer == null ? 0 : trustedServer.ListeningPort; } }
+        internal bool WaitingForRegisteredDevice { get { lock (gate) return enrollmentMode && !isStopped && !isClaimed && registeredAvailable &&
+            enrollmentInvitation == null && enrollment != null && (enrollment.Slot.IsConsumed || enrollment.Slot.LifetimeRemainingMilliseconds <= 0); } }
         private byte[] registrationHash;
         private long registrationDeadline;
         private bool registrationUsed, registeredSession, registeredAvailable;
@@ -82,7 +89,8 @@ namespace Knot.NativePreview
         internal HostServer(IPAddress address, int port, IMediaFactory mediaFactory, IInputSink inputSink, bool syntheticLoopback,
                             Invitation invitation, bool enrollmentMode, Func<long> clock, string deviceName, Func<long> inputClock = null,
                             FileSharingOptions files = null, Action<int, int, int> syntheticAfterEnrollment = null,
-                            bool allowAudio = false, IAudioCaptureFactory audioFactory = null, bool syntheticRegisteredDevices = false)
+                            bool allowAudio = false, IAudioCaptureFactory audioFactory = null, bool syntheticRegisteredDevices = false,
+                            INativeTrustedDeviceStore syntheticTrustedDevices = null, IClipboardText syntheticClipboard = null)
         {
             if (!NativeProtocol.IsPrivate(address) && !(syntheticLoopback && IPAddress.IsLoopback(address))) throw new ArgumentException("Choose a private IPv4 or Tailscale address.");
             if (port < 0 || port > 65535 || port == 0 && !syntheticLoopback) throw new ArgumentException("Invalid listener port.");
@@ -90,6 +98,11 @@ namespace Knot.NativePreview
                 throw new ArgumentException("Construction fault injection requires an owned synthetic enrollment fixture.");
             if (syntheticRegisteredDevices && (!syntheticLoopback || !enrollmentMode))
                 throw new ArgumentException("Synthetic registered state requires an owned synthetic enrollment fixture.");
+            if ((syntheticTrustedDevices != null && (!syntheticLoopback || !enrollmentMode || !IPAddress.IsLoopback(address))) ||
+                (syntheticClipboard != null && (!syntheticLoopback || !IPAddress.IsLoopback(address))))
+                throw new ArgumentException("Synthetic child adapters require owned loopback fixtures.");
+            trustedDevices = syntheticLoopback ? syntheticTrustedDevices : NativeTrustedDevices.Production;
+            this.syntheticClipboard = syntheticClipboard;
             this.address = address; this.syntheticLoopback = syntheticLoopback;
             this.enrollmentMode = enrollmentMode; this.clock = clock ?? new Func<long>(Stopwatch.GetTimestamp);
             this.inputClock = inputClock ?? new Func<long>(Stopwatch.GetTimestamp);
@@ -102,7 +115,8 @@ namespace Knot.NativePreview
                 this.invitation = invitation ?? new Invitation(this.clock);
                 certificate = enrollmentMode && !syntheticLoopback ? RunCertificate.Persistent() : new RunCertificate();
                 Identity = new RunIdentity(certificate.Pin);
-                registeredAvailable = syntheticLoopback ? syntheticRegisteredDevices : enrollmentMode && NativeTrustedDevices.List().Count != 0;
+                registeredAvailable = trustedDevices != null ? enrollmentMode && trustedDevices.HasDevices : syntheticRegisteredDevices;
+                trustedRefreshAt = this.clock();
                 listener = new TcpListener(address, port);
                 listener.Start(1);
                 this.port = ((IPEndPoint)listener.LocalEndpoint).Port;
@@ -112,13 +126,16 @@ namespace Knot.NativePreview
                     try { EnrollmentProtocol.ValidName(name); } catch (ProtocolException) { name = "Windows PC"; }
                     enrollment = new EnrollmentServer(address, name, syntheticLoopback, this.clock,
                         IssueEnrollmentGrant, delegate(EnrollmentFailure failure) {
-                            Notify(EnrollmentGuidance.For(failure));
-                            if (syntheticLoopback || !HasRegisteredDevices) Stop();
+                            bool registeredWaiting = trustedServer != null && HasRegisteredDevices;
+                            Notify(registeredWaiting && failure == EnrollmentFailure.Unavailable ? EnrollmentGuidance.RegisteredWaiting : EnrollmentGuidance.For(failure));
+                            if (!registeredWaiting) Stop();
                         }, Notify,
                         issueWithFiles: IssueEnrollmentGrantWithFiles);
                     if (syntheticAfterEnrollment != null) syntheticAfterEnrollment(this.port, enrollment.Port, enrollment.DiscoveryPort);
-                    if (!syntheticLoopback)
-                        trustedServer = new TrustedDeviceServer(address, certificate.Certificate, Pin, RegisterDevice, IssueTrustedGrant, delegate { return !Stopping; });
+                    if (trustedDevices != null)
+                        trustedServer = new TrustedDeviceServer(address, certificate.Certificate, Pin, RegisterDevice, IssueTrustedGrant, delegate { return !Stopping; },
+                            syntheticLoopback: syntheticLoopback, port: syntheticLoopback ? 0 : TrustedDeviceServer.Port,
+                            lookupKey: trustedDevices.Key, revoke: RevokeRegisteredDevice, revokeFinished: FinishRegisteredRevocation);
                 }
                 worker = new Thread(Run); worker.IsBackground = true; worker.Name = "Knot native media writer";
                 worker.SetApartmentState(ApartmentState.MTA);
@@ -157,17 +174,42 @@ namespace Knot.NativePreview
             lock (gate)
             {
                 if (isStopped || !active || !enrollmentMode || registrationUsed || registrationHash == null ||
-                    !peer.Equals(claimedPeer) || clock() > registrationDeadline || !NativeProtocol.Equal(digest, registrationHash) || registeredSession) return false;
-                NativeTrustedDevices.Add(id, name, key); registrationUsed = true; registeredAvailable = true;
+                    !peer.Equals(claimedPeer) || registrationDeadline == 0 || clock() > registrationDeadline || !NativeProtocol.Equal(digest, registrationHash) || registeredSession) return false;
+                if (trustedDevices == null) return false;
+                trustedDevices.Add(id, name, key); registrationUsed = true; registeredAvailable = true; ++trustedRevision;
                 Array.Clear(registrationHash, 0, registrationHash.Length); registrationHash = null;
                 return true;
             }
+        }
+        private void RevokeRegisteredDevice(string id)
+        {
+            // Do not keep an expired-number listener alive on a stale cached
+            // record after the authenticated last-device revocation.
+            lock (gate) { trustedRevocationPending = true; ++trustedRevision; }
+            trustedDevices.Revoke(id);
+        }
+        private void FinishRegisteredRevocation()
+        {
+            try
+            {
+                for (int attempt = 0; attempt < 2; ++attempt)
+                {
+                    long revision; lock (gate) revision = trustedRevision;
+                    bool any = trustedDevices.HasDevices;
+                    lock (gate)
+                    {
+                        if (revision != trustedRevision) continue;
+                        registeredAvailable = any; trustedRefreshAt = clock(); ++trustedRevision; break;
+                    }
+                }
+            }
+            finally { lock (gate) trustedRevocationPending = false; }
         }
         private string IssueTrustedGrant(IPAddress peer, string name)
         {
             lock (gate)
             {
-                if (isStopped || isClaimed || !enrollmentMode || !NativeProtocol.IsPrivate(peer)) throw new ProtocolException("busy");
+                if (isStopped || isClaimed || !enrollmentMode || !(NativeProtocol.IsPrivate(peer) || syntheticLoopback && IPAddress.IsLoopback(peer))) throw new ProtocolException("busy");
                 EnrollmentProtocol.ValidName(name);
                 if (enrollmentInvitation != null && !enrollmentInvitation.IsExpired) throw new ProtocolException("busy");
                 if (enrollmentInvitation != null) enrollmentInvitation.Revoke();
@@ -212,16 +254,34 @@ namespace Knot.NativePreview
         }
         private Invitation ClaimInvitation
         { get { lock (gate) return enrollmentMode ? enrollmentInvitation : invitation; } }
+        private void RefreshTrustedAvailability()
+        {
+            long revision;
+            lock (gate)
+            {
+                if (!enrollmentMode || trustedDevices == null || isClaimed || isStopped || trustedRevocationPending ||
+                    clock() - trustedRefreshAt < Stopwatch.Frequency) return;
+                trustedRefreshAt = clock(); revision = trustedRevision;
+            }
+            // DPAPI/store contention must not hold the session's Stop gate.
+            bool any = trustedDevices.HasDevices;
+            lock (gate) { if (!isClaimed && !isStopped && !trustedRevocationPending && revision == trustedRevision) registeredAvailable = any; }
+        }
         private bool CredentialsExpired
         {
             get
             {
+                RefreshTrustedAvailability();
                 lock (gate)
                 {
                     if (!enrollmentMode) return invitation.IsExpired;
-                    if (!syntheticLoopback && trustedServer != null && HasRegisteredDevices && !isClaimed)
+                    // Allow the already-authenticated revocation's bounded ACK
+                    // write to finish before expiry closes its exact socket.
+                    if (!isClaimed && trustedRevocationPending) return false;
+                    if (trustedServer != null && registeredAvailable && !isClaimed)
                     {
-                        if (enrollmentInvitation != null && enrollmentInvitation.IsExpired) { enrollmentInvitation.Revoke(); enrollmentInvitation = null; }
+                        if (enrollmentInvitation != null && enrollmentInvitation.IsExpired)
+                        { enrollmentInvitation.Revoke(); enrollmentInvitation = null; }
                         return false;
                     }
                     return enrollmentInvitation == null ? enrollment.Slot.LifetimeRemainingMilliseconds <= 0 : enrollmentInvitation.IsExpired;
@@ -291,11 +351,10 @@ namespace Knot.NativePreview
                         if (isStopped) { if (preparedFiles != null) preparedFiles.Dispose(); return; }
                         input = new InputSession(inputSink, media.Info.Rectangle);
                         input.ExplorerReleaseFailed = delegate { RecordTerminalFailure(); Stop(); };
-                        if (inputSink is WindowsInputSink)
+                        if (inputSink is WindowsInputSink || syntheticClipboard != null)
                         {
-                            clipboard = new ClipboardBridge(delegate(byte operation) {
-                                lock (gate) { if (!active || isStopped || input == null) throw new ProtocolException("closed"); input.ClipboardShortcut(operation); }
-                            }, delegate { lock (gate) return active && !isStopped; });
+                            clipboard = new ClipboardBridge(ApplyClipboardShortcut,
+                                delegate { lock (gate) return active && !isStopped; }, syntheticClipboard ?? new WindowsClipboardText());
                             ready = ClipboardProtocol.WithOffer(ready);
                         }
                         files = preparedFiles;
@@ -325,6 +384,13 @@ namespace Knot.NativePreview
                             Action<string> status = AudioStatusChanged;
                             try { if (status != null) status("화면 연결은 계속되지만 Windows 재생 소리를 준비하지 못했어요."); } catch { }
                         }
+                    }
+                    lock (gate)
+                    {
+                        if (isStopped) return;
+                        // Media initialization may legitimately consume the old
+                        // claim-time window. Registration begins at Ready.
+                        if (registrationHash != null) registrationDeadline = clock() + 30L * Stopwatch.Frequency;
                     }
                     NativeProtocol.Write(tls, 2, ready);
                     lock (gate) { if (isStopped) return; }
@@ -487,7 +553,7 @@ namespace Knot.NativePreview
                     lock (gate)
                     {
                         if (isStopped) return false;
-                        isClaimed = true; peerName = name; claimed = true; registrationDeadline = clock() + 30L * Stopwatch.Frequency;
+                        isClaimed = true; peerName = name; claimed = true; registrationDeadline = 0;
                         claimedPeer = observedRemote;
                         claimedFiles = fileOptions != null && wantsFiles && (!enrollmentMode || enrollmentAllowsFiles);
                         approvalMetadata = new ApprovalMetadata(Identity, name, observedRemote);
@@ -516,6 +582,39 @@ namespace Knot.NativePreview
             }
             if (CredentialsExpired) throw new ProtocolException("expired");
             return false;
+        }
+        internal void ApplyClipboardShortcut(byte operation)
+        {
+            bool attempted = false;
+            try
+            {
+                lock (gate)
+                {
+                    if (!active || isStopped || input == null) throw new ProtocolException("closed");
+                    attempted = true;
+                    try { input.ClipboardShortcut(operation); }
+                    catch
+                    {
+                        // Publish the failure before releasing the host lock so
+                        // concurrent transport EOF cannot finish a resumable run
+                        // before this clipboard worker reaches Stop.
+                        RecordTerminalFailure("input");
+                        throw;
+                    }
+                }
+            }
+            catch
+            {
+                // The optional clipboard worker may catch content/OS access
+                // failures, but it must never swallow failed input injection or
+                // key release and leave the authoritative input session alive.
+                if (attempted)
+                {
+                    try { if (!Stopping) Notify(Guidance("input")); }
+                    finally { Stop(); }
+                }
+                throw;
+            }
         }
         private void ReadInput()
         {

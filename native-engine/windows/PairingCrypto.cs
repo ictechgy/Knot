@@ -85,7 +85,7 @@ namespace Knot.NativePreview
                 open = Export<CryptDelegate>("kn_pair_open");
                 close = Export<CloseDelegate>("kn_pair_close");
                 context = create(server ? 1u : 0u, password, 8, slot, 16);
-                if (context == IntPtr.Zero) throw new ProtocolException("auth");
+                if (context == IntPtr.Zero) throw new PairingSetupException();
                 publicMessage = new byte[32]; uint n;
                 if (message(context, publicMessage, 32, out n) != 0 || n != 32)
                     throw new ProtocolException("protocol");

@@ -99,17 +99,28 @@ namespace Knot.NativePreview
         {
             lock (gate)
             {
-                if (closed || operation < 1 || operation > 2) throw new ProtocolException("input");
-                if (!CancelExplorerGesture() || !Release()) throw new ProtocolException("input");
-                ushort scan = operation == 1 ? (ushort)0x2e : (ushort)0x2f;
                 try
                 {
-                    Accept(new Packet(0x20, new byte[] { 1, 0, 0x1d, 0 }));
-                    Accept(new Packet(0x20, new byte[] { 1, 0, (byte)scan, 0 }));
-                    Accept(new Packet(0x20, new byte[] { 0, 0, (byte)scan, 0 }));
-                    Accept(new Packet(0x20, new byte[] { 0, 0, 0x1d, 0 }));
+                    if (closed || operation < 1 || operation > 2) throw new ProtocolException("input");
+                    if (!CancelExplorerGesture() || !Release()) throw new ProtocolException("input");
+                    ushort scan = operation == 1 ? (ushort)0x2e : (ushort)0x2f;
+                    try
+                    {
+                        Accept(new Packet(0x20, new byte[] { 1, 0, 0x1d, 0 }));
+                        Accept(new Packet(0x20, new byte[] { 1, 0, (byte)scan, 0 }));
+                        Accept(new Packet(0x20, new byte[] { 0, 0, (byte)scan, 0 }));
+                        Accept(new Packet(0x20, new byte[] { 0, 0, 0x1d, 0 }));
+                    }
+                    finally { if (!Release()) throw new ProtocolException("input"); }
                 }
-                finally { if (!Release()) throw new ProtocolException("input"); }
+                catch
+                {
+                    // Close under this same input lock before a queued reader
+                    // can acquire it. Host failure propagation follows after the
+                    // lock unwinds, with no intervening accepted input window.
+                    Close();
+                    throw;
+                }
             }
         }
         private bool Release()

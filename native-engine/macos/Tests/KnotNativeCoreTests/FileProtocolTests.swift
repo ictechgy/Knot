@@ -3,6 +3,13 @@ import CryptoKit
 import Testing
 @testable import KnotNativeCore
 
+@Test func portableBasenameRejectsSupplementaryFormatScalars() {
+    for scalar in ["\u{E0001}", "\u{E0020}", "\u{E007F}"] {
+        #expect(!FileWire.validName("ordinary" + scalar + ".txt"))
+    }
+    #expect(FileWire.validName("ordinary😀.txt"))
+}
+
 @Test func fileTLSCertificateFailuresKeepAuthenticationGuidance() {
     for failure in [NativeFailure.certificatePinMismatch, .certificatePolicy] {
         #expect(NativeFileError.authored(failure) == .trust)

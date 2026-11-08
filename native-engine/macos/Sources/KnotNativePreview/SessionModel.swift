@@ -6,7 +6,7 @@ import KnotNativeCore
 @MainActor
 final class SessionModel: ObservableObject {
     enum Phase: Equatable { case idle, connecting, approval, decoding, streaming, failed }
-    enum ReconnectMethod: Equatable { case number, invitation }
+    enum ReconnectMethod: Equatable { case registered, number, invitation }
     @Published var phase: Phase = .idle
     @Published var status = "Paste a fresh invitation, review its target and certificate, then connect."
     @Published var invitation: Invitation?
@@ -29,6 +29,8 @@ final class SessionModel: ObservableObject {
     @Published private(set) var quality: QualityModel?
     @Published private(set) var audio: NativeAudioSession?
     private let makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)?
+    private let writeUpdateResume: @MainActor @Sendable (String?, TimeInterval) -> Void
+    private let takeUpdateResume: @MainActor @Sendable () -> (String, TimeInterval)?
     private var selectedTrustedDevice: SavedNativeDevice?
     private var pendingRegistration: Invitation?
     private var trustedClient: (any NativeTrustedConnecting)?
@@ -111,7 +113,19 @@ final class SessionModel: ObservableObject {
          registerDevice: @escaping @MainActor @Sendable (SavedNativeDevice, String, Invitation) async throws -> Void = { device, name, invitation in
              try await NativeTrustedClient(device: device, viewerName: name).register(invitation: invitation)
          },
-         makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)? = nil) {
+         makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)? = nil,
+         writeUpdateResume: @escaping @MainActor @Sendable (String?, TimeInterval) -> Void = { id, expiry in
+             let defaults = UserDefaults(suiteName: "io.knot.native-preview")
+             defaults?.removeObject(forKey: "updateResumeDevice"); defaults?.removeObject(forKey: "updateResumeExpiry")
+             if let id { defaults?.set(id, forKey: "updateResumeDevice"); defaults?.set(expiry, forKey: "updateResumeExpiry") }
+         },
+         takeUpdateResume: @escaping @MainActor @Sendable () -> (String, TimeInterval)? = {
+             let defaults = UserDefaults(suiteName: "io.knot.native-preview")
+             let id = defaults?.string(forKey: "updateResumeDevice"), expiry = defaults?.double(forKey: "updateResumeExpiry") ?? 0
+             defaults?.removeObject(forKey: "updateResumeDevice"); defaults?.removeObject(forKey: "updateResumeExpiry")
+             return id.map { ($0, expiry) }
+         }) {
+        self.writeUpdateResume = writeUpdateResume; self.takeUpdateResume = takeUpdateResume
         self.makeChannel = makeChannel
         self.makeAudioSession = makeAudioSession
         self.waitForInputDeadline = waitForInputDeadline
@@ -121,34 +135,39 @@ final class SessionModel: ObservableObject {
         // Explicit fixture inputs; initialization never opens Keychain/network.
         savedDevices = Array(initialSavedDevices.prefix(16))
         selectedTrustedDevice = initialRegisteredDevice
+        if initialRegisteredDevice != nil { reconnectMethod = .registered }
         registeredRecovery = initialRegisteredDevice.map(RegisteredRecovery.current)
     }
 
     func prepareForUpdate() {
-        if autoReconnect, let device = selectedTrustedDevice {
-            let preferences = UserDefaults(suiteName: "io.knot.native-preview")
-            preferences?.set(device.id, forKey: "updateResumeDevice")
-            preferences?.set(Date().addingTimeInterval(300).timeIntervalSince1970, forKey: "updateResumeExpiry")
+        // UI selection may outlive a terminal failure or exhausted retries. It
+        // does not authorize reconnecting after the updater restarts the app.
+        let candidate: SavedNativeDevice?
+        switch registeredRecovery {
+        case .current: candidate = active ? recoveryDevice : nil
+        case .transient, .suspended: candidate = hasPendingReconnect ? recoveryDevice : nil
+        default: candidate = nil
         }
+        writeUpdateResume(candidate?.id, candidate == nil ? 0 : Date().addingTimeInterval(300).timeIntervalSince1970)
         disconnect()
     }
     func resumeAfterUpdateIfRequested() {
-        let preferences = UserDefaults(suiteName: "io.knot.native-preview")
-        let id = preferences?.string(forKey: "updateResumeDevice")
-        let expiry = preferences?.double(forKey: "updateResumeExpiry") ?? 0
-        preferences?.removeObject(forKey: "updateResumeDevice")
-        preferences?.removeObject(forKey: "updateResumeExpiry")
-        guard autoReconnect, let id, expiry > Date().timeIntervalSince1970,
+        guard let (id, expiry) = takeUpdateResume(), autoReconnect,
+              expiry > Date().timeIntervalSince1970,
               expiry <= Date().addingTimeInterval(300).timeIntervalSince1970 else { return }
         connectSaved(id)
     }
     func refreshSavedDevices() {
-        do { savedDevices = try NativeDeviceKeychain.load() }
+        do { savedDevices = try loadSavedDevices() }
         catch { status = "등록된 PC를 읽지 못했어요. 키체인 접근을 확인하세요." }
     }
     func connectSaved(_ id: String) {
         guard !active, !isSystemSleeping, let device = savedDevices.first(where: { $0.id == id }) else { return }
         clearAutomaticRecovery(); reconnectAttempt = 0
+        guard Invitation.validViewerLabel(viewerLabel) else {
+            phase = .failed; status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return
+        }
+        reconnectMethod = .registered
         selectedTrustedDevice = device; pendingRegistration = nil
         beginTrustedConnection(device)
     }
@@ -312,9 +331,14 @@ final class SessionModel: ObservableObject {
             fail(NativeCopy.certificatePinMismatchGuidance)
         case .certificatePolicy:
             fail(NativeCopy.certificatePolicyGuidance)
+        case .trust:
+            fail(selectedTrustedDevice == nil ? "Invitation was rejected or expired. Create a new invitation." :
+                "등록된 PC의 연결 권한을 확인하지 못했어요. Windows의 등록 기기를 확인하고 새 번호로 다시 등록하세요.")
+        case .decoder:
+            fail("The native decoder stopped. Create a new invitation to reconnect.")
         default:
             fail(selectedTrustedDevice == nil ? "Connection ended or validation failed. Ask the host for a new invitation." :
-                "등록된 PC의 연결 권한을 확인하지 못했어요. Windows의 등록 기기를 확인하고 새 번호로 다시 등록하세요.")
+                "등록된 PC의 화면 연결 정보를 처리하지 못했어요. 두 기기의 앱 버전과 Windows 공유 상태를 확인하고 ‘내 PC’에서 다시 연결하세요.")
         }
     }
     func review(_ secret: String) {
@@ -510,14 +534,19 @@ final class SessionModel: ObservableObject {
     /// indefinitely extend approval or the first decoded-image deadline.
     func checkDeadlines(now: ContinuousClock.Instant) -> Bool {
         guard active else { return false }
-        let silence: Duration = phase == .approval ? .seconds(65) : .seconds(10)
-        guard now - lastIncoming < silence, phase != .approval || now - connectedAt < .seconds(125) else {
-            if phase == .streaming, selectedTrustedDevice != nil { transportFailed() }
-            else { fail("The peer or host approval timed out. Create a new invitation.") }
-            return false
+        // Startup caps are terminal media/approval policy, independently of
+        // transport silence. Keep the result independent of which timer wins.
+        guard phase != .approval || now - connectedAt < .seconds(125) else {
+            fail("The peer or host approval timed out. Create a new invitation."); return false
         }
         guard phase != .decoding || now - readyAt < .seconds(15) else {
             fail("The first decoded image did not arrive. Create a new invitation."); return false
+        }
+        let silence: Duration = phase == .approval ? .seconds(65) : .seconds(10)
+        guard now - lastIncoming < silence else {
+            if recoveryDevice != nil { transportFailed() }
+            else { fail("The peer or host approval timed out. Create a new invitation.") }
+            return false
         }
         return true
     }
@@ -548,9 +577,11 @@ final class SessionModel: ObservableObject {
         let run = identity
         // This barrier shares the bounded ordered input queue with the accepted
         // left-down and moves. The file socket alone cannot authorize a drag.
-        guard send(Packet(kind: .explorerDrag, payload: nonce)) else { throw NativeFileError.cancelled }
         let hex = NativeFileClient.hex(nonce)
-        let result = try await files.captureExplorer(nonce: hex)
+        let result = try await files.captureExplorer(nonce: hex) {
+            guard run == identity, phase == .streaming, self.files === files,
+                  send(Packet(kind: .explorerDrag, payload: nonce)) else { throw NativeFileError.cancelled }
+        }
         guard run == identity, phase == .streaming, self.files === files, !Task.isCancelled else {
             files.cancelExplorer(nonce: hex); throw NativeFileError.closed
         }
@@ -570,6 +601,12 @@ final class SessionModel: ObservableObject {
             return false
         }
         return send(packet)
+    }
+    /// Menus and presenter keyboard routing share this session-owned boundary.
+    /// Preparation occurs even if local clipboard validation rejects the action.
+    func performClipboardGesture(paste: Bool, clipboard override: ClipboardModel? = nil) {
+        guard let clipboard = override ?? self.clipboard, prepareClipboardGesture() else { return }
+        if paste { clipboard.pasteToRemote() } else { clipboard.copyFromRemote() }
     }
     /// A clipboard gesture may fail before any request reaches the host. Queue
     /// an ordered owned-input release before forgetting local modifier state,
@@ -645,14 +682,15 @@ final class SessionModel: ObservableObject {
     }
     func disconnect() {
         let registered = selectedTrustedDevice != nil
-        reconnectTask?.cancel(); reconnectTask = nil; selectedTrustedDevice = nil; reconnectAttempt = 0
+        reconnectTask?.cancel(); reconnectTask = nil; reconnectAttempt = 0
         close(message: registered ? "연결을 종료했어요. 등록된 PC를 선택하거나 새 번호로 연결하세요." :
             "Disconnected. Reconnect with a fresh invitation.", failed: false)
+        selectedTrustedDevice = nil
     }
     private func fail(_ message: String) { close(message: message, failed: true) }
     private func close(message: String, failed: Bool, numberConnection: Bool? = nil) {
         if let numberConnection { reconnectMethod = numberConnection ? .number : .invitation }
-        else if active { reconnectMethod = numberAuthorized ? .number : .invitation }
+        else if active { reconnectMethod = selectedTrustedDevice != nil ? .registered : numberAuthorized ? .number : .invitation }
         identity = UUID(); inputEpoch &+= 1
         clearAutomaticRecovery()
         trustedTask?.cancel(); trustedTask = nil; trustedClient?.close(); trustedClient = nil

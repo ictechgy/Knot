@@ -47,7 +47,10 @@ private final class FakeAudioOutputSink: NativeAudioOutputSink, @unchecked Senda
     private var completions: [@Sendable () async -> Void] = []
     private var pending: [Int: Int] = [:]
     private var rejectNextSchedule = false
+    private var invalidation: (@Sendable () async -> Void)?
 
+    func setInvalidationHandler(_ handler: @escaping @Sendable () async -> Void) { lock.withLock { invalidation = handler } }
+    func invalidate() async { let handler = lock.withLock { invalidation }; await handler?() }
     func start(muted: Bool) { lock.withLock { state.starts += 1; state.muted = muted } }
     func schedule(_ pcm: NativeAudioPCM, completion: @escaping @Sendable () async -> Void) throws {
         try lock.withLock {
@@ -225,4 +228,25 @@ func audioPlayerShortBurstPlaysAtDeadlineWithoutAnyLaterPCM(frames: Int) async t
     await player.stop()
     await #expect(throws: NativeFailure.state) { try await player.start(muted: false) }
     #expect(fixture.outputCreations == 0 && fixture.clock.delays.isEmpty)
+}
+
+
+private actor InertAudioFailureCounter {
+    var count = 0
+    func failed() { count += 1 }
+}
+@Test func audioOutputConfigurationInvalidationStopsOnlyOwnedGraphAndIgnoresLateCallbacks() async throws {
+    let fixture = AudioPlayerFixture(), player = fixture.makePlayer(), failures = InertAudioFailureCounter()
+    await player.setFailureHandler { await failures.failed() }
+    try await player.start(muted: false)
+    try await player.enqueue(playerPCM(frames: 480))
+    await fixture.output.invalidate()
+    #expect(await failures.count == 1)
+    #expect(fixture.output.snapshot().stops == 1 && fixture.clock.activeCount == 0)
+    await fixture.clock.fire(0)
+    await fixture.output.complete(0)
+    await fixture.output.invalidate()
+    await #expect(throws: NativeFailure.state) { try await player.enqueue(playerPCM(frames: 480)) }
+    #expect(fixture.output.snapshot().plays == 0 && fixture.output.snapshot().stops == 1)
+    #expect(await failures.count == 1)
 }

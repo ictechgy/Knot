@@ -6,6 +6,10 @@ import KnotNativeCore
 /// Reads only the pasteboard delivered by an explicit OS drag, never the clipboard.
 @MainActor
 enum NativeFileDrop {
+    static let tooManyItems = "한 번에 파일 32개까지 보낼 수 있어요."
+    static func exceedsLimit(_ pasteboard: NSPasteboard) -> Bool {
+        (pasteboard.pasteboardItems?.count ?? 0) > 32
+    }
     static func urls(from pasteboard: NSPasteboard) -> [URL]? {
         guard let items = pasteboard.pasteboardItems, !items.isEmpty, items.count <= 32 else { return nil }
         var urls: [URL] = []
@@ -146,7 +150,11 @@ final class NativeFilePanelHost: NSHostingView<NativeFilePanelContent> {
     }
     override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool { !rootView.files.isBusy }
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        guard !rootView.files.isBusy, let urls = NativeFileDrop.urls(from: sender.draggingPasteboard) else { return false }
+        guard !rootView.files.isBusy else { return false }
+        if NativeFileDrop.exceedsLimit(sender.draggingPasteboard) {
+            rootView.files.rejectExcessDrop(); return false
+        }
+        guard let urls = NativeFileDrop.urls(from: sender.draggingPasteboard) else { return false }
         rootView.beforeAction(); rootView.files.send(urls: urls); return true
     }
 }

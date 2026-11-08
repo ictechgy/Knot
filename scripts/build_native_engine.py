@@ -23,7 +23,7 @@ from build_snapshot import source_snapshot, validate_corresponding_source
 from native_updates import build_resource as native_update_resource
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.15"
+VERSION = "0.1.0-native.16"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 
@@ -299,20 +299,43 @@ def validate_wait_measurement(record):
             raise ValueError("Wait evidence must contain consistent measured timer distributions")
 
 
-def validate_four_k_fixture(record, fixture, fps, frames):
-    if (record.get("v") != 1 or record.get("synthetic") is not True or
+def validate_codec_fixture(record, fixture, width, height, fps, frames, bitrate, *, budgets=False):
+    profile = {"width": width, "height": height, "fps": fps, "bitrate": bitrate, "frames": frames}
+    if (type(record.get("v")) is not int or record["v"] != 1 or record.get("synthetic") is not True or
             record.get("captureInvoked") is not False or record.get("hardwareEncoder") is not False or
             record.get("codec") != "h264-annexb" or
-            any(record.get(key) != value for key, value in
-                {"width": 3840, "height": 2160, "fps": fps, "bitrate": 40000000, "frames": frames}.items()) or
-            record.get("parserChecks") is not True or record.get("encoderCapacity") != 2 or
-            type(record.get("peakOutputScratchBytes")) is not int or
+            any(type(record.get(key)) is not int or record[key] != value for key, value in profile.items()) or
+            record.get("parserChecks") is not True or
+            type(record.get("keyframes")) is not int or not (1 if budgets else 2) <= record["keyframes"] <= frames or
+            not fixture.is_file() or fixture.is_symlink() or not fixture.stat().st_size):
+        raise ValueError("Codec evidence must prove its exact fresh software-only synthetic profile")
+    if budgets and (record.get("encoderCapacity") != 2 or type(record.get("peakOutputScratchBytes")) is not int or
             not 0 <= record["peakOutputScratchBytes"] <= 24883200 or
             type(record.get("peakEncoderInFlight")) is not int or
-            not 1 <= record["peakEncoderInFlight"] <= 2 or
-            type(record.get("keyframes")) is not int or not 1 <= record["keyframes"] <= frames or
-            not fixture.is_file() or fixture.is_symlink() or not fixture.stat().st_size):
-        raise ValueError("4K codec evidence must prove its exact fresh software-only synthetic profile")
+            not 1 <= record["peakEncoderInFlight"] <= 2):
+        raise ValueError("Codec evidence exceeds its bounded synthetic encoder budgets")
+
+
+def validate_four_k_fixture(record, fixture, fps, frames):
+    try:
+        validate_codec_fixture(record, fixture, 3840, 2160, fps, frames, 40000000, budgets=True)
+    except ValueError as error:
+        raise ValueError("4K codec evidence must prove its exact fresh software-only synthetic profile") from error
+
+
+def inno_compiler():
+    if "INNO_COMPILER" in os.environ:
+        explicit = os.environ["INNO_COMPILER"]
+        if not explicit or not Path(explicit).is_file():
+            raise ValueError("Explicit INNO_COMPILER is not a compiler file; fix the override instead of falling back")
+        return Path(explicit)
+    candidates = [Path(os.environ[key]) / version / "ISCC.exe"
+                  for key in ["ProgramFiles", "ProgramFiles(x86)"] if os.environ.get(key)
+                  for version in ["Inno Setup 7", "Inno Setup 6"]]
+    compiler = next((path for path in candidates if path.is_file()), None)
+    if compiler is None:
+        raise ValueError("Inno Setup compiler is required for the native experiment installer")
+    return compiler
 
 
 def png_dimensions(data):
@@ -841,8 +864,7 @@ class Builder:
         fixture_record = self.output / "synthetic-codec.json"
         self.run("native-synthetic-codec", [self.output / "KnotNativeMediaSynthetic.exe", "--software", fixture, fixture_record])
         native_record = json.loads(fixture_record.read_text())
-        if native_record.get("hardwareEncoder") is not False or not fixture.is_file() or not fixture.stat().st_size:
-            raise ValueError("Synthetic codec evidence must explicitly identify its software-only fixture")
+        validate_codec_fixture(native_record, fixture, 320, 180, 30, 120, 2000000)
         fixture_4k = self.output / "synthetic-4k.h264"
         fixture_record_4k = self.output / "synthetic-codec-4k.json"
         self.run("native-media-synthetic-4k", [self.output / "KnotNativeMediaSynthetic.exe", "--software-4k",
@@ -917,14 +939,7 @@ class Builder:
         visual_record = self.record_visual_checks(visuals, visual_inputs)
         shutil.copy2(self.input(ROOT / "Assets/Brand/AppIcon.ico"), self.output / "AppIcon.ico")
         shutil.copy2(self.input(ROOT / "LICENSE"), self.output / "LICENSE")
-        candidates = [Path(os.environ[k]) / (version + "/ISCC.exe")
-                      for k in ["ProgramFiles", "ProgramFiles(x86)"]
-                      for version in ["Inno Setup 7", "Inno Setup 6"]]
-        if os.environ.get("INNO_COMPILER"):
-            candidates.insert(0, Path(os.environ["INNO_COMPILER"]))
-        iscc = next((p for p in candidates if p.is_file()), None)
-        if not iscc:
-            raise ValueError("Inno Setup compiler is required for the native experiment installer")
+        iscc = inno_compiler()
         self.run("native-installer", [iscc, "/DNativeOutput=" + str(self.output), "/DNativeVersion=" + VERSION,
                                        "/DNativeNumericVersion=" + NUMERIC_VERSION,
                                        self.input(ROOT / "native-engine/windows/Native.iss")])

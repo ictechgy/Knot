@@ -39,6 +39,15 @@ namespace Knot.NativePreview
             }
             catch (ArgumentException) { rejected = true; }
             Check(rejected);
+            rejected = false;
+            try
+            {
+                using (HostServer server = new HostServer(IPAddress.Parse("192.168.50.123"), 48631,
+                    new FakeMediaFactory(), new FakeInput(), true, null, true, Stopwatch.GetTimestamp,
+                    "Synthetic store boundary", syntheticTrustedDevices: new NativeTrustedDeviceStore(new MemoryTrustStorage()))) { }
+            }
+            catch (ArgumentException) { rejected = true; }
+            Check(rejected);
         }
         private static HostServer RecoveryHost(IMediaFactory media, FakeInput sink, bool saved, Func<long> inputClock = null)
         {
@@ -85,6 +94,14 @@ namespace Knot.NativePreview
                         WaitFor(delegate { return !server.IsActive; });
                         bool transport = ending == NumberConnectionEnd.Disconnect || ending == NumberConnectionEnd.Silence;
                         Check(server.MayResumeRegisteredConnection == (saved && transport));
+                        if (saved && transport)
+                        {
+                            // A clipboard worker can pass Allowed just before
+                            // transport Stop. Its subsequent closed callback is
+                            // cancellation, never a new unsafe-input failure.
+                            Reject(delegate { server.ApplyClipboardShortcut(1); });
+                            Check(server.MayResumeRegisteredConnection);
+                        }
                         media.Continue.Set(); Check(server.WaitStopped(4000));
                         Check(server.MayResumeRegisteredConnection == (saved && transport));
                         Check(media.Closed == 1 && sink.Events.Contains("key:30:up"));

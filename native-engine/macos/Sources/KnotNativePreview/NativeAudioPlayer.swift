@@ -7,6 +7,10 @@ protocol NativeAudioPlaying: Sendable {
     func enqueue(_ pcm: NativeAudioPCM) async throws
     func setMuted(_ muted: Bool) async
     func stop() async
+    func setFailureHandler(_ handler: @escaping @Sendable () async -> Void) async
+}
+extension NativeAudioPlaying {
+    func setFailureHandler(_ handler: @escaping @Sendable () async -> Void) async {}
 }
 
 /// Frame accounting is independent of AVAudioEngine, so overflow, mute and
@@ -44,11 +48,15 @@ struct NativeAudioQueue: Sendable {
 protocol NativeAudioOutputSink: AnyObject {
     func start(muted: Bool) throws
     func schedule(_ pcm: NativeAudioPCM, completion: @escaping @Sendable () async -> Void) throws
-    func play()
+    func play() throws
     func pause()
     func flush()
     func setMuted(_ muted: Bool)
     func stop()
+    func setInvalidationHandler(_ handler: @escaping @Sendable () async -> Void)
+}
+extension NativeAudioOutputSink {
+    func setInvalidationHandler(_ handler: @escaping @Sendable () async -> Void) {}
 }
 
 protocol NativeAudioPrebufferClock: Sendable {
@@ -69,10 +77,20 @@ private struct NativeAudioSystemPrebufferClock: NativeAudioPrebufferClock {
     }
 }
 
+private final class NativeAudioEngineNotification: @unchecked Sendable {
+    let center: NotificationCenter
+    let token: NSObjectProtocol
+    init(center: NotificationCenter, token: NSObjectProtocol) { self.center = center; self.token = token }
+    deinit { center.removeObserver(token) }
+}
+
 private final class NativeAVAudioOutputSink: NativeAudioOutputSink {
     private var engine: AVAudioEngine?
     private var node: AVAudioPlayerNode?
     private var format: AVAudioFormat?
+    private var configurationChange: NativeAudioEngineNotification?
+    private var invalidated: (@Sendable () async -> Void)?
+    func setInvalidationHandler(_ handler: @escaping @Sendable () async -> Void) { invalidated = handler }
 
     func start(muted: Bool) throws {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(NativeAudioWire.sampleRate), channels: 2) else { throw NativeFailure.unsupported }
@@ -84,10 +102,19 @@ private final class NativeAVAudioOutputSink: NativeAudioOutputSink {
         do { try engine.start() }
         catch { engine.stop(); throw NativeFailure.transport }
         self.format = format; self.node = node; self.engine = engine
+        if let invalidated {
+            let center = NotificationCenter.default
+            let token = center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { _ in
+                // AVFAudio owns this notification queue. Never tear the graph
+                // down synchronously here; marshal to the player's actor.
+                Task { await invalidated() }
+            }
+            configurationChange = NativeAudioEngineNotification(center: center, token: token)
+        }
     }
 
     func schedule(_ pcm: NativeAudioPCM, completion: @escaping @Sendable () async -> Void) throws {
-        guard let node, let format,
+        guard engine?.isRunning == true, let node, let format,
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.frames)),
               let channels = buffer.floatChannelData else { throw NativeFailure.state }
         buffer.frameLength = AVAudioFrameCount(pcm.frames)
@@ -100,11 +127,12 @@ private final class NativeAVAudioOutputSink: NativeAudioOutputSink {
         }
     }
 
-    func play() { node?.play() }
+    func play() throws { guard engine?.isRunning == true else { throw NativeFailure.state }; node?.play() }
     func pause() { node?.pause() }
     func flush() { node?.stop() }
     func setMuted(_ muted: Bool) { node?.volume = muted ? 0 : 1 }
     func stop() {
+        configurationChange = nil
         node?.stop(); engine?.stop()
         node = nil; engine = nil; format = nil
     }
@@ -122,6 +150,8 @@ actor NativeAudioPlayer: NativeAudioPlaying {
     private var stopped = false
     private var prebufferID: UUID?
     private var cancelPrebuffer: (@Sendable () -> Void)?
+    private var outputID = UUID()
+    private var failureHandler: (@Sendable () async -> Void)?
 
     init(makeOutput: @escaping @Sendable () -> any NativeAudioOutputSink = { NativeAVAudioOutputSink() },
          prebufferClock: any NativeAudioPrebufferClock = NativeAudioSystemPrebufferClock()) {
@@ -130,10 +160,21 @@ actor NativeAudioPlayer: NativeAudioPlaying {
 
     func start(muted: Bool) throws {
         guard output == nil, !stopped else { throw NativeFailure.state }
-        let output = makeOutput()
+        let output = makeOutput(), id = UUID()
+        outputID = id
+        output.setInvalidationHandler { [weak self] in await self?.outputInvalidated(id: id) }
         do { try output.start(muted: muted) }
         catch { output.stop(); throw error }
         self.output = output
+    }
+
+    func setFailureHandler(_ handler: @escaping @Sendable () async -> Void) async { failureHandler = handler }
+
+    private func outputInvalidated(id: UUID) async {
+        guard !stopped, id == outputID, output != nil else { return }
+        let handler = failureHandler
+        stop()
+        await handler?()
     }
 
     func enqueue(_ pcm: NativeAudioPCM) throws {
@@ -150,7 +191,9 @@ actor NativeAudioPlayer: NativeAudioPlaying {
         }
         guard !playing else { return }
         if queue.queuedFrames >= NativeAudioQueue.prebufferFrames {
-            cancelPrebufferWait(); output.play(); playing = true
+            cancelPrebufferWait()
+            do { try output.play(); playing = true }
+            catch { queue.flush(); output.flush(); playing = false; throw error }
         } else if prebufferID == nil {
             // The protocol permits a final short PCM burst followed only by
             // heartbeats. Its first frame must not wait for another packet.
@@ -162,10 +205,12 @@ actor NativeAudioPlayer: NativeAudioPlaying {
         }
     }
 
-    private func prebufferExpired(id: UUID, generation: UUID) {
+    private func prebufferExpired(id: UUID, generation: UUID) async {
         guard !stopped, prebufferID == id, generation == queue.generation,
               !playing, queue.queuedFrames > 0, let output else { return }
-        cancelPrebufferWait(); output.play(); playing = true
+        cancelPrebufferWait()
+        do { try output.play(); playing = true }
+        catch { await outputInvalidated(id: outputID) }
     }
 
     private func cancelPrebufferWait() {
@@ -189,7 +234,7 @@ actor NativeAudioPlayer: NativeAudioPlaying {
 
     func stop() {
         guard !stopped else { return }
-        stopped = true; queue.flush(); playing = false; cancelPrebufferWait()
+        stopped = true; outputID = UUID(); failureHandler = nil; queue.flush(); playing = false; cancelPrebufferWait()
         output?.stop(); output = nil
     }
 }

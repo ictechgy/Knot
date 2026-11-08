@@ -251,12 +251,11 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
     override func keyDown(with event: NSEvent) {
         let flags = Self.modifiers(event.modifierFlags)
         if acceptsInput, model?.macShortcuts == true, flags == .command,
-           heldButtons.isEmpty, let clipboard = model?.clipboard,
+           heldButtons.isEmpty, model?.clipboard != nil,
            event.keyCode == 8 || event.keyCode == 9 {
             // Release remotely even when an empty/invalid clipboard or failed
             // enqueue prevents the host clipboard helper from ever running.
-            guard model?.prepareClipboardGesture() == true else { return }
-            if event.keyCode == 8 { clipboard.copyFromRemote() } else { clipboard.pasteToRemote() }
+            model?.performClipboardGesture(paste: event.keyCode == 9)
             return
         }
         let route = MacKeyboardRouting.route(keyCode: event.keyCode, modifiers: Self.modifiers(event.modifierFlags),

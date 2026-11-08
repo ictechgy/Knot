@@ -16,7 +16,24 @@ namespace Knot.NativePreview
             if (NativeUpdateHandoff.TryRun(args)) return;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new PreviewForm());
+            // One owner presents/manages this user's shared host and trust store.
+            // This lease does not open the store and never terminates another app.
+            try
+            {
+                using (IDisposable owner = PersistentCertificateLease.TryAcquireHostOwner(NativeTrustedDevices.DirectoryPath))
+                {
+                    if (owner == null)
+                    {
+                        MessageBox.Show("Knot이 이미 실행 중이에요. 열려 있는 Knot에서 연결과 등록 기기를 관리해주세요.", "Knot");
+                        return;
+                    }
+                    Application.Run(new PreviewForm());
+                }
+            }
+            catch (System.Security.Cryptography.CryptographicException)
+            { MessageBox.Show("Knot 실행 권한을 확인하지 못했어요. 실행 중인 Knot을 확인하고 다시 시도해주세요.", "Knot"); }
+            catch (UnauthorizedAccessException)
+            { MessageBox.Show("Knot 실행 권한에 접근하지 못했어요. Windows 사용자 계정과 실행 중인 Knot을 확인해주세요.", "Knot"); }
         }
     }
 
@@ -24,7 +41,7 @@ namespace Knot.NativePreview
     {
         private NativeUpdates updates;
         private bool shareRequested;
-        private bool certificateCompatibilityRequired;
+        private bool certificateCompatibilityRequired, certificateRenewalRequired;
         private Label updateNotice;
         private PreviewButton updateAction;
         private readonly float scale;
@@ -258,6 +275,7 @@ namespace Knot.NativePreview
             SizeChanged += delegate { ApplyResponsiveLayout(); UpdateWrapWidths(); };
             Shown += delegate
             {
+                UpdateUpdaterPresentation();
                 TraceFixture("shown-enter");
                 // Complete native Show/activation before changing the hierarchy.
                 // Exactly one deferred pass; layout outputs never enqueue more.
@@ -277,12 +295,16 @@ namespace Knot.NativePreview
                 if (server == null) return;
                 HostViewPhase before = phase;
                 if (presentation.IsCurrent(server.Identity) && server.IsActive) phase = HostViewPhase.Sharing;
+                else if (server.WaitingForRegisteredDevice) { phase = HostViewPhase.RegisteredWaiting; invitationAvailable = false; rawStatus = EnrollmentGuidance.RegisteredWaiting; }
+                else if (phase == HostViewPhase.RegisteredWaiting && server.EnrollmentReady) phase = HostViewPhase.Preparing;
+                else if (phase == HostViewPhase.Preparing && server.UsesEnrollment && !server.EnrollmentReady)
+                { phase = HostViewPhase.Invitation; invitationAvailable = true; rawStatus = EnrollmentGuidance.Ready; }
                 else if (phase == HostViewPhase.Sharing) phase = HostViewPhase.Stopping;
                 if (before != phase) ApplyCurrentPresentation();
             };
             if (!fixtureMode) {
                 BindActions(); qualityProfiles.SelectedIndex = NativePreferences.Quality;
-                try { certificateCompatibilityRequired = RunCertificate.RequiresCompatibilityMigration(); }
+                try { certificateRenewalRequired = RunCertificate.RequiresRenewal(); if (!certificateRenewalRequired) certificateCompatibilityRequired = RunCertificate.RequiresCompatibilityMigration(); }
                 catch { /* StartShare reports a stored-identity failure without replacing it. */ }
                 qualityProfiles.SelectedIndexChanged += delegate { NativePreferences.Quality = qualityProfiles.SelectedIndex; };
                 updates = new NativeUpdates(); updates.Changed += delegate { OnUi(UpdateUpdaterPresentation); };
@@ -572,8 +594,7 @@ namespace Knot.NativePreview
         private void ApplyPresentation(HostViewSnapshot view)
         {
             bool idle = view.Phase == HostViewPhase.Idle || view.Phase == HostViewPhase.Stopped || view.Phase == HostViewPhase.Failed;
-            privacy.Text = allowFiles.Checked ? "화면·입력, 표시한 공유 폴더와 직접 끈 탐색기 항목을 허용해요. Mac에서 ‘내 PC로 등록’을 선택하면 이후 번호 없이 접속할 수 있어요. 연결 안내에서 등록을 해제할 수 있어요." :
-                view.EnrollmentMode ? "번호를 아는 Mac과 등록된 Mac의 화면·입력을 허용해요. Mac에서 ‘내 PC로 등록’을 선택하면 이후 번호 없이 접속해요. 연결 안내에서 등록을 해제할 수 있어요." : "허용한 연결에서만 화면과 입력을 공유해요. 중지하면 이번 연결 권한을 종료해요.";
+            privacy.Text = PreviewCopy.Privacy(view.EnrollmentMode, allowFiles.Checked);
             if (allowAudio.Checked) privacy.Text += " Windows 재생 소리도 포함해요. 마이크는 공유하지 않아요.";
             badge.Text = "●  " + PreviewCopy.Phase(view.Phase);
             badge.ForeColor = view.Phase == HostViewPhase.Failed ? PreviewStyle.Warning : PreviewStyle.Muted;
@@ -595,6 +616,12 @@ namespace Knot.NativePreview
                     stateDescription.Text = PreviewCopy.NumberInstruction;
                 }
             }
+            if (view.Phase == HostViewPhase.RegisteredWaiting)
+            {
+                stateStep.Text = "등록된 Mac 연결 대기";
+                stateTitle.Text = "등록된 Mac의 재연결을 기다려요";
+                stateDescription.Text = "일회용 번호는 끝났지만 등록한 Mac은 ‘내 PC’에서 연결할 수 있어요. 새 Mac을 등록하려면 공유를 중지한 뒤 다시 시작해주세요.";
+            }
             SetViewVisible(requestPanel, view.ViewerLabel.Length > 0 && (view.Phase == HostViewPhase.Request || view.Phase == HostViewPhase.Preparing || view.Phase == HostViewPhase.Sharing));
             requestName.Text = view.ViewerLabel + "  ·  확인되지 않은 이름";
             requestAddress.Text = "연결 주소  " + view.ObservedAddress;
@@ -610,8 +637,13 @@ namespace Knot.NativePreview
             SetViewVisible(hostIdentity, numberReady); SetViewVisible(numberLifetime, numberReady);
             SetViewVisible(share, idle); share.Enabled = idle && view.HasAddress && !view.RunPresent;
             bool certificateConversion = idle && !view.RunPresent && !legacyMode.Checked && certificateCompatibilityRequired;
-            share.Text = certificateConversion ? PreviewCopy.CertificateConversionAction : "화면 공유 시작";
-            if (certificateConversion) {
+            bool certificateRenewal = idle && !view.RunPresent && !legacyMode.Checked && certificateRenewalRequired;
+            share.Text = certificateRenewal ? PreviewCopy.CertificateRenewalAction : certificateConversion ? PreviewCopy.CertificateConversionAction : "화면 공유 시작";
+            if (certificateRenewal) {
+                stateTitle.Text = PreviewCopy.CertificateRenewalTitle;
+                stateDescription.Text = PreviewCopy.CertificateRenewalDisclosure;
+            }
+            else if (certificateConversion) {
                 stateTitle.Text = PreviewCopy.CertificateConversionTitle;
                 stateDescription.Text = PreviewCopy.CertificateConversionDisclosure;
             }
@@ -808,7 +840,17 @@ namespace Knot.NativePreview
         private void StartShareFromButton()
         {
             if (closing || server != null) return;
-            if (certificateCompatibilityRequired && !legacyMode.Checked) {
+            if (certificateRenewalRequired && !legacyMode.Checked) {
+                try {
+                    RunCertificate.RenewExpiredPersistent();
+                    certificateRenewalRequired = false; certificateCompatibilityRequired = false;
+                }
+                catch {
+                    FailShareStart("만료 인증서 갱신을 완료하지 못해 공유를 시작하지 않았어요. 등록 초기화가 진행됐을 수 있으므로, 갱신 후 Mac에서 이전 PC를 지우고 새 번호로 다시 등록해주세요.");
+                    return;
+                }
+            }
+            else if (certificateCompatibilityRequired && !legacyMode.Checked) {
                 try {
                     RunCertificate.ConvertPersistentForCompatibility();
                     certificateCompatibilityRequired = false;
@@ -866,7 +908,8 @@ namespace Knot.NativePreview
                         if (server != run || !presentation.IsCurrent(run.Identity)) return;
                         rawStatus = text;
                         if (run.IsActive) phase = HostViewPhase.Sharing;
-                        else if (phase == HostViewPhase.Invitation && run.EnrollmentReady) phase = HostViewPhase.Preparing;
+                        else if (run.WaitingForRegisteredDevice) phase = HostViewPhase.RegisteredWaiting;
+                        else if (run.EnrollmentReady && (phase == HostViewPhase.Invitation || phase == HostViewPhase.RegisteredWaiting)) phase = HostViewPhase.Preparing;
                         ApplyCurrentPresentation();
                     });
                 };
@@ -900,6 +943,11 @@ namespace Knot.NativePreview
                 };
                 rawStatus = run.UsesEnrollment ? EnrollmentGuidance.Ready : "Mac에서 연결 코드를 입력한 뒤, 이 PC에서 요청을 허용해주세요.";
                 ShowHelp(false); ApplyCurrentPresentation(); lifecycleTimer.Start(); run.Start();
+            }
+            catch (CertificateRenewalRequiredException)
+            {
+                certificateRenewalRequired = true;
+                FailShareStart("저장된 공유 인증서가 만료됐어요. ‘만료 인증서 갱신하고 공유’를 누르면 이전 Mac 등록을 해제하고 새 인증서를 만들어요. Mac에서도 이전 PC를 지우고 새 번호로 등록해주세요.");
             }
             catch (CertificateCompatibilityException)
             {
@@ -949,10 +997,10 @@ namespace Knot.NativePreview
             updateAction.Text = updates.Available ? "업데이트하고 다시 열기" : "업데이트 확인";
             updateAction.Enabled = updates.Configured && !updates.Busy;
         }
-        private void InstallUpdate()
+        private async void InstallUpdate()
         {
             if (updates == null) return;
-            updates.Install(delegate {
+            await updates.InstallAsync(delegate {
                 NativePreferences.ClearUpdateResume();
                 AdapterChoice selected = addresses.SelectedItem as AdapterChoice;
                 if (NativePreferences.ShouldRequestUpdateResume(shareRequested, server != null,
@@ -972,7 +1020,13 @@ namespace Knot.NativePreview
                     ListBox list = new ListBox { Dock = DockStyle.Fill }; List<string> ids = new List<string>();
                     foreach (var item in devices) { ids.Add(item.Key); list.Items.Add(item.Value); }
                     Button remove = new Button { Text = "선택한 Mac 등록 해제", Dock = DockStyle.Bottom, Height = P(40) };
-                    remove.Click += delegate { int selected = list.SelectedIndex; if (selected < 0) return; NativeTrustedDevices.Revoke(ids[selected]); StopShare(); ids.RemoveAt(selected); list.Items.RemoveAt(selected); };
+                    remove.Click += delegate {
+                        int selected = list.SelectedIndex; if (selected < 0) return;
+                        // Owner intent revokes current capabilities even if the
+                        // persistent deletion fails. Keep the row on failure.
+                        try { StopShare(); NativeTrustedDevices.Revoke(ids[selected]); ids.RemoveAt(selected); list.Items.RemoveAt(selected); }
+                        catch { MessageBox.Show(dialog, "공유를 중지했지만 등록 기기를 변경하지 못했어요. 저장소 접근을 확인하고 다시 시도해주세요.", "내 기기"); }
+                    };
                     dialog.Controls.Add(list); dialog.Controls.Add(remove); dialog.ShowDialog(this);
                 }
             } catch { MessageBox.Show(this, "등록 기기를 읽거나 변경하지 못했어요.", "내 기기"); }

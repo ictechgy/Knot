@@ -93,7 +93,7 @@ struct TrustedReconnectTests {
             #expect(await waitForTrustedState { attempts.count == 1 && model.phase == .failed })
             #expect(!model.hasPendingReconnect)
             #expect(model.reconnectAttemptCount == 0)
-            #expect(model.status.contains("새 번호로 다시 등록"))
+            #expect(failure == .trust ? model.status.contains("새 번호로 다시 등록") : !model.status.contains("새 번호로 다시 등록"))
             model.disconnect()
         }
     }
@@ -164,4 +164,102 @@ struct TrustedReconnectTests {
         #expect(TLSChannel.startFailure(.tls(-9807), verificationFailure: .certificatePolicy) == .certificatePolicy)
         #expect(TLSChannel.startFailure(.posix(.ECONNREFUSED)) == .transport)
     }
+}
+
+
+@MainActor private final class InertUpdateResume {
+    var writes: [(String?, TimeInterval)] = []
+    var value: (String, TimeInterval)?
+    func write(_ id: String?, _ expiry: TimeInterval) { writes.append((id, expiry)); value = id.map { ($0, expiry) } }
+    func take() -> (String, TimeInterval)? { defer { value = nil }; return value }
+}
+
+@Test @MainActor func registeredStartupSilenceUsesSameRecoveryAsTransportButCapsStayTerminal() async throws {
+    let device = try inertSavedDevice()
+    for phase in [SessionModel.Phase.connecting, .approval, .decoding] {
+        let gate = InertRetryWait()
+        let model = SessionModel(waitForReconnect: { try await gate.wait($0) }, initialSavedDevices: [device], initialRegisteredDevice: device)
+        model.phase = phase
+        let silence = phase == .approval ? 66 : 11
+        #expect(!model.checkDeadlines(now: .now + .seconds(silence)))
+        #expect(model.hasPendingReconnect && model.reconnectAttemptCount == 1)
+        #expect(await waitForTrustedState { gate.waiting })
+        model.disconnect(); gate.advance()
+    }
+    for (phase, age) in [(SessionModel.Phase.approval, 126), (.decoding, 16)] {
+        let model = SessionModel(waitForReconnect: { _ in Issue.record("Startup cap must remain terminal") }, initialSavedDevices: [device], initialRegisteredDevice: device)
+        model.phase = phase
+        #expect(!model.checkDeadlines(now: .now + .seconds(age)))
+        #expect(!model.hasPendingReconnect && model.reconnectAttemptCount == 0)
+        #expect(!NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod).contains("8자리"))
+    }
+}
+
+@Test @MainActor func registeredMediaErrorsKeepCredentialsAndNeverRequestReregistration() async throws {
+    let device = try inertSavedDevice(), invitation = try inertInvitation()
+    for failure in [NativeFailure.decoder, .malformed, .oversized, .state, .unsupported] {
+        let model = SessionModel(makeChannel: { _ in throw failure }, makeTrustedClient: { _, _ in SuccessfulTrustedClient(invitation) },
+            waitForReconnect: { _ in Issue.record("Protocol/media errors remain terminal") }, initialSavedDevices: [device])
+        model.connectSaved(device.id)
+        #expect(await waitForTrustedState { model.phase == .failed })
+        #expect(model.savedDevices == [device] && !model.hasPendingReconnect)
+        let copy = NativeCopy.status(model.status, reconnectMethod: model.reconnectMethod)
+        #expect(model.reconnectMethod == .registered && !copy.contains("8자리") && !copy.contains("다시 등록"))
+        #expect(copy.contains("내 PC"))
+        model.disconnect()
+    }
+}
+
+@Test @MainActor func updateResumeRequiresLiveRecoveryIntentAndUsesOnlyInjectedStore() async throws {
+    let device = try inertSavedDevice()
+    for live in [false, true] {
+        let store = InertUpdateResume()
+        let model = SessionModel(initialSavedDevices: [device], initialRegisteredDevice: device,
+            writeUpdateResume: { store.write($0, $1) }, takeUpdateResume: { store.take() })
+        model.phase = live ? .streaming : .failed
+        model.prepareForUpdate()
+        #expect(store.writes.count == 1)
+        #expect(store.writes[0].0 == (live ? device.id : nil))
+        #expect(!model.hasPendingReconnect && model.phase == .idle)
+    }
+    let store = InertUpdateResume(), attempts = TrustedAttemptRecorder()
+    store.value = (device.id, Date().addingTimeInterval(60).timeIntervalSince1970)
+    let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.trust, attempts) }, initialSavedDevices: [device],
+        writeUpdateResume: { store.write($0, $1) }, takeUpdateResume: { store.take() })
+    model.resumeAfterUpdateIfRequested()
+    #expect(await waitForTrustedState { attempts.count == 1 && model.phase == .failed })
+    model.resumeAfterUpdateIfRequested()
+    #expect(store.value == nil && attempts.count == 1)
+}
+
+@Test @MainActor func savedConnectValidatesLabelBeforeCreatingAnyAdapterAndRefreshUsesInjection() throws {
+    let device = try inertSavedDevice(), attempts = TrustedAttemptRecorder()
+    let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.trust, attempts) }, loadSavedDevices: { [device] })
+    model.refreshSavedDevices()
+    #expect(model.savedDevices == [device])
+    model.viewerLabel = ""
+    model.connectSaved(device.id)
+    #expect(model.phase == .failed && attempts.count == 0 && !model.hasPendingReconnect)
+    #expect(model.status == "Choose a viewer label of 1–64 UTF-8 bytes without control characters.")
+}
+
+
+@Test @MainActor func updaterRestoresPendingRecoveryButNeverExhaustedRetrySelection() async throws {
+    let device = try inertSavedDevice(), pending = InertRetryWait(), activeStore = InertUpdateResume()
+    let attempts = TrustedAttemptRecorder()
+    let waiting = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
+        waitForReconnect: { try await pending.wait($0) }, initialSavedDevices: [device],
+        writeUpdateResume: { activeStore.write($0, $1) }, takeUpdateResume: { activeStore.take() })
+    waiting.connectSaved(device.id)
+    #expect(await waitForTrustedState { pending.waiting })
+    waiting.prepareForUpdate(); pending.advance()
+    #expect(activeStore.value?.0 == device.id && !waiting.hasPendingReconnect)
+    let exhaustedStore = InertUpdateResume(), exhaustedAttempts = TrustedAttemptRecorder()
+    let exhausted = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, exhaustedAttempts) },
+        waitForReconnect: { _ in await Task.yield() }, initialSavedDevices: [device],
+        writeUpdateResume: { exhaustedStore.write($0, $1) }, takeUpdateResume: { exhaustedStore.take() })
+    exhausted.connectSaved(device.id)
+    #expect(await waitForTrustedState { exhaustedAttempts.count == 7 && exhausted.phase == .failed && !exhausted.hasPendingReconnect })
+    exhausted.prepareForUpdate()
+    #expect(exhaustedStore.writes.count == 1 && exhaustedStore.value == nil)
 }

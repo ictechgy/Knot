@@ -368,3 +368,23 @@ private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecke
     model.select(candidate.id)
     #expect(model.selected == candidate && model.code.isEmpty)
 }
+
+
+@Test @MainActor func provisioningInterruptedBySleepDoesNotKeepSuccessGuidanceOrLateGrant() async throws {
+    let candidate = try testCandidate(), delayed = DelayedEnrollment()
+    let result = AuthenticatedEnrollment(offer: try EnrollmentOffer(testOffer(candidate), candidate: candidate),
+        viewerName: "Fixture Mac", expiresAt: .now + .seconds(30))
+    let model = EnrollmentModel(makeClient: { _, _ in delayed }, initialCandidates: [candidate])
+    var authorized = 0
+    model.select(candidate.id); model.code = "12345678"
+    let operation = try #require(model.connect(name: "Fixture Mac") { _ in authorized += 1 })
+    defer { delayed.finish(result) }
+    let deadline = ContinuousClock.now + .seconds(1)
+    while !delayed.started, ContinuousClock.now < deadline { await Task.yield() }
+    try #require(delayed.started)
+    model.interruptForSleep()
+    delayed.finish(result); await operation.value
+    #expect(authorized == 0 && model.phase == .failed && model.code.isEmpty)
+    #expect(model.status.contains("중단") && model.status.contains("새 8자리"))
+    #expect(!model.status.contains("화면 연결을 준비해요"))
+}

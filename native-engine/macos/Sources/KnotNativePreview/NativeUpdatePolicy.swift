@@ -77,7 +77,7 @@ struct NativeUpdateManifest: Sendable {
               a[6].count == 64, a[6].utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
               let expiry = Int64(a[7]), String(expiry) == a[7] else { throw NativeUpdateError.invalid }
         let url = try https(a[4]), suffix = platform == "macos-arm64" ? "-macos-arm64.zip" : "-windows-x64-setup.exe"
-        guard url.lastPathComponent == "Knot-Native-\(a[1])\(suffix)" else { throw NativeUpdateError.invalid }
+        guard a[4].split(separator: "/", omittingEmptySubsequences: false).last == "Knot-Native-\(a[1])\(suffix)" else { throw NativeUpdateError.invalid }
         guard expiry > now, expiry - now <= 30 * 86400 else { throw NativeUpdateError.expired }
         guard build > (try versionBuild(currentVersion)), build >= minimumBuild else { throw NativeUpdateError.downgrade }
         return Self(version: a[1], build: build, platform: platform, url: url, bytes: size, sha256: a[6], expires: expiry)

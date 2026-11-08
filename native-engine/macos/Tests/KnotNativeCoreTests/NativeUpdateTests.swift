@@ -42,6 +42,15 @@ final class NativeUpdateTests: XCTestCase {
             XCTAssertThrowsError(try NativeUpdateManifest.verify(data, publicKey: publicKey, currentVersion: "0.1.0-native.10", platform: "macos-arm64", now: 100))
         }
     }
+    func testSignedArtifactBasenameMustMatchPublisherRawBytes() throws {
+        let privateKey = try key(), publicKey = try XCTUnwrap(SecKeyCopyPublicKey(privateKey))
+        let expected = "Knot-Native-0.1.0-native.11-macos-arm64.zip"
+        for name in ["x" + expected, "%4b" + expected.dropFirst(), expected + "/", expected + "/extra"] {
+            let invalid = try body().replacingOccurrences(of: expected, with: name)
+            XCTAssertThrowsError(try NativeUpdateManifest.verify(envelope(invalid, key: privateKey), publicKey: publicKey,
+                currentVersion: "0.1.0-native.10", platform: "macos-arm64", now: 100))
+        }
+    }
     func testArtifactDigestAndExactLength() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("knot-update-fixture-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false); defer { try? FileManager.default.removeItem(at: root) }

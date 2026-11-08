@@ -12,6 +12,7 @@ namespace Knot.NativePreview
     }
     internal static class EnrollmentGuidance
     {
+        internal const string RegisteredWaiting = "일회용 번호는 끝났어요. 등록된 Mac은 ‘내 PC’에서 연결할 수 있어요. 새 Mac은 공유를 중지한 뒤 다시 시작해 등록해주세요.";
         internal const string Ready = "Mac: 주변 PC 찾기 → 이 PC 선택 → 8자리 번호 입력. 표시한 공유 범위가 허용되며 추가 승인은 없어요.";
         internal static EnrollmentFailure Classify(ProtocolException error)
         {

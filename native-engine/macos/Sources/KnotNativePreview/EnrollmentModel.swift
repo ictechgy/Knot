@@ -122,6 +122,12 @@ final class EnrollmentModel: ObservableObject {
         status = candidates.isEmpty ? "Windows에서 공유를 시작한 뒤 PC를 찾아주세요." :
             "목록에서 연결할 Windows PC를 선택해주세요. 다음 화면에서 8자리 번호를 입력해요."
     }
+    /// A consumed number must not leave successful preparation copy when sleep
+    /// or a newer session prevents the completion from being used.
+    func interruptForSleep() {
+        invalidateOperation(); phase = .failed
+        status = "연결 준비가 중단됐어요. Mac이 깨어난 뒤 Windows의 새 8자리 번호로 다시 연결하세요."
+    }
     func cancel() {
         invalidateOperation(); candidates = []; selectedID = nil; hasSearched = false
         phase = .idle; status = "Windows에서 공유를 시작한 뒤 PC를 찾아주세요."

@@ -26,6 +26,11 @@ struct NativeFileUITests {
         }
         pasteboard.writeObjects(tooMany)
         #expect(NativeFileDrop.urls(from: pasteboard) == nil)
+        #expect(NativeFileDrop.exceedsLimit(pasteboard))
+        let files = FileTransferModel(rootName: "Synthetic")
+        files.rejectExcessDrop()
+        #expect(files.status == NativeFileDrop.tooManyItems)
+        #expect(files.fixtureOperationAttempts == 0)
     }
 
     @Test func nativePromisesRetainDelegatesWithBoundedCapacityWithoutStartingWork() throws {

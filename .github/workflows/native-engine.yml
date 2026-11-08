@@ -12,6 +12,21 @@ on:
     paths:
       - 'native-engine/**'
       - 'scripts/build_native_engine.py'
+      - 'scripts/native_updates.py'
+      - 'scripts/tests/test_native_updates.py'
+      - 'packaging/updates/native-publisher.json'
+      - '.gitattributes'
+      - 'scripts/tests/test_source_checkout.py'
+      - 'scripts/test_windows_updates.py'
+      - 'scripts/test_windows_launcher.py'
+      - 'scripts/test_reverse_client.py'
+      - 'scripts/reverse_client.py'
+      - 'scripts/reverse_qr.py'
+      - 'scripts/update_runtime.py'
+      - 'scripts/update_version.py'
+      - 'scripts/update_windows.py'
+      - 'scripts/windows_check_record.py'
+      - 'scripts/windows_resources.py'
       - 'scripts/render_native_visual_fixture.py'
       - 'scripts/verify_native_installer.ps1'
       - 'scripts/build_snapshot.py'
@@ -39,6 +54,7 @@ jobs:
       - run: python3 scripts/check_source_checkout.py
       - run: python3 -B -m unittest discover -s scripts/tests -p test_build_snapshot.py
       - run: python3 -B -m unittest discover -s scripts/tests -p test_build_native_engine.py
+      - run: python3 -B -m unittest discover -s scripts/tests -p test_native_updates.py
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
         with:
           name: native-windows-preview
@@ -101,6 +117,7 @@ jobs:
           persist-credentials: false
       - run: python scripts/check_source_checkout.py
       - run: python -B -m unittest discover -s scripts/tests -p test_build_native_engine.py
+      - run: python -B -m unittest discover -s scripts/tests -p test_native_updates.py
       - name: Install pinned Inno Setup compiler on the disposable build runner
         if: github.event_name != 'workflow_dispatch' || !inputs.media_only
         shell: powershell

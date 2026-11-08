@@ -34,6 +34,7 @@ namespace Knot.NativePreview
             try
             {
                 if (args.Length == 3 && args[0] == "--certificate-lease-probe") return CertificateLeaseProbe(args[1], args[2]);
+                if (args.Length == 4 && args[0] == "--trust-store-probe") return TrustStoreProbe(args[1], args[2], args[3]);
                 for (int i = 0; i < args.Length; i += 2)
                 {
                     if (i + 1 >= args.Length) throw new ArgumentException("Unsupported synthetic check arguments.");
