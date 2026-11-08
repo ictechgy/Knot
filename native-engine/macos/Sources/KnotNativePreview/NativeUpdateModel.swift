@@ -24,10 +24,13 @@ final class NativePreparedUpdate: @unchecked Sendable {
         self.process = process; self.output = output; self.input = input; self.stage = stage; self.nonce = nonce
     }
     func commit() throws { try input.fileHandleForWriting.write(contentsOf: NativeUpdateAcknowledgement.commit(nonce)) }
+    private static let cancellationQueue = DispatchQueue(label: "org.knot.native-update.cancel", qos: .utility, attributes: .concurrent)
     func cancel() async -> Bool {
-        // The caller is often already cancelled. Shutdown has its own lifetime;
-        // cancellation must not collapse the TERM grace/exit-confirmation waits.
-        await Task.detached(priority: .utility) { self.cancelSynchronously() }.value
+        // A dedicated blocking queue preserves shutdown even when the caller is
+        // cancelled, without parking a Swift cooperative-pool thread for grace.
+        await withCheckedContinuation { continuation in
+            Self.cancellationQueue.async { continuation.resume(returning: self.cancelSynchronously()) }
+        }
     }
     private func cancelSynchronously() -> Bool {
         try? Data(nonce.utf8).write(to: stage.appendingPathComponent("cancel-" + nonce), options: .withoutOverwriting)
@@ -255,6 +258,15 @@ struct NativeUpdateInstallation: Sendable {
     }
 }
 
+enum NativeUpdateRecoveryGate {
+    /// Used by the helper catch itself; TERM/CANCEL is checked again after a
+    /// potentially slow canonical verification, immediately before reopening.
+    static func reopen(isRevoked: () -> Bool, validateCanonical: () -> Bool, relaunch: () -> Void) -> Bool {
+        guard !isRevoked(), validateCanonical(), !isRevoked() else { return false }
+        relaunch(); return true
+    }
+}
+
 /// Helper-only cooperative TERM handling and exact command-child supervision.
 /// No PID scans or process-name kills. Lack of a drain proof suppresses cleanup.
 final class NativeUpdateHelperContext: @unchecked Sendable {
@@ -269,17 +281,20 @@ final class NativeUpdateHelperContext: @unchecked Sendable {
             signal(SIGTERM, SIG_IGN); signal(SIGPIPE, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .utility))
             source.setEventHandler { [weak self] in
-                guard let self else { return }; self.lock.lock(); self.terminated = true; self.lock.unlock()
+                self?.requestTermination()
             }
             source.resume(); self.source = source
         }
         try Data(nonce.utf8).write(to: stage.appendingPathComponent("started-" + nonce), options: .withoutOverwriting)
     }
     deinit { source?.cancel() }
-    func check() throws {
+    func requestTermination() { lock.lock(); terminated = true; lock.unlock() }
+    var isRevoked: Bool {
         lock.lock(); let stopping = terminated; lock.unlock()
-        guard !stopping, !FileManager.default.fileExists(atPath: stage.appendingPathComponent("cancel-" + nonce).path) else { throw NativeUpdateError.installation }
+        return stopping || FileManager.default.fileExists(atPath: stage.appendingPathComponent("cancel-" + nonce).path)
     }
+    func check() throws { guard !isRevoked else { throw NativeUpdateError.installation } }
+
     func command(_ path: String, _ args: [String]) throws -> String {
         try check()
         let process = Process(), pipe = Pipe(); process.executableURL = URL(fileURLWithPath: path); process.arguments = args
@@ -387,13 +402,14 @@ enum NativeUpdateHandoff {
         } catch {
             // Parent is known gone and atomic publication preserves a complete
             // canonical app. Revalidate that code before best-effort reopening.
-            if let canonical = Bundle(url: app), canonical.bundleIdentifier == installed.bundleIdentifier,
-               let version = canonical.object(forInfoDictionaryKey: "KnotNativeVersion") as? String,
-               version == installedVersion || version == manifest.version {
-                if (try? command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])) != nil {
-                    _ = try? command("/usr/bin/open", [app.path, "--args", "--knot-native-update-resume"])
-                }
-            }
+            _ = NativeUpdateRecoveryGate.reopen(isRevoked: { context.isRevoked }, validateCanonical: {
+                guard let canonical = Bundle(url: app), canonical.bundleIdentifier == installed.bundleIdentifier,
+                      let version = canonical.object(forInfoDictionaryKey: "KnotNativeVersion") as? String,
+                      version == installedVersion || version == manifest.version else { return false }
+                return (try? command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])) != nil
+            }, relaunch: {
+                _ = try? command("/usr/bin/open", [app.path, "--args", "--knot-native-update-resume"])
+            })
             throw error
         }
     }

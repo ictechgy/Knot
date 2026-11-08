@@ -14,7 +14,7 @@ namespace Knot.NativePreview
             var disabled = new NativeUpdateConfiguration("0.1.0-native.10\n\n\n\n\n"); Check(!disabled.Configured);
             foreach (string v in new[] { "0.1.0", "0.1.0-native.0", "0.1.0-native.01", "0.1.0-native.65536", "0.1.0-native.11\n" }) UpdateReject(delegate { NativeUpdateManifest.VersionBuild(v); });
             Check(NativeUpdateManifest.VersionBuild("0.1.0-native.10") < NativeUpdateManifest.VersionBuild("0.1.0-native.11"));
-            UpdateAttemptOwnershipChecks();
+            UpdateAttemptOwnershipChecks(); UpdateRuntimeSnapshotChecks();
             using (var rsa = new RSACryptoServiceProvider(2048))
             {
                 rsa.PersistKeyInCsp = false;
@@ -59,6 +59,25 @@ namespace Knot.NativePreview
                 NativeUpdateHandoff.WriteSignal(root, second, "cancel");
                 NativeUpdateHandoff.WriteSignal(root, second, "cancel"); // idempotent cancellation
                 Check(!NativeUpdateHandoff.MayInstall(root, second));
+            } finally { Directory.Delete(root, true); }
+            // This is the recovery gate actually used after the helper's
+            // original-process wait, including cancellation during verification.
+            root = Path.Combine(Path.GetTempPath(), "knot-recovery-cancel-check-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try {
+                string nonce = Guid.NewGuid().ToString("N"); int launches = 0;
+                NativeUpdateHandoff.WriteSignal(root, nonce, "commit");
+                var lease = new UpdateFakeChild();
+                Check(!NativeUpdateRecovery.TryReopenOriginal(false, false, false,
+                    delegate { return NativeUpdateHandoff.HasSignal(root, nonce, "cancel"); }, delegate {
+                        NativeUpdateHandoff.WriteSignal(root, nonce, "cancel"); return lease;
+                    }, delegate { ++launches; }));
+                Check(launches == 0 && lease.Disposed);
+                Check(!NativeUpdateRecovery.TryReopenOriginal(false, false, false,
+                    delegate { return NativeUpdateHandoff.HasSignal(root, nonce, "cancel"); },
+                    delegate { throw new Exception("cancelled handoff must not verify or reopen"); }, delegate { ++launches; }));
+                Check(launches == 0);
+                Check(!NativeUpdateRecovery.MayReopenOriginal(true, true, false, true, true));
             } finally { Directory.Delete(root, true); }
             bool revoked = false, killed = false, exited = false, cleaned = false;
             var child = new UpdateFakeChild();
@@ -121,6 +140,30 @@ namespace Knot.NativePreview
                 Check(model.InstallAsync(delegate { model.Dispose(); }).GetAwaiter().GetResult());
                 Check(!model.Available && !model.Busy && Directory.Exists(stage) && fake.Disposed);
             } finally { if (Directory.Exists(stage)) Directory.Delete(stage, true); }
+        }
+        private static void UpdateRuntimeSnapshotChecks()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "knot-runtime-snapshot-check-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            string[] names = { "Knot-Native-Preview.exe", "KnotNativeMedia.dll", "KnotNativePairing.dll" };
+            try {
+                foreach (string name in names) File.WriteAllText(Path.Combine(root, name), "fresh synthetic original " + name);
+                var snapshot = NativeUpdateInstalledSnapshot.Capture(Path.Combine(root, names[0]));
+                using (snapshot.LockUnchanged()) {
+                    bool denied = false;
+                    try { File.WriteAllText(Path.Combine(root, names[1]), "cannot change a leased runtime"); } catch (IOException) { denied = true; }
+                    Check(denied);
+                }
+                foreach (string name in names) {
+                    string path = Path.Combine(root, name), original = File.ReadAllText(path);
+                    File.WriteAllText(path, "changed runtime " + name);
+                    UpdateReject(delegate { using (snapshot.LockUnchanged()) { } });
+                    File.WriteAllText(path, original);
+                    using (snapshot.LockUnchanged()) { Check(true); }
+                }
+                File.Delete(Path.Combine(root, names[2]));
+                UpdateReject(delegate { using (snapshot.LockUnchanged()) { } });
+            } finally { Directory.Delete(root, true); }
         }
         private static byte[] UpdateEnvelope(string text, RSACryptoServiceProvider key)
         {

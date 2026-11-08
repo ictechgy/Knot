@@ -222,7 +222,17 @@ namespace Knot.NativePreview
                     lock (gate)
                     {
                         if (revision != trustedRevision) continue;
-                        registeredAvailable = any; trustedRefreshAt = clock(); ++trustedRevision; break;
+                        registeredAvailable = any; trustedRefreshAt = clock(); ++trustedRevision;
+                        // Last-key removal also retires an outstanding trusted
+                        // grant. A number-derived grant and an already-claimed
+                        // session have separate authority and remain unchanged.
+                        if (!any && !isClaimed && registeredSession && enrollmentInvitation != null)
+                        {
+                            enrollmentInvitation.Revoke(); enrollmentInvitation = null;
+                            registeredSession = false; enrollmentName = null; enrollmentPeer = null;
+                            enrollmentAllowsFiles = false;
+                        }
+                        break;
                     }
                 }
             }
@@ -287,7 +297,11 @@ namespace Knot.NativePreview
                 trustedRefreshAt = clock(); revision = trustedRevision;
             }
             // DPAPI/store contention must not hold the session's Stop gate.
-            bool any = trustedDevices.HasDevices;
+            // A failed store read is not a lost media transport. Preserve the
+            // fail-closed policy and prevent automatic replacement of this run.
+            bool any;
+            try { any = trustedDevices.HasDevices; }
+            catch { throw new ProtocolException("auth", "trusted-storage"); }
             lock (gate) { if (!isClaimed && !isStopped && !trustedRevocationPending && revision == trustedRevision) registeredAvailable = any; }
         }
         private bool CredentialsExpired
@@ -719,6 +733,7 @@ namespace Knot.NativePreview
             {
                 case "expired": return "Invitation expired. Click Share for a fresh invitation.";
                 case "auth": return "Invitation authentication failed. Click Share for a fresh invitation.";
+                case "trusted-storage": return "Registered device storage could not be verified. Sharing stopped; check Windows account and storage access before sharing again.";
                 case "declined": return "Host declined the viewer request. Click Share for a fresh invitation.";
                 case "encoder": return "Hardware H.264 encoding is unavailable or failed. Check the graphics driver and encoder availability; then create a fresh invitation.";
                 case "display": return "Display unsupported. Use a logged-in, unlocked primary SDR display without rotation or HDR.";

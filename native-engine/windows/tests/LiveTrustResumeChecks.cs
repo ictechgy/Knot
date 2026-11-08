@@ -17,6 +17,11 @@ namespace Knot.NativePreview
             IntegratedHostTrustChecks();
             IntegratedConsumedGrantLastRevocation();
             IntegratedExhaustedNumberWaiting();
+            IntegratedRefreshStorageFailure(false); IntegratedRefreshStorageFailure(true);
+            IntegratedRevokedGrant(false, false, false);
+            IntegratedRevokedGrant(true, false, false);
+            IntegratedRevokedGrant(false, true, false);
+            IntegratedRevokedGrant(false, false, true);
             foreach (bool silence in new bool[] { false, true })
             {
                 ResumeAfterAuthenticatedRevocation(false, silence, false);
@@ -105,10 +110,12 @@ namespace Knot.NativePreview
         private sealed class MemoryTrustStorage : ITrustedDeviceStorage
         {
             private byte[] bytes;
+            internal volatile Exception ReadFailure;
+            internal int Reads;
             private sealed class Lease : IDisposable { public void Dispose() { } }
             public IDisposable AcquireLease() { return new Lease(); }
             public bool Exists { get { return bytes != null; } }
-            public byte[] Read() { return (byte[])bytes.Clone(); }
+            public byte[] Read() { Interlocked.Increment(ref Reads); Exception failure = ReadFailure; if (failure != null) throw failure; return (byte[])bytes.Clone(); }
             public void Write(byte[] value) { bytes = (byte[])value.Clone(); }
         }
         private sealed class OpenActionMediaFactory : IMediaFactory
@@ -210,6 +217,94 @@ namespace Knot.NativePreview
                 Check(host.EnrollmentState == HostEnrollmentState.RegisteredWaiting && host.EnrollmentCode == "");
                 host.Stop(); Check(host.WaitStopped(4000));
             }
+        }
+        private static void IntegratedRefreshStorageFailure(bool crypto)
+        {
+            stage = crypto ? "trust-idle-refresh-crypto-terminal" : "trust-idle-refresh-io-terminal";
+            MemoryTrustStorage storage = new MemoryTrustStorage();
+            NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(storage);
+            store.Add(TrustId(1), "Synthetic registered Mac", TrustId(9));
+            long ticks = Stopwatch.GetTimestamp(); int replacements = 0, readsForResume = 0;
+            string lastStatus = "";
+            FakeMediaFactory media = new FakeMediaFactory(); FakeInput sink = new FakeInput();
+            using (HostServer host = new HostServer(IPAddress.Loopback, 0, media, sink, true, null, true,
+                delegate { return Interlocked.Read(ref ticks); }, "Synthetic refresh failure", syntheticTrustedDevices: store))
+            {
+                Check(host.HasRegisteredDevices && storage.Reads > 0);
+                host.StatusChanged = delegate(string value) { lastStatus = value; };
+                host.Start();
+                storage.ReadFailure = crypto ? (Exception)new System.Security.Cryptography.CryptographicException("Synthetic store failure") : new IOException("Synthetic store failure");
+                Interlocked.Add(ref ticks, 2L * Stopwatch.Frequency);
+                Check(host.WaitStopped(4000));
+                Check(storage.Reads >= 2 && !host.IsActive && !host.MayResumeRegisteredConnection);
+                Check(lastStatus == HostServer.Guidance("trusted-storage"));
+                Check(!RegisteredConnectionResume.TryResume(true, false, host.MayResumeRegisteredConnection,
+                    delegate { ++replacements; }, delegate { ++readsForResume; return true; }));
+                Check(replacements == 0 && readsForResume == 0 && media.Opened == 0 && sink.Events.Count == 0);
+                Check(PreviewCopy.Status(lastStatus) != lastStatus);
+            }
+        }
+        private static void IntegratedRevokedGrant(bool numberGrant, bool anotherDevice, bool claimed)
+        {
+            stage = "trust-last-revoke-grant-" + (numberGrant ? "number" : "trusted") + (anotherDevice ? "-other" : claimed ? "-claimed" : "-pending");
+            NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(new MemoryTrustStorage());
+            store.Add(TrustId(1), "Synthetic Mac A", TrustId(9));
+            if (anotherDevice) store.Add(TrustId(2), "Synthetic Mac B", TrustId(9));
+            byte[] key = NativeProtocol.DecodeToken(TrustId(9));
+            FakeMediaFactory media = new FakeMediaFactory();
+            using (HostServer host = new HostServer(IPAddress.Loopback, 0, media, new FakeInput(), true, null, true,
+                Stopwatch.GetTimestamp, "Synthetic grant revocation", syntheticTrustedDevices: store))
+            {
+                host.Start();
+                string offer;
+                if (numberGrant) offer = Enroll(host, Discover(host), host.EnrollmentCode, false);
+                else
+                {
+                    Packet granted = IntegratedTrustedRequest(host, TrustId(anotherDevice ? (byte)2 : (byte)1), key, "connect");
+                    Check(granted.Kind == 1);
+                    offer = StrictJson.String(StrictJson.Parse(granted.Payload, "invitation"), "invitation");
+                }
+                TlsClient active = null;
+                try
+                {
+                    if (claimed) active = ClaimIntegratedOffer(host, offer, true);
+                    Check(IntegratedTrustedRequest(host, TrustId(1), key, "revoke").Kind == 1);
+                    if (!anotherDevice) WaitFor(delegate { return !host.HasRegisteredDevices; });
+                    Check(store.HasDevices == anotherDevice);
+                    bool rejected = !numberGrant && !anotherDevice && !claimed;
+                    if (rejected)
+                    {
+                        Check(!host.EnrollmentReady && !host.IsActive);
+                        bool blocked = false; ++tlsFixtures;
+                        try { using (TlsClient oldGrant = new TlsClient(host, host.Pin)) { } }
+                        catch (IOException) { blocked = true; }
+                        catch (System.Security.Authentication.AuthenticationException) { blocked = true; }
+                        catch (System.Net.Sockets.SocketException) { blocked = true; }
+                        Check(blocked && media.Opened == 0 && !host.IsActive);
+                    }
+                    else if (claimed) Check(host.IsActive && media.Opened == 1);
+                    else
+                    {
+                        Check(host.EnrollmentReady);
+                        using (TlsClient preserved = ClaimIntegratedOffer(host, offer, !numberGrant)) Check(host.IsActive && media.Opened == 1);
+                    }
+                }
+                finally { if (active != null) active.Dispose(); host.Stop(); Check(host.WaitStopped(4000)); }
+            }
+            Array.Clear(key, 0, key.Length);
+        }
+        private static TlsClient ClaimIntegratedOffer(HostServer host, string offer, bool trusted)
+        {
+            ++tlsFixtures;
+            TlsClient client = new TlsClient(host, OfferedPin(offer));
+            try
+            {
+                string token = StrictJson.String(InvitationObject(offer), "token");
+                client.Send(1, trusted ? Bytes("{\"v\":1,\"token\":" + StrictJson.Quote(token) + ",\"name\":\"Synthetic Mac\"}") : Hello(token));
+                Check(client.ReadNonHeartbeat().Kind == 2);
+                return client;
+            }
+            catch { client.Dispose(); throw; }
         }
         private static Packet IntegratedRegister(HostServer host, string offer, string id, string key)
         {

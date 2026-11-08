@@ -344,11 +344,67 @@ namespace Knot.NativePreview
     }
     internal sealed class NativeUpdateUnconfirmedCancellation : Exception
     { internal readonly NativeUpdateAttempt Attempt; internal NativeUpdateUnconfirmedCancellation(NativeUpdateAttempt attempt) { Attempt = attempt; } }
+    // Fixed shipped runtime set, not an unbounded directory inventory. Keep
+    // read/no-write/delete leases through each comparison and recovery launch.
+    internal sealed class NativeUpdateInstalledSnapshot
+    {
+        private static readonly string[] Names = { "Knot-Native-Preview.exe", "KnotNativeMedia.dll", "KnotNativePairing.dll" };
+        private readonly string directory;
+        private readonly string[] digests;
+        private NativeUpdateInstalledSnapshot(string directory, string[] digests) { this.directory = directory; this.digests = digests; }
+        private sealed class Leases : IDisposable
+        {
+            internal readonly FileStream[] Files = new FileStream[Names.Length];
+            public void Dispose() { foreach (FileStream file in Files) if (file != null) file.Dispose(); }
+        }
+        private static Leases Open(string directory)
+        {
+            var leases = new Leases();
+            try {
+                for (int i = 0; i < Names.Length; ++i) {
+                    string path = Path.Combine(directory, Names[i]); NativeUpdatePaths.Ordinary(path);
+                    leases.Files[i] = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    if (leases.Files[i].Length < 1 || leases.Files[i].Length > NativeUpdateManifest.MaximumBytes) throw new InvalidDataException();
+                }
+                return leases;
+            } catch { leases.Dispose(); throw; }
+        }
+        private static string Hash(FileStream file)
+        { using (var hash = SHA256.Create()) { file.Position = 0; return Convert.ToBase64String(hash.ComputeHash(file)); } }
+        internal static NativeUpdateInstalledSnapshot Capture(string executable)
+        {
+            if (!String.Equals(Path.GetFileName(executable), Names[0], StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException();
+            string directory = Path.GetDirectoryName(executable); var digests = new string[Names.Length];
+            using (var leases = Open(directory)) for (int i = 0; i < Names.Length; ++i) digests[i] = Hash(leases.Files[i]);
+            return new NativeUpdateInstalledSnapshot(directory, digests);
+        }
+        internal IDisposable LockUnchanged()
+        {
+            Leases leases = null;
+            try {
+                leases = Open(directory);
+                for (int i = 0; i < Names.Length; ++i) if (Hash(leases.Files[i]) != digests[i]) throw new InvalidDataException();
+                return leases;
+            } catch (Exception error) { if (leases != null) leases.Dispose(); throw new InvalidDataException("Original installed runtime changed or is unavailable.", error); }
+        }
+    }
     internal static class NativeUpdateRecovery
     {
         internal static bool InstallerStopped(bool started, bool terminal) { return !started || terminal; }
-        internal static bool MayReopenOriginal(bool started, bool terminal, bool succeeded, bool unchanged)
-        { return !succeeded && InstallerStopped(started, terminal) && unchanged; }
+        internal static bool MayReopenOriginal(bool started, bool terminal, bool succeeded, bool unchanged, bool revoked = false)
+        { return !revoked && !succeeded && InstallerStopped(started, terminal) && unchanged; }
+        // The exact Run recovery branch uses this gate. Cancellation observed
+        // during a slow runtime comparison wins before the launch callback.
+        internal static bool TryReopenOriginal(bool started, bool terminal, bool succeeded,
+            Func<bool> revoked, Func<IDisposable> lockUnchanged, Action relaunch)
+        {
+            if (!MayReopenOriginal(started, terminal, succeeded, true, revoked())) return false;
+            IDisposable lease = lockUnchanged(); if (lease == null) throw new InvalidDataException();
+            using (lease) {
+                if (!MayReopenOriginal(started, terminal, succeeded, true, revoked())) return false;
+                relaunch(); return true;
+            }
+        }
     }
     internal static class NativeUpdateHandoff
     {
@@ -392,8 +448,6 @@ namespace Knot.NativePreview
             try { Run(a); Environment.ExitCode = 0; } catch (Exception) { Environment.ExitCode = 1; }
             return true;
         }
-        private static string Digest(string path)
-        { NativeUpdatePaths.Ordinary(path); using (var input = File.OpenRead(path)) using (var hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(input)); }
         private static void Relaunch(string executable)
         {
             NativeUpdatePaths.Ordinary(executable);
@@ -412,7 +466,7 @@ namespace Knot.NativePreview
             NativeUpdateConfiguration c = NativeUpdateConfiguration.Load();
             NativeUpdateManifest m = NativeUpdateManifest.Verify(File.ReadAllBytes(Path.Combine(stage, "manifest.feed")), c, "windows-x64", NativeUpdateManifest.Now);
             string package = Path.Combine(stage, "payload.exe"); m.VerifyFile(package);
-            string originalDigest = Digest(executable);
+            NativeUpdateInstalledSnapshot originalRuntime = NativeUpdateInstalledSnapshot.Capture(executable);
             using (var original = Process.GetProcessById(pid))
             {
                 if (original.StartTime.ToUniversalTime().Ticks != start || !String.Equals(original.MainModule.FileName, executable, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException();
@@ -444,10 +498,14 @@ namespace Knot.NativePreview
                 try { File.Delete(package); File.Delete(Path.Combine(stage, "manifest.feed")); } catch (Exception) { }
             } catch {
                 // A timed-out installer can still be changing files. Never open
-                // the app then. On a terminal failure, only reopen byte-identical
-                // original code; do not assume installer rollback succeeded.
+                // the app then. On a terminal failure, only reopen the byte-identical
+                // original executable and shipped runtime DLLs; do not assume installer rollback succeeded.
                 if (!succeeded && NativeUpdateRecovery.InstallerStopped(installerStarted, installerTerminal)) {
-                    try { if (NativeUpdateRecovery.MayReopenOriginal(installerStarted, installerTerminal, succeeded, Digest(executable) == originalDigest)) Relaunch(executable); } catch (Exception) { }
+                    try {
+                        NativeUpdateRecovery.TryReopenOriginal(installerStarted, installerTerminal, succeeded,
+                            delegate { return HasSignal(stage, nonce, "cancel"); },
+                            delegate { return originalRuntime.LockUnchanged(); }, delegate { Relaunch(executable); });
+                    } catch (Exception) { }
                     try { File.Delete(package); File.Delete(Path.Combine(stage, "manifest.feed")); } catch (Exception) { }
                 }
                 throw;

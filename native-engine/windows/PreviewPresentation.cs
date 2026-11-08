@@ -87,6 +87,8 @@ namespace Knot.NativePreview
                     return "연결을 허용했어요. Windows 화면과 인코더를 준비하고 있어요.";
                 case "Invitation expired. Click Share for a fresh invitation.":
                     return "연결 코드가 만료됐어요. 새 코드를 만들어주세요.";
+                case "Registered device storage could not be verified. Sharing stopped; check Windows account and storage access before sharing again.":
+                    return "등록된 Mac 정보를 확인하지 못해 공유를 중지했어요. Windows 사용자 계정과 저장소 접근을 확인한 뒤 직접 공유를 다시 시작해주세요.";
                 case "Invitation authentication failed. Click Share for a fresh invitation.":
                     return "연결 코드를 확인하지 못했어요. 새 코드로 다시 연결해주세요.";
                 case "Host declined the viewer request. Click Share for a fresh invitation.":

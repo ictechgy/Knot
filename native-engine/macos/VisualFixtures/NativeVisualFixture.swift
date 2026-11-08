@@ -498,7 +498,8 @@ private struct FixtureConvenienceSurface: View {
         VStack(alignment: .leading, spacing: 18) {
             Label("작업 도구", systemImage: "slider.horizontal.3").font(.system(size: 24, weight: .semibold))
             VStack(alignment: .leading, spacing: 14) {
-                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: clipboard, quality: quality)
+                NativeWorkToolsActions(macShortcuts: $model.macShortcuts, clipboard: clipboard, quality: quality,
+                    clipboardAction: { model.performClipboardGesture(paste: $0, clipboard: clipboard) })
             }.padding(24).nativePanel()
             Spacer()
         }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity).background(NativeStyle.canvas)

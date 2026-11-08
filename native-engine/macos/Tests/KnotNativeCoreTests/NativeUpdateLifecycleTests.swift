@@ -163,6 +163,23 @@ private final class UpdateFixtureState: @unchecked Sendable {
         model.check(); XCTAssertEqual(state.total(), 1); XCTAssertFalse(model.available)
         XCTAssertTrue(FileManager.default.fileExists(atPath: stage.path)); model.stop()
     }
+    func testRecoveryGateHonorsTermAndCancelBeforeAndDuringVerification() throws {
+        for mode in 0...4 {
+            let stage = try fixture(); defer { try? FileManager.default.removeItem(at: stage) }
+            let nonce = UUID().uuidString + UUID().uuidString
+            let context = try NativeUpdateHelperContext(stage: stage, nonce: nonce, installSignalHandlers: false)
+            if mode == 0 { context.requestTermination() }
+            if mode == 1 { try Data(nonce.utf8).write(to: stage.appendingPathComponent("cancel-" + nonce)) }
+            var validations = 0, launches = 0
+            let reopened = NativeUpdateRecoveryGate.reopen(isRevoked: { context.isRevoked }, validateCanonical: {
+                validations += 1
+                if mode == 2 { context.requestTermination() } // TERM arrives during a deep signature check
+                return mode != 4
+            }, relaunch: { launches += 1 })
+            XCTAssertEqual(reopened, mode == 3); XCTAssertEqual(launches, mode == 3 ? 1 : 0)
+            XCTAssertEqual(validations, mode <= 1 ? 0 : 1)
+        }
+    }
     func testEofWithoutCommitWrongNonceAndUnclosedParentFailClosed() throws {
         for mode in 0...2 {
             let pipe = Pipe(); defer { try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close() }

@@ -18,22 +18,21 @@ namespace Knot.NativePreview
             Application.SetCompatibleTextRenderingDefault(false);
             // One owner presents/manages this user's shared host and trust store.
             // This lease does not open the store and never terminates another app.
-            try
-            {
-                using (IDisposable owner = PersistentCertificateLease.TryAcquireHostOwner(NativeTrustedDevices.DirectoryPath))
-                {
-                    if (owner == null)
-                    {
-                        MessageBox.Show("Knot이 이미 실행 중이에요. 열려 있는 Knot에서 연결과 등록 기기를 관리해주세요.", "Knot");
-                        return;
-                    }
-                    Application.Run(new PreviewForm());
-                }
-            }
+            IDisposable owner;
+            try { owner = PersistentCertificateLease.TryAcquireHostOwner(NativeTrustedDevices.DirectoryPath); }
             catch (System.Security.Cryptography.CryptographicException)
-            { MessageBox.Show("Knot 실행 권한을 확인하지 못했어요. 실행 중인 Knot을 확인하고 다시 시도해주세요.", "Knot"); }
+            { MessageBox.Show("Knot 실행 권한을 확인하지 못했어요. 실행 중인 Knot을 확인하고 다시 시도해주세요.", "Knot"); return; }
             catch (UnauthorizedAccessException)
-            { MessageBox.Show("Knot 실행 권한에 접근하지 못했어요. Windows 사용자 계정과 실행 중인 Knot을 확인해주세요.", "Knot"); }
+            { MessageBox.Show("Knot 실행 권한에 접근하지 못했어요. Windows 사용자 계정과 실행 중인 Knot을 확인해주세요.", "Knot"); return; }
+            using (owner)
+            {
+                if (owner == null)
+                {
+                    MessageBox.Show("Knot이 이미 실행 중이에요. 열려 있는 Knot에서 연결과 등록 기기를 관리해주세요.", "Knot");
+                    return;
+                }
+                Application.Run(new PreviewForm());
+            }
         }
     }
 
@@ -1031,8 +1030,11 @@ namespace Knot.NativePreview
                         int selected = list.SelectedIndex; if (selected < 0) return;
                         // Owner intent revokes current capabilities even if the
                         // persistent deletion fails. Keep the row on failure.
-                        try { StopShare(); NativeTrustedDevices.Revoke(ids[selected]); ids.RemoveAt(selected); list.Items.RemoveAt(selected); }
-                        catch { MessageBox.Show(dialog, "공유를 중지했지만 등록 기기를 변경하지 못했어요. 저장소 접근을 확인하고 다시 시도해주세요.", "내 기기"); }
+                        bool hadRun = server != null;
+                        shareRequested = false;
+                        try { if (hadRun) StopShare(); NativeTrustedDevices.Revoke(ids[selected]); ids.RemoveAt(selected); list.Items.RemoveAt(selected); }
+                        catch { MessageBox.Show(dialog, hadRun ? "공유를 중지했지만 등록 기기를 변경하지 못했어요. 저장소 접근을 확인하고 다시 시도해주세요." :
+                            "등록 기기를 변경하지 못했어요. 저장소 접근을 확인하고 다시 시도해주세요.", "내 기기"); }
                     };
                     dialog.Controls.Add(list); dialog.Controls.Add(remove); dialog.ShowDialog(this);
                 }
