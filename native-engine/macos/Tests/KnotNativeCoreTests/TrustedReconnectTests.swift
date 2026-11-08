@@ -178,16 +178,21 @@ struct TrustedReconnectTests {
     let device = try inertSavedDevice()
     for phase in [SessionModel.Phase.connecting, .approval, .decoding] {
         let gate = InertRetryWait()
-        let model = SessionModel(waitForReconnect: { try await gate.wait($0) }, initialSavedDevices: [device], initialRegisteredDevice: device)
+        let attempts = TrustedAttemptRecorder()
+        let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
+            waitForReconnect: { try await gate.wait($0) }, initialSavedDevices: [device], initialRegisteredDevice: device)
         model.phase = phase
         let silence = phase == .approval ? 66 : 11
         #expect(!model.checkDeadlines(now: .now + .seconds(silence)))
         #expect(model.hasPendingReconnect && model.reconnectAttemptCount == 1)
         #expect(await waitForTrustedState { gate.waiting })
         model.disconnect(); gate.advance()
+        #expect(attempts.count == 0)
     }
     for (phase, age) in [(SessionModel.Phase.approval, 126), (.decoding, 16)] {
-        let model = SessionModel(waitForReconnect: { _ in Issue.record("Startup cap must remain terminal") }, initialSavedDevices: [device], initialRegisteredDevice: device)
+        let attempts = TrustedAttemptRecorder()
+        let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
+            waitForReconnect: { _ in Issue.record("Startup cap must remain terminal") }, initialSavedDevices: [device], initialRegisteredDevice: device)
         model.phase = phase
         #expect(!model.checkDeadlines(now: .now + .seconds(age)))
         #expect(!model.hasPendingReconnect && model.reconnectAttemptCount == 0)
@@ -214,7 +219,9 @@ struct TrustedReconnectTests {
     let device = try inertSavedDevice()
     for live in [false, true] {
         let store = InertUpdateResume()
-        let model = SessionModel(initialSavedDevices: [device], initialRegisteredDevice: device,
+        let attempts = TrustedAttemptRecorder()
+        let model = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
+            initialSavedDevices: [device], initialRegisteredDevice: device,
             writeUpdateResume: { store.write($0, $1) }, takeUpdateResume: { store.take() })
         model.phase = live ? .streaming : .failed
         model.prepareForUpdate()
@@ -262,4 +269,62 @@ struct TrustedReconnectTests {
     #expect(await waitForTrustedState { exhaustedAttempts.count == 7 && exhausted.phase == .failed && !exhausted.hasPendingReconnect })
     exhausted.prepareForUpdate()
     #expect(exhaustedStore.writes.count == 1 && exhaustedStore.value == nil)
+}
+
+
+private func inertNumberEnrollment() throws -> AuthenticatedEnrollment {
+    let candidate = try EnrollmentCandidate(address: "192.168.50.20", port: 48632,
+        slot: Data(repeating: 8, count: 16), name: "Synthetic PC")
+    let invitation = try JSONSerialization.data(withJSONObject: ["v": 1, "address": candidate.address, "port": 48631,
+        "certificateSHA256": String(repeating: "a", count: 64), "token": Invitation.encodeBase64URL(Data(repeating: 3, count: 32))])
+    let offer = try JSONSerialization.data(withJSONObject: ["v": 2, "slot": Invitation.encodeBase64URL(candidate.slot),
+        "grant": Invitation.encodeBase64URL(Data(repeating: 4, count: 16)),
+        "invitation": "knot-native:v1:" + Invitation.encodeBase64URL(invitation), "ttlMs": 30000])
+    return AuthenticatedEnrollment(offer: try EnrollmentOffer(offer, candidate: candidate), viewerName: "Fixture Mac", expiresAt: .now + .seconds(30))
+}
+
+@Test @MainActor func silenceTimerAndTransportFailureKeepCopyAndAuthorityParityForEveryConnectionMode() async throws {
+    let device = try inertSavedDevice(), invitation = try inertInvitation(), number = try inertNumberEnrollment()
+    for (registered, automatic, numberMode) in [(true, true, false), (true, false, false), (false, true, false), (false, true, true)] {
+        let timerGate = InertRetryWait(), readerGate = InertRetryWait()
+        let timer = SessionModel(makeChannel: { _ in FailedHelloChannel() }, makeTrustedClient: { _, _ in SuccessfulTrustedClient(invitation) },
+            waitForReconnect: { try await timerGate.wait($0) }, initialSavedDevices: registered ? [device] : [], initialRegisteredDevice: registered ? device : nil)
+        let reader = SessionModel(makeChannel: { _ in FailedHelloChannel() }, makeTrustedClient: { _, _ in SuccessfulTrustedClient(invitation) },
+            waitForReconnect: { try await readerGate.wait($0) }, initialSavedDevices: registered ? [device] : [])
+        timer.autoReconnect = automatic; reader.autoReconnect = automatic
+        if registered { timer.phase = .streaming; reader.connectSaved(device.id) }
+        else if numberMode { timer.connectAuthenticated(number); reader.connectAuthenticated(number) }
+        else { timer.invitation = invitation; timer.connect(); reader.invitation = invitation; reader.connect() }
+        #expect(!timer.checkDeadlines(now: .now + .seconds(11)))
+        #expect(await waitForTrustedState { reader.phase == .failed })
+        let shouldRetry = registered && automatic
+        #expect(timer.hasPendingReconnect == shouldRetry && reader.hasPendingReconnect == shouldRetry)
+        #expect(timer.reconnectAttemptCount == (shouldRetry ? 1 : 0))
+        #expect(reader.reconnectAttemptCount == (shouldRetry ? 1 : 0))
+        #expect(NativeCopy.status(timer.status, reconnectMethod: timer.reconnectMethod) == NativeCopy.status(reader.status, reconnectMethod: reader.reconnectMethod))
+        if shouldRetry { #expect(await waitForTrustedState { timerGate.waiting && readerGate.waiting }) }
+        timer.disconnect(); reader.disconnect(); timerGate.advance(); readerGate.advance()
+    }
+}
+
+@Test @MainActor func updateResumeConsumesExpiredFutureOrDisabledIntentWithoutAuthentication() throws {
+    let device = try inertSavedDevice()
+    for (offset, enabled) in [(-60.0, true), (301.0, true), (60.0, false)] {
+        let store = InertUpdateResume(), attempts = TrustedAttemptRecorder()
+        store.value = (device.id, Date().addingTimeInterval(offset).timeIntervalSince1970)
+        let model = SessionModel(makeTrustedClient: { _, _ in
+            attempts.attempt(); Issue.record("Expired or disabled update intent must not authenticate")
+            return FailingTrustedClient(.trust, attempts)
+        }, initialSavedDevices: [device], writeUpdateResume: { store.write($0, $1) }, takeUpdateResume: { store.take() })
+        model.autoReconnect = enabled
+        model.resumeAfterUpdateIfRequested()
+        #expect(store.value == nil && attempts.count == 0 && !model.hasPendingReconnect && model.phase == .idle)
+    }
+    let store = InertUpdateResume(), attempts = TrustedAttemptRecorder()
+    let active = SessionModel(makeTrustedClient: { _, _ in FailingTrustedClient(.transport, attempts) },
+        initialSavedDevices: [device], initialRegisteredDevice: device,
+        writeUpdateResume: { store.write($0, $1) }, takeUpdateResume: { store.take() })
+    active.phase = .streaming; active.autoReconnect = false
+    active.prepareForUpdate()
+    #expect(store.value == nil && store.writes.count == 1 && attempts.count == 0)
 }

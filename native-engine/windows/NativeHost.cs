@@ -9,6 +9,8 @@ using System.Threading;
 
 namespace Knot.NativePreview
 {
+    internal enum HostEnrollmentState { None, Number, Pending, RegisteredWaiting, Stopped }
+
     internal sealed class HostServer : IDisposable
     {
         private readonly object gate = new object();
@@ -34,10 +36,30 @@ namespace Knot.NativePreview
         private readonly INativeTrustedDeviceStore trustedDevices;
         private readonly IClipboardText syntheticClipboard;
         private long trustedRefreshAt, trustedRevision;
-        private bool trustedRevocationPending;
+        private bool trustedRevocationPending, enrollmentUnavailable;
         internal int TrustedPort { get { return trustedServer == null ? 0 : trustedServer.ListeningPort; } }
-        internal bool WaitingForRegisteredDevice { get { lock (gate) return enrollmentMode && !isStopped && !isClaimed && registeredAvailable &&
-            enrollmentInvitation == null && enrollment != null && (enrollment.Slot.IsConsumed || enrollment.Slot.LifetimeRemainingMilliseconds <= 0); } }
+        // UI receives one gate-owned state rather than inferring readiness
+        // from the absence of a grant (which is also true after Stop).
+        internal HostEnrollmentState EnrollmentState
+        {
+            get
+            {
+                lock (gate)
+                {
+                    if (!enrollmentMode) return HostEnrollmentState.None;
+                    if (isStopped) return HostEnrollmentState.Stopped;
+                    if (isClaimed || enrollmentInvitation != null) return HostEnrollmentState.Pending;
+                    if (NumberCanProgress) return HostEnrollmentState.Number;
+                    return registeredAvailable ? HostEnrollmentState.RegisteredWaiting : HostEnrollmentState.Stopped;
+                }
+            }
+        }
+        internal bool WaitingForRegisteredDevice { get { return EnrollmentState == HostEnrollmentState.RegisteredWaiting; } }
+        // Called only under the host gate. A fifth in-flight PAKE may finish;
+        // an ended listener, consumed slot or expired number cannot progress.
+        private bool NumberCanProgress
+        { get { return !enrollmentUnavailable && enrollment != null && enrollment.Slot.LifetimeRemainingMilliseconds > 0 &&
+            (enrollment.Slot.Available || enrollment.Slot.Busy); } }
         private byte[] registrationHash;
         private long registrationDeadline;
         private bool registrationUsed, registeredSession, registeredAvailable;
@@ -126,6 +148,7 @@ namespace Knot.NativePreview
                     try { EnrollmentProtocol.ValidName(name); } catch (ProtocolException) { name = "Windows PC"; }
                     enrollment = new EnrollmentServer(address, name, syntheticLoopback, this.clock,
                         IssueEnrollmentGrant, delegate(EnrollmentFailure failure) {
+                            lock (gate) enrollmentUnavailable = true;
                             bool registeredWaiting = trustedServer != null && HasRegisteredDevices;
                             Notify(registeredWaiting && failure == EnrollmentFailure.Unavailable ? EnrollmentGuidance.RegisteredWaiting : EnrollmentGuidance.For(failure));
                             if (!registeredWaiting) Stop();
@@ -284,7 +307,7 @@ namespace Knot.NativePreview
                         { enrollmentInvitation.Revoke(); enrollmentInvitation = null; }
                         return false;
                     }
-                    return enrollmentInvitation == null ? enrollment.Slot.LifetimeRemainingMilliseconds <= 0 : enrollmentInvitation.IsExpired;
+                    return enrollmentInvitation == null ? !NumberCanProgress : enrollmentInvitation.IsExpired;
                 }
             }
         }

@@ -382,9 +382,24 @@ private final class NativeFailureEnrollment: EnrollmentAuthenticating, @unchecke
     let deadline = ContinuousClock.now + .seconds(1)
     while !delayed.started, ContinuousClock.now < deadline { await Task.yield() }
     try #require(delayed.started)
-    model.interruptForSleep()
+    model.interrupt(.sleep)
     delayed.finish(result); await operation.value
     #expect(authorized == 0 && model.phase == .failed && model.code.isEmpty)
     #expect(model.status.contains("중단") && model.status.contains("새 8자리"))
     #expect(!model.status.contains("화면 연결을 준비해요"))
+}
+
+
+@Test @MainActor func provisioningAbortGuidanceDistinguishesSearchSleepFromAnotherConnection() {
+    let search = EnrollmentModel(initialPhase: .discovering)
+    search.interrupt(.sleep)
+    #expect(search.phase == .failed && search.status.contains("PC 검색"))
+    #expect(!search.status.contains("8자리"))
+    let superseded = EnrollmentModel()
+    superseded.interrupt(.anotherConnection, authenticated: true)
+    #expect(superseded.phase == .failed && superseded.status.contains("다른 연결"))
+    #expect(!superseded.status.contains("깨어난") && !superseded.status.contains("8자리"))
+    let consumed = EnrollmentModel()
+    consumed.interrupt(.sleep, authenticated: true)
+    #expect(consumed.status.contains("새 8자리") && consumed.status.contains("깨어난"))
 }

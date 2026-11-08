@@ -10,6 +10,17 @@ enum NativeFileDrop {
     static func exceedsLimit(_ pasteboard: NSPasteboard) -> Bool {
         (pasteboard.pasteboardItems?.count ?? 0) > 32
     }
+    /// Both OS drop destinations use this admission boundary. Rejections reveal
+    /// their authored status without invoking a transfer or reading item URLs.
+    static func perform(from pasteboard: NSPasteboard, files: FileTransferModel,
+                        beforeSend: () -> Void, showStatus: () -> Void = {}) -> Bool {
+        guard !files.isBusy else { return false }
+        if exceedsLimit(pasteboard) {
+            files.rejectExcessDrop(); showStatus(); return false
+        }
+        guard let urls = urls(from: pasteboard) else { return false }
+        beforeSend(); files.send(urls: urls); showStatus(); return true
+    }
     static func urls(from pasteboard: NSPasteboard) -> [URL]? {
         guard let items = pasteboard.pasteboardItems, !items.isEmpty, items.count <= 32 else { return nil }
         var urls: [URL] = []
@@ -150,12 +161,7 @@ final class NativeFilePanelHost: NSHostingView<NativeFilePanelContent> {
     }
     override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool { !rootView.files.isBusy }
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        guard !rootView.files.isBusy else { return false }
-        if NativeFileDrop.exceedsLimit(sender.draggingPasteboard) {
-            rootView.files.rejectExcessDrop(); return false
-        }
-        guard let urls = NativeFileDrop.urls(from: sender.draggingPasteboard) else { return false }
-        rootView.beforeAction(); rootView.files.send(urls: urls); return true
+        NativeFileDrop.perform(from: sender.draggingPasteboard, files: rootView.files, beforeSend: rootView.beforeAction)
     }
 }
 

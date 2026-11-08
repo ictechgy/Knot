@@ -4,6 +4,7 @@ import KnotNativeCore
 
 @MainActor
 final class EnrollmentModel: ObservableObject {
+    enum Interruption { case sleep, anotherConnection }
     enum Phase: Equatable { case idle, discovering, authenticating, failed }
     static let authenticationGuidance = "8자리 번호를 확인하거나 주변 PC를 다시 찾아 선택해주세요. 번호가 바뀌었거나 여러 번 실패했다면 Windows에서 공유를 다시 시작하세요."
     @Published private(set) var phase: Phase = .idle
@@ -124,9 +125,16 @@ final class EnrollmentModel: ObservableObject {
     }
     /// A consumed number must not leave successful preparation copy when sleep
     /// or a newer session prevents the completion from being used.
-    func interruptForSleep() {
+    func interrupt(_ reason: Interruption, authenticated: Bool = false) {
+        let usedNumber = authenticated || phase == .authenticating
         invalidateOperation(); phase = .failed
-        status = "연결 준비가 중단됐어요. Mac이 깨어난 뒤 Windows의 새 8자리 번호로 다시 연결하세요."
+        switch reason {
+        case .sleep:
+            status = usedNumber ? "잠자기로 번호 연결을 중단했어요. Mac이 깨어난 뒤 Windows의 새 8자리 번호로 다시 연결하세요." :
+                "잠자기로 PC 검색을 중단했어요. Mac이 깨어난 뒤 주변 PC를 다시 찾아주세요."
+        case .anotherConnection:
+            status = "다른 연결을 시작해 이번 연결 준비를 중단했어요. 현재 연결을 마친 뒤 PC를 다시 선택하세요."
+        }
     }
     func cancel() {
         invalidateOperation(); candidates = []; selectedID = nil; hasSearched = false

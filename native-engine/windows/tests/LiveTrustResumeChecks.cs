@@ -12,9 +12,11 @@ namespace Knot.NativePreview
     {
         private static void LiveTrustResumeChecks()
         {
-            ResumeOwnerAndTerminalGates();
+            stage = "trust-owner-terminal-gates"; ResumeOwnerAndTerminalGates();
             CrossProcessTrustTransactions();
             IntegratedHostTrustChecks();
+            IntegratedConsumedGrantLastRevocation();
+            IntegratedExhaustedNumberWaiting();
             foreach (bool silence in new bool[] { false, true })
             {
                 ResumeAfterAuthenticatedRevocation(false, silence, false);
@@ -39,10 +41,13 @@ namespace Knot.NativePreview
             if (nonce.Length != 32 || !Guid.TryParseExact(nonce, "N", out parsed) ||
                 !String.Equals(Path.GetFullPath(root), Path.Combine(Path.GetTempPath(), "KnotTrustCheck_" + nonce), StringComparison.OrdinalIgnoreCase) ||
                 !Directory.Exists(root) || (mode != "revoke" && mode != "all")) throw new ArgumentException("Invalid fresh trust fixture.");
+            stage = "trust-probe-owner";
             using (IDisposable owner = PersistentCertificateLease.TryAcquireHostOwner(root)) Check(owner == null);
             using (FileStream ready = new FileStream(Path.Combine(root, mode + "-ready"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) ready.WriteByte(1);
             NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(new FreshTrustStorage(Path.Combine(root, mode)));
+            stage = "trust-probe-add";
             store.Add(TrustId(2), "Synthetic Mac B", TrustId(9));
+            stage = "trust-probe-results";
             Check(!store.List().ContainsKey(TrustId(1)) && store.List().ContainsKey(TrustId(2)));
             Console.WriteLine("{\"status\":\"passed\",\"freshSyntheticOnly\":true,\"crossProcessTrustLease\":true}");
             return 0;
@@ -53,11 +58,13 @@ namespace Knot.NativePreview
             Directory.CreateDirectory(root);
             try
             {
+                stage = "trust-cross-process-owner";
                 using (IDisposable owner = PersistentCertificateLease.TryAcquireHostOwner(root))
                 {
                     Check(owner != null);
                     foreach (string mode in new string[] { "revoke", "all" })
                     {
+                        stage = "trust-cross-process-" + mode;
                         FreshTrustStorage storage = new FreshTrustStorage(Path.Combine(root, mode));
                         NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(storage);
                         store.Add(TrustId(1), "Synthetic Mac A", TrustId(8));
@@ -79,6 +86,13 @@ namespace Knot.NativePreview
                             }
                             Check(child.WaitForExit(15000));
                             string output = child.StandardOutput.ReadToEnd(), errors = child.StandardError.ReadToEnd();
+                            if (child.ExitCode != 0)
+                            {
+                                // Relay only this fresh child's bounded authored
+                                // stage identifier, never its raw output or paths.
+                                var detail = System.Text.RegularExpressions.Regex.Match(output, "\"stage\":\"([a-z0-9-]{1,70})\"");
+                                stage = detail.Success ? "trust-child-" + detail.Groups[1].Value : "trust-child-failed";
+                            }
                             Check(child.ExitCode == 0 && errors.Length == 0 && output.Contains("\"crossProcessTrustLease\":true"));
                             Check(!store.List().ContainsKey(TrustId(1)) && store.List().Count == 1 && store.List().ContainsKey(TrustId(2)));
                         }
@@ -105,6 +119,7 @@ namespace Knot.NativePreview
         }
         private static void IntegratedHostTrustChecks()
         {
+            stage = "trust-host-ready-registration";
             // These are the production HostServer callbacks and trusted listener,
             // with injected fresh storage and a loopback-only disposable identity.
             NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(new MemoryTrustStorage());
@@ -130,6 +145,7 @@ namespace Knot.NativePreview
             }
             // Consume a fresh registered grant without claiming it. Expiry must
             // return to registered waiting; the last revoke must stop that run.
+            stage = "trust-host-grant-expiry";
             ticks = Stopwatch.GetTimestamp();
             using (HostServer host = new HostServer(IPAddress.Loopback, 0, new FakeMediaFactory(), new FakeInput(), true, null, true,
                 delegate { return Interlocked.Read(ref ticks); }, "Synthetic trusted expiry", syntheticTrustedDevices: store))
@@ -142,12 +158,58 @@ namespace Knot.NativePreview
                 Interlocked.Add(ref ticks, 100L * Stopwatch.Frequency);
                 WaitFor(delegate { return host.WaitingForRegisteredDevice; });
                 Check(IntegratedTrustedRequest(host, TrustId(1), key, "revoke").Kind == 1);
-                Check(!host.HasRegisteredDevices && !store.HasDevices && host.WaitStopped(4000));
+                WaitFor(delegate { return !host.HasRegisteredDevices; });
+                Check(!store.HasDevices && host.WaitStopped(4000));
             }
             Array.Clear(key, 0, key.Length);
+            Check(PreviewCopy.ReconcileEnrollmentPhase(HostViewPhase.Preparing, HostEnrollmentState.Stopped, false) == HostViewPhase.Stopping);
+            Check(PreviewCopy.ReconcileEnrollmentPhase(HostViewPhase.Preparing, HostEnrollmentState.Pending, false) == HostViewPhase.Preparing);
+            Check(PreviewCopy.ReconcileEnrollmentPhase(HostViewPhase.Preparing, HostEnrollmentState.Number, false) == HostViewPhase.Invitation);
+            Check(PreviewCopy.ReconcileEnrollmentPhase(HostViewPhase.Invitation, HostEnrollmentState.RegisteredWaiting, false) == HostViewPhase.RegisteredWaiting);
             Check(PreviewCopy.Privacy(false, true).IndexOf("내 PC로 등록", StringComparison.Ordinal) < 0);
             Check(PreviewCopy.Privacy(true, true).IndexOf("내 PC로 등록", StringComparison.Ordinal) >= 0);
             Check(PreviewCopy.Status("Connection ended. Waiting to reconnect a registered device.") != "Connection ended. Waiting to reconnect a registered device.");
+        }
+        private static void IntegratedConsumedGrantLastRevocation()
+        {
+            stage = "trust-host-consumed-unexpired-revoke";
+            NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(new MemoryTrustStorage());
+            store.Add(TrustId(1), "Synthetic saved Mac", TrustId(9));
+            byte[] key = NativeProtocol.DecodeToken(TrustId(9)); long ticks = Stopwatch.GetTimestamp();
+            using (HostServer host = new HostServer(IPAddress.Loopback, 0, new FakeMediaFactory(), new FakeInput(), true, null, true,
+                delegate { return Interlocked.Read(ref ticks); }, "Synthetic number grant", syntheticTrustedDevices: store))
+            {
+                host.Start(); Enroll(host, Discover(host), host.EnrollmentCode, false);
+                Interlocked.Add(ref ticks, 31L * Stopwatch.Frequency);
+                WaitFor(delegate { return host.WaitingForRegisteredDevice; });
+                Check(host.EnrollmentState == HostEnrollmentState.RegisteredWaiting);
+                Check(IntegratedTrustedRequest(host, TrustId(1), key, "revoke").Kind == 1);
+                WaitFor(delegate { return !host.HasRegisteredDevices; });
+                Check(!store.HasDevices && host.WaitStopped(4000));
+                Check(host.EnrollmentState == HostEnrollmentState.Stopped);
+            }
+            Array.Clear(key, 0, key.Length);
+        }
+        private static void IntegratedExhaustedNumberWaiting()
+        {
+            stage = "trust-host-exhausted-number-waiting";
+            NativeTrustedDeviceStore store = new NativeTrustedDeviceStore(new MemoryTrustStorage());
+            store.Add(TrustId(1), "Synthetic saved Mac", TrustId(9));
+            using (HostServer host = new HostServer(IPAddress.Loopback, 0, new FakeMediaFactory(), new FakeInput(), true, null, true,
+                Stopwatch.GetTimestamp, "Synthetic attempts", syntheticTrustedDevices: store))
+            {
+                host.Start();
+                for (int attempt = 0; attempt < 5; ++attempt)
+                {
+                    using (System.Net.Sockets.TcpClient client = new System.Net.Sockets.TcpClient())
+                    { client.Connect(IPAddress.Loopback, host.EnrollmentPort); }
+                    int expected = attempt + 1;
+                    WaitFor(delegate { return host.EnrollmentAttempts == expected && !host.EnrollmentBusy; });
+                }
+                WaitFor(delegate { return host.WaitingForRegisteredDevice; });
+                Check(host.EnrollmentState == HostEnrollmentState.RegisteredWaiting && host.EnrollmentCode == "");
+                host.Stop(); Check(host.WaitStopped(4000));
+            }
         }
         private static Packet IntegratedRegister(HostServer host, string offer, string id, string key)
         {
@@ -196,6 +258,7 @@ namespace Knot.NativePreview
         }
         private static void ResumeAfterAuthenticatedRevocation(bool anotherRemains, bool silence, bool failRead)
         {
+            stage = "trust-live-revoke-" + (anotherRemains ? "remaining" : "last") + (silence ? "-silence" : "-eof") + (failRead ? "-read-failure" : "");
             byte[] key = new byte[32]; for (int i = 0; i < key.Length; ++i) key[i] = 17;
             string id = NativeProtocol.Base64Url(new byte[32]);
             byte[] otherIdBytes = new byte[32]; otherIdBytes[0] = 1;

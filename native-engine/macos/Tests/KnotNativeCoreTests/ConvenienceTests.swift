@@ -69,4 +69,6 @@ private actor RetryFixture: NativeFileWorking {
     registration.action?(); #expect(activations == 1)
     center.post(name: NSApplication.willTerminateNotification, object: nil)
     #expect(!quick.shortcutAvailable && registration.stops == 1 && registration.action == nil)
+    center.post(name: NSApplication.willTerminateNotification, object: nil)
+    #expect(registration.stops == 1) // Subscription was cancelled by the first delivery.
 }

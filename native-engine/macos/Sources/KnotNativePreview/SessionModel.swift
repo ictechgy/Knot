@@ -5,6 +5,7 @@ import KnotNativeCore
 
 @MainActor
 final class SessionModel: ObservableObject {
+    typealias ClipboardFactory = @MainActor (@escaping (Packet) -> Bool) -> ClipboardModel
     enum Phase: Equatable { case idle, connecting, approval, decoding, streaming, failed }
     enum ReconnectMethod: Equatable { case registered, number, invitation }
     @Published var phase: Phase = .idle
@@ -28,6 +29,7 @@ final class SessionModel: ObservableObject {
     @Published private(set) var clipboard: ClipboardModel?
     @Published private(set) var quality: QualityModel?
     @Published private(set) var audio: NativeAudioSession?
+    private let makeClipboard: ClipboardFactory
     private let makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)?
     private let writeUpdateResume: @MainActor @Sendable (String?, TimeInterval) -> Void
     private let takeUpdateResume: @MainActor @Sendable () -> (String, TimeInterval)?
@@ -124,7 +126,9 @@ final class SessionModel: ObservableObject {
              let id = defaults?.string(forKey: "updateResumeDevice"), expiry = defaults?.double(forKey: "updateResumeExpiry") ?? 0
              defaults?.removeObject(forKey: "updateResumeDevice"); defaults?.removeObject(forKey: "updateResumeExpiry")
              return id.map { ($0, expiry) }
-         }) {
+         },
+         makeClipboard: @escaping ClipboardFactory = { ClipboardModel(send: $0) }) {
+        self.makeClipboard = makeClipboard
         self.writeUpdateResume = writeUpdateResume; self.takeUpdateResume = takeUpdateResume
         self.makeChannel = makeChannel
         self.makeAudioSession = makeAudioSession
@@ -414,7 +418,7 @@ final class SessionModel: ObservableObject {
                     switch incoming {
                     case .ready(let ready):
                         if ready.clipboardVersion == 1 {
-                            self.clipboard = ClipboardModel(send: { [weak self] packet in self?.sendControl(packet) ?? false })
+                            self.clipboard = self.makeClipboard({ [weak self] packet in self?.sendControl(packet) ?? false })
                         }
                         if ready.qualityVersion == 1 {
                             self.quality = QualityModel(send: { [weak self] packet in self?.sendControl(packet) ?? false })
@@ -544,8 +548,7 @@ final class SessionModel: ObservableObject {
         }
         let silence: Duration = phase == .approval ? .seconds(65) : .seconds(10)
         guard now - lastIncoming < silence else {
-            if recoveryDevice != nil { transportFailed() }
-            else { fail("The peer or host approval timed out. Create a new invitation.") }
+            transportFailed()
             return false
         }
         return true

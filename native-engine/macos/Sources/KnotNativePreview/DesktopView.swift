@@ -76,9 +76,9 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
     }
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         defer { fileDragInProgress = false }
-        guard model?.phase == .streaming, let files = model?.files, !files.isBusy,
-              let urls = NativeFileDrop.urls(from: sender.draggingPasteboard) else { return false }
-        model?.releaseInput(); files.send(urls: urls); onFilesDropped?(); return true
+        guard model?.phase == .streaming, let files = model?.files else { return false }
+        return NativeFileDrop.perform(from: sender.draggingPasteboard, files: files,
+            beforeSend: { model?.releaseInput() }, showStatus: { onFilesDropped?() })
     }
     override func draggingExited(_ sender: (any NSDraggingInfo)?) { fileDragInProgress = false }
     override func concludeDragOperation(_ sender: (any NSDraggingInfo)?) { fileDragInProgress = false }

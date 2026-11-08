@@ -86,7 +86,7 @@ struct PreviewWindow: View {
                 codeFocused = selected != nil
             }
             .onChange(of: model.isSystemSleeping) { _, sleeping in
-                if sleeping, enrollment.busy { enrollment.interruptForSleep() }
+                if sleeping, enrollment.busy { enrollment.interrupt(.sleep) }
             }
             .onChange(of: model.active) { _, active in
                 enrollment.cancel()
@@ -385,7 +385,7 @@ struct PreviewWindow: View {
         secret = ""; model.invitation = nil
         enrollment.connect(name: model.viewerLabel) { result in
             guard !model.active, !model.isSystemSleeping else {
-                enrollment.interruptForSleep(); return
+                enrollment.interrupt(model.isSystemSleeping ? .sleep : .anotherConnection, authenticated: true); return
             }
             let value = result.offer.invitation
             model.savedDeviceLabel = enrollment.selected?.name ?? "Windows PC"

@@ -294,12 +294,14 @@ namespace Knot.NativePreview
             {
                 if (server == null) return;
                 HostViewPhase before = phase;
-                if (presentation.IsCurrent(server.Identity) && server.IsActive) phase = HostViewPhase.Sharing;
-                else if (server.WaitingForRegisteredDevice) { phase = HostViewPhase.RegisteredWaiting; invitationAvailable = false; rawStatus = EnrollmentGuidance.RegisteredWaiting; }
-                else if (phase == HostViewPhase.RegisteredWaiting && server.EnrollmentReady) phase = HostViewPhase.Preparing;
-                else if (phase == HostViewPhase.Preparing && server.UsesEnrollment && !server.EnrollmentReady)
-                { phase = HostViewPhase.Invitation; invitationAvailable = true; rawStatus = EnrollmentGuidance.Ready; }
-                else if (phase == HostViewPhase.Sharing) phase = HostViewPhase.Stopping;
+                HostEnrollmentState enrollmentState = server.EnrollmentState;
+                phase = PreviewCopy.ReconcileEnrollmentPhase(phase, enrollmentState,
+                    presentation.IsCurrent(server.Identity) && server.IsActive);
+                if (phase == HostViewPhase.RegisteredWaiting)
+                { invitationAvailable = false; if (before != phase) rawStatus = EnrollmentGuidance.RegisteredWaiting; }
+                else if (phase == HostViewPhase.Invitation && before != phase && enrollmentState == HostEnrollmentState.Number)
+                { invitationAvailable = true; rawStatus = EnrollmentGuidance.Ready; }
+                else if (phase == HostViewPhase.Stopping) invitationAvailable = false;
                 if (before != phase) ApplyCurrentPresentation();
             };
             if (!fixtureMode) {
@@ -854,6 +856,11 @@ namespace Knot.NativePreview
                 try {
                     RunCertificate.ConvertPersistentForCompatibility();
                     certificateCompatibilityRequired = false;
+                }
+                catch (CertificateRenewalRequiredException) {
+                    certificateCompatibilityRequired = false; certificateRenewalRequired = true;
+                    FailShareStart("저장된 공유 인증서가 만료됐어요. 갱신 안내를 확인한 뒤 ‘만료 인증서 갱신하고 공유’를 눌러주세요. 아직 인증서와 등록 기기는 변경하지 않았어요.");
+                    return;
                 }
                 catch {
                     FailShareStart("인증서 전환을 완료하지 못해 공유를 시작하지 않았어요. 등록 초기화가 진행됐을 수 있으므로, 전환 후 새 번호로 다시 등록해주세요.");

@@ -46,6 +46,20 @@ namespace Knot.NativePreview
             try { EnrollmentProtocol.ValidName(value); return value; }
             catch (ProtocolException) { return "Windows PC"; }
         }
+        internal static HostViewPhase ReconcileEnrollmentPhase(HostViewPhase current, HostEnrollmentState state, bool active)
+        {
+            if (active) return HostViewPhase.Sharing;
+            switch (state)
+            {
+                case HostEnrollmentState.Stopped: return HostViewPhase.Stopping;
+                case HostEnrollmentState.RegisteredWaiting: return HostViewPhase.RegisteredWaiting;
+                case HostEnrollmentState.Number:
+                    return current == HostViewPhase.Preparing || current == HostViewPhase.RegisteredWaiting ? HostViewPhase.Invitation : current;
+                case HostEnrollmentState.Pending:
+                    return current == HostViewPhase.RegisteredWaiting || current == HostViewPhase.Invitation ? HostViewPhase.Preparing : current;
+                default: return current == HostViewPhase.Sharing ? HostViewPhase.Stopping : current;
+            }
+        }
         internal static string Phase(HostViewPhase phase)
         {
             switch (phase)

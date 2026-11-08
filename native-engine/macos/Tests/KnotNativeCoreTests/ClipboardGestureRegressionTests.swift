@@ -66,7 +66,11 @@ private final class ClipboardGestureChannel: NativeChannel, @unchecked Sendable 
     try #require(predicate())
 }
 @MainActor private func clipboardGestureSession(_ channel: ClipboardGestureChannel, _ presenter: ClipboardGesturePresenter) async throws -> SessionModel {
-    let model = SessionModel(makeChannel: { _ in channel }); model.surface = presenter
+    let model = SessionModel(makeChannel: { _ in channel }, makeClipboard: { send in
+        ClipboardModel(send: send,
+            readText: { Issue.record("Fixture must not read a real pasteboard"); return nil },
+            writeText: { _ in Issue.record("Fixture must not write a real pasteboard"); return false })
+    }); model.surface = presenter
     let token = Invitation.encodeBase64URL(Data(repeating: 17, count: 32))
     let json = "{\"v\":1,\"address\":\"10.0.0.1\",\"port\":48631,\"certificateSHA256\":\"\(String(repeating: "b", count: 64))\",\"token\":\"\(token)\"}"
     model.review("knot-native:v1:" + Invitation.encodeBase64URL(Data(json.utf8))); model.connect()

@@ -28,8 +28,11 @@ struct NativeFileUITests {
         #expect(NativeFileDrop.urls(from: pasteboard) == nil)
         #expect(NativeFileDrop.exceedsLimit(pasteboard))
         let files = FileTransferModel(rootName: "Synthetic")
-        files.rejectExcessDrop()
+        var transfers = 0, notices = 0
+        #expect(!NativeFileDrop.perform(from: pasteboard, files: files,
+            beforeSend: { transfers += 1 }, showStatus: { notices += 1 }))
         #expect(files.status == NativeFileDrop.tooManyItems)
+        #expect(transfers == 0 && notices == 1)
         #expect(files.fixtureOperationAttempts == 0)
     }
 

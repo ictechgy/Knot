@@ -102,13 +102,18 @@ namespace Knot.NativePreview
         // Application ownership has a distinct lease: holding it must not block
         // background store transactions on the certificate/store lease.
         internal static IDisposable TryAcquireHostOwner(string directory) { return Acquire(directory, "HostOwner", 0); }
-        private static IDisposable Acquire(string directory, string purpose, int waitMilliseconds)
+        internal static string HostOwnerName(string directory) { return Name(directory, "HostOwner", WindowsIdentity.GetCurrent().User); }
+        private static string Name(string directory, string purpose, SecurityIdentifier user)
         {
-            SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
             string suffix;
             using (SHA256 sha = SHA256.Create())
                 suffix = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()))).Replace("-", "");
-            string name = "Global\\KnotNative" + purpose + "_" + user.Value + "_" + suffix;
+            return "Global\\KnotNative" + purpose + "_" + user.Value + "_" + suffix;
+        }
+        private static IDisposable Acquire(string directory, string purpose, int waitMilliseconds)
+        {
+            SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
+            string name = Name(directory, purpose, user);
             MutexSecurity security = new MutexSecurity(); security.SetAccessRuleProtection(true, false); security.SetOwner(user);
             security.AddAccessRule(new MutexAccessRule(user, MutexRights.FullControl, AccessControlType.Allow));
             bool created;
@@ -125,11 +130,15 @@ namespace Knot.NativePreview
                 try { acquired = candidate.WaitOne(waitMilliseconds); }
                 catch (AbandonedMutexException)
                 {
-                    // WaitOne acquired the abandoned mutex. Release it while
-                    // failing this operation closed; a later explicit retry can
-                    // validate the atomically stored state from the beginning.
-                    candidate.ReleaseMutex();
-                    throw new CryptographicException("A previous certificate operation did not finish. Retry explicitly.");
+                    // App ownership has no in-progress store transaction to
+                    // recover. WaitOne already granted this thread ownership.
+                    // Certificate/store abandonment still fails closed below.
+                    if (purpose == "HostOwner") acquired = true;
+                    else
+                    {
+                        candidate.ReleaseMutex();
+                        throw new CryptographicException("A previous certificate operation did not finish. Retry explicitly.");
+                    }
                 }
                 if (!acquired)
                 {

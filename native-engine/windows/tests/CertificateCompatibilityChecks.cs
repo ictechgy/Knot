@@ -114,6 +114,8 @@ namespace Knot.NativePreview
                 legacy = PersistentCertificateFactory.CreatePfx(now.AddDays(-1), now.AddYears(5));
                 stage = "persistent-certificate-cross-process-lease";
                 CertificateLeaseChecks(root, legacy);
+                stage = "host-owner-abandoned-recovery";
+                HostOwnerAbandonmentChecks(Path.Combine(root, "abandoned-owner"));
                 stage = "persistent-certificate-legacy-explicit-conversion";
                 ObservedCertificateStorage old = new ObservedCertificateStorage(Path.Combine(root, "legacy")); old.Inner.Write(legacy);
                 Check(RunCertificate.RequiresCompatibilityMigration(old));
@@ -184,6 +186,10 @@ namespace Knot.NativePreview
                 {
                     ObservedCertificateStorage renewal = new ObservedCertificateStorage(Path.Combine(root, "renewal")); renewal.Inner.Write(renewable);
                     Check(RunCertificate.RequiresRenewal(renewal));
+                    bool renewalClassified = false;
+                    try { RunCertificate.ConvertPersistentForCompatibility(renewal); }
+                    catch (CertificateRenewalRequiredException) { renewalClassified = true; }
+                    Check(renewalClassified && renewal.Writes == 0 && renewal.Revocations == 0);
                     Check(renewal.Writes == 0 && renewal.Revocations == 0 && SameCertificateStore(renewal, renewable));
                     string expiredPin;
                     using (X509Certificate2 oldIdentity = PersistentCertificateFactory.Inspect(renewable))
@@ -240,6 +246,36 @@ namespace Knot.NativePreview
                 request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(purposes, false));
                 using (X509Certificate2 certificate = request.CreateSelfSigned(now.AddDays(-1), now.AddDays(364))) return certificate.Export(X509ContentType.Pfx);
             }
+        }
+        private static void HostOwnerAbandonmentChecks(string directory)
+        {
+            // Keep a passive handle alive after the owner thread exits; a sole
+            // crashed process normally closes its last handle and destroys the
+            // mutex instead. This exercises the actual abandonment condition.
+            Mutex retained = null; Exception threadFailure = null;
+            Thread owner = new Thread(delegate()
+            {
+                try
+                {
+                    var user = System.Security.Principal.WindowsIdentity.GetCurrent().User;
+                    var security = new System.Security.AccessControl.MutexSecurity();
+                    security.SetAccessRuleProtection(true, false); security.SetOwner(user);
+                    security.AddAccessRule(new System.Security.AccessControl.MutexAccessRule(user,
+                        System.Security.AccessControl.MutexRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+                    bool created;
+                    retained = new Mutex(false, PersistentCertificateLease.HostOwnerName(directory), out created, security);
+                    Check(created && retained.WaitOne(0));
+                    // Deliberately leave ownership held when this fresh thread exits.
+                }
+                catch (Exception failure) { threadFailure = failure; }
+            });
+            owner.IsBackground = true; owner.Start(); Check(owner.Join(5000));
+            try
+            {
+                if (threadFailure != null) throw threadFailure;
+                using (IDisposable recovered = PersistentCertificateLease.TryAcquireHostOwner(directory)) Check(recovered != null);
+            }
+            finally { if (retained != null) retained.Dispose(); }
         }
         private static int CertificateLeaseProbe(string root, string nonce)
         {
