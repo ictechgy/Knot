@@ -193,7 +193,7 @@ private func video18Hex(_ data: Data) -> String { data.map { String(format: "%02
     #expect(!policy.shouldPause(minutes: 1, backgroundOnly: false, now: began + .seconds(4262)))
 }
 
-@Test func videoControlDisruptiveBarrierRequiresPreparingButTrueNoOpDoesNot() throws {
+@Test func videoControlDisruptiveBarrierRequiresPreparingAndProfileAlwaysResets() throws {
     for operation in [VideoControlOperation.profile, .pause] {
         var receiver = try video18Receiving()
         try receiver.expectVideoControl(VideoControlRequest(operation: operation, requestID: 1, profile: operation == .profile ? video18Requested : nil))
@@ -203,6 +203,9 @@ private func video18Hex(_ data: Data) -> String { data.map { String(format: "%02
     }
     var receiver = try video18Receiving()
     try receiver.expectVideoControl(VideoControlRequest(operation: .profile, requestID: 1, profile: video18Requested))
-    _ = try receiver.accept(Packet(kind: .videoControlStatus, payload: video18Status(outcome: .applied)))
-    #expect(receiver.videoControl.pending == nil && receiver.videoControl.epoch == 0)
+    #expect(throws: (any Error).self) { try receiver.accept(Packet(kind: .videoControlStatus, payload: video18Status(outcome: .applied))) }
+    var noOp = try video18Receiving()
+    try noOp.expectVideoControl(VideoControlRequest(operation: .resume, requestID: 1))
+    _ = try noOp.accept(Packet(kind: .videoControlStatus, payload: video18Status(.resume, outcome: .applied)))
+    #expect(noOp.videoControl.pending == nil && noOp.videoControl.epoch == 0)
 }

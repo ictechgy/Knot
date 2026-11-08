@@ -353,8 +353,9 @@ namespace Knot.NativePreview
         }
         private static void VideoControlPrimeFailure()
         {
+            long ticks = 0;
             using (VideoFixtureFactory factory = new VideoFixtureFactory())
-            using (HostServer server = VideoHost(factory, new FakeInput(), Stopwatch.GetTimestamp))
+            using (HostServer server = VideoHost(factory, new FakeInput(), delegate { return Interlocked.Read(ref ticks); }))
             {
                 string token = Token(server); server.Start();
                 using (TlsClient client = new TlsClient(server, server.Pin))
@@ -366,7 +367,16 @@ namespace Knot.NativePreview
                     Packet fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1 && NativeProtocol.U64(fresh.Payload, 0) == 3);
                     Check(videos.Count == 2 && factory.Opened == 3 && factory.Closed == 2 && factory.PeakActive == 1);
                     Check(factory.Trace.IndexOf("close:14000000") < factory.Trace.LastIndexOf("open:12000000"));
-                    server.Stop(); Check(server.WaitStopped(4000)); Check(factory.Closed == 3 && factory.SameThread);
+                    // Even identical requested host bounds require a real reset:
+                    // Ready exposed only actual output, never those bounds.
+                    Interlocked.Exchange(ref ticks, 3L * Stopwatch.Frequency);
+                    client.Send(0x35, VideoRequest(1, 2, 1920, 1080, 60, 12000000));
+                    CheckVideoStatus(ReadVideoStatus(client, videos), 2, 1, 0, 0, 0, 0);
+                    CheckVideoStatus(ReadVideoStatus(client, videos), 2, 2, 1, 0, 0, 5);
+                    fresh = client.Read(); Check(fresh.Kind == 3 && fresh.Payload[16] == 1 && NativeProtocol.U64(fresh.Payload, 0) == 5);
+                    Check(videos.Count == 3 && NativeProtocol.U64(videos[2].Payload, 0) == 4 && videos[2].Payload[16] == 0);
+                    Check(factory.Opened == 4 && factory.Closed == 3 && factory.PeakActive == 1);
+                    server.Stop(); Check(server.WaitStopped(4000)); Check(factory.Closed == 4 && factory.SameThread);
                 }
             }
         }

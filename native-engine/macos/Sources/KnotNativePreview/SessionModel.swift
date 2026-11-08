@@ -705,6 +705,7 @@ final class SessionModel: ObservableObject {
         }
     }
     @discardableResult func send(_ packet: Packet) -> Bool {
+        if consumeVideoResumeGesture() { return false }
         guard packet.kind != .videoControl, phase == .streaming, !inputRecovery, !fileUIInputSuspended, videoControl?.blocksInput != true else { return false }
         do { try input.append(packet); acceptedLocalInteraction(); pumpWriter(); return true }
         catch {
@@ -736,6 +737,7 @@ final class SessionModel: ObservableObject {
     @discardableResult func sendCommittedText(_ text: String) -> Bool {
         // Empty AppKit commits are a no-op, including while input is paused.
         guard !text.isEmpty else { return true }
+        if consumeVideoResumeGesture() { return false }
         guard phase == .streaming, !inputRecovery, !fileUIInputSuspended, videoControl?.blocksInput != true else { return false }
         let packet: Packet
         do { packet = try Input.text(text) }
@@ -759,6 +761,7 @@ final class SessionModel: ObservableObject {
     /// independently of validation, empty clipboards or send admission failure.
     /// Preserve an existing focus/recovery pause without pausing normal typing.
     @discardableResult func prepareClipboardGesture() -> Bool {
+        if consumeVideoResumeGesture() { return false }
         guard phase == .streaming, !fileUIInputSuspended, videoControl?.blocksInput != true else { return false }
         acceptedLocalInteraction()
         clipboard?.cancel()
@@ -793,6 +796,13 @@ final class SessionModel: ObservableObject {
         guard videoControl?.blocksInput != true else { return }
         input.recover(); inputRecovery = false
         updateStreamingStatus()
+    }
+    /// Returning input wakes automatically paused video but is never replayed.
+    /// Manual pause still requires the explicit Resume action.
+    @discardableResult func consumeVideoResumeGesture() -> Bool {
+        guard phase == .streaming, !fileUIInputSuspended, let videoControl, videoControl.blocksInput else { return false }
+        acceptedLocalInteraction()
+        return true
     }
     func setFileUIInputSuspended(_ suspended: Bool) {
         fileUIInputSuspended = suspended

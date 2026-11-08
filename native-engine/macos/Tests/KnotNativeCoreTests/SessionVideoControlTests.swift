@@ -164,6 +164,36 @@ private func video18SessionStatus(_ operation: VideoControlOperation, id: UInt64
     }
 }
 
+@Test(arguments: [0, 1, 2, 3]) @MainActor
+func activeApplicationIdlePauseConsumesLocalUseAndResumesWithoutReplaying(_ gesture: Int) async throws {
+    let channel = Video18Channel()
+    let (model, _) = try await video18Start(channel: channel)
+    defer { model.disconnect() }
+    let control = try #require(model.videoControl)
+    model.idleVideoMinutes = 1; model.idleVideoBackgroundOnly = false
+    let now = ContinuousClock.now
+    model.setApplicationActive(true, now: now - .seconds(61))
+    model.acceptedLocalInteraction(now: now - .seconds(61))
+    #expect(model.checkDeadlines(now: now))
+    try await video18Wait { channel.writes.contains { $0.kind == .videoControl } }
+    channel.feed(video18SessionStatus(.pause, outcome: .preparing, paused: false).encoded + video18SessionStatus(.pause).encoded)
+    try await video18Wait { control.isPaused && !control.isApplying }
+    #expect(control.isAutomaticallyPaused)
+    switch gesture {
+    case 0: #expect(model.consumeVideoResumeGesture()) // key/overlay entry
+    case 1: #expect(!model.send(try Input.pointer(action: 1, x: 12, y: 12)))
+    case 2: #expect(!model.sendCommittedText("consume, never replay"))
+    default: #expect(!model.prepareClipboardGesture())
+    }
+    // The production cooldown is real; no app/system focus adapter is invoked.
+    try await Task.sleep(for: .milliseconds(2050))
+    control.tick()
+    try await video18Wait { channel.writes.filter { $0.kind == .videoControl }.count == 2 }
+    let requests = try channel.writes.filter { $0.kind == .videoControl }.map { try VideoControlRequest($0.payload).operation }
+    #expect(requests == [.pause, .resume])
+    #expect(channel.writes.allSatisfy { [.hello, .heartbeat, .releaseAll, .videoControl].contains($0.kind) })
+}
+
 @Test @MainActor func idleMonitorUsesOnlyInjectedApplicationNotificationsAndNeverStartsAConnection() {
     let model = SessionModel(), center = NotificationCenter(), monitor = NativeVideoIdleMonitor()
     monitor.bind(model, notificationCenter: center, initiallyActive: true)

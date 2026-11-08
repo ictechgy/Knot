@@ -111,7 +111,7 @@ public struct VideoControlReceiveState: Sendable {
                       status.nextSequence == 0, status.actual == actual, state == .paused || preparing else { throw NativeFailure.state }
             } else if status.videoEpoch == epoch {
                 guard status.outcome == .applied, state == .running, status.nextSequence == 0, status.actual == actual,
-                      pending.operation != .pause else { throw NativeFailure.state }
+                      pending.operation == .resume else { throw NativeFailure.state }
             } else {
                 guard preparing, epoch != UInt64.max, status.videoEpoch == epoch + 1, sequence != UInt64.max,
                       status.nextSequence == sequence + 1, pending.operation != .pause,

@@ -34,8 +34,6 @@ namespace Knot.NativePreview
             return (config.Width == 1920 && config.Height == 1080 || config.Width == 2560 && config.Height == 1440 ||
                 config.Width == 3840 && config.Height == 2160) && (config.Fps == 30 || config.Fps == 60) && MediaLimits.ValidConfig(config);
         }
-        internal static bool Same(MediaConfig a, MediaConfig b)
-        { return a.Width == b.Width && a.Height == b.Height && a.Fps == b.Fps && a.Bitrate == b.Bitrate; }
         internal static byte[] WithOffer(byte[] ready)
         {
             string json = StrictJson.Utf8.GetString(ready);
@@ -233,8 +231,10 @@ namespace Knot.NativePreview
                 byte reason = request.RejectionReason;
                 if (reason == 0 && request.Operation == 1 && !VideoControlProtocol.Allowed(request.Config)) reason = 2;
                 if (reason == 0 && paused && request.Operation == 1) reason = 3;
-                bool noOp = request.Operation == 2 && paused || request.Operation == 3 && !paused ||
-                    request.Operation == 1 && VideoControlProtocol.Same(profile, request.Config);
+                // Ready reports actual dimensions, not requested bounds, so a
+                // profile is always an explicit reset transaction. Only these
+                // idempotent pause/resume state requests are no-ops.
+                bool noOp = request.Operation == 2 && paused || request.Operation == 3 && !paused;
                 if (reason == 0 && !noOp && clock() < nextVideoChange) reason = 3;
                 if (reason != 0 || noOp)
                 {

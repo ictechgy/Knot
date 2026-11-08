@@ -186,6 +186,7 @@ struct NativeVideoStateOverlay: View {
                     }
                 }.padding(24).frame(maxWidth: 390).nativePanel().padding(20)
             }.contentShape(Rectangle())
+                .onTapGesture { if video.canResumeAutomatically { beforeAction() } }
         }
     }
 }

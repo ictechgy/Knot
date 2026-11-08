@@ -249,6 +249,7 @@ final class DesktopView: NSView, NativePresenter, @MainActor NSTextInputClient, 
         keyDown(with: event); return true
     }
     override func keyDown(with event: NSEvent) {
+        if !inputSuspended, !fileDragInProgress, focusedForInput, model?.consumeVideoResumeGesture() == true { return }
         let flags = Self.modifiers(event.modifierFlags)
         if acceptsInput, model?.macShortcuts == true, flags == .command,
            heldButtons.isEmpty, model?.clipboard != nil,
