@@ -19,7 +19,15 @@ final class SessionModel: ObservableObject {
     @Published var savedDeviceLabel = "Windows PC"
     @Published var autoReconnect = true {
         didSet {
-            if !autoReconnect { clearAutomaticRecovery(); if !active { endConnectionActivity() } }
+            if !autoReconnect {
+                let wasRecovering: Bool
+                switch registeredRecovery { case .transient, .suspended: wasRecovering = true; default: wasRecovering = false }
+                clearAutomaticRecovery()
+                if !active {
+                    endConnectionActivity()
+                    if wasRecovering { status = "자동 재연결을 껐어요. ‘내 PC’에서 직접 다시 연결할 수 있어요." }
+                }
+            }
             else if active, let device = selectedTrustedDevice, savedDevices.contains(device) {
                 registeredRecovery = .current(device)
             }

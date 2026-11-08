@@ -434,6 +434,10 @@ private final class ActivityRecorder: @unchecked Sendable {
     default: model.prepareForNewTarget()
     }
     #expect(activities.counts == (1, 1) && !model.hasPendingReconnect)
+    if action == "autoOff" {
+        #expect(model.status.contains("자동 재연결을 껐어요"))
+        #expect(!model.status.contains("계속 시도"))
+    }
     retry.advance()
     for _ in 0..<30 { await Task.yield() }
     #expect(!model.active && !model.hasPendingReconnect && activities.counts == (1, 1))
@@ -483,7 +487,10 @@ private final class ActivityRecorder: @unchecked Sendable {
         for registered in [false, true] {
             for code in ["timeout", "busy", "auth", "expired", "capture", "input", "protocol"] {
                 let retry = InertRetryWait()
-                let model = SessionModel(waitForReconnect: { try await retry.wait($0) },
+                let attempts = TrustedAttemptRecorder()
+                let model = SessionModel(makeChannel: { _ in Issue.record("Host error matrix must never open a media channel"); throw NativeFailure.state },
+                    makeTrustedClient: { _, _ in Issue.record("Host error matrix must not start a trusted connection"); return FailingTrustedClient(.transport, attempts) },
+                    waitForReconnect: { try await retry.wait($0) },
                     initialSavedDevices: registered ? [device] : [], initialRegisteredDevice: registered ? device : nil)
                 defer { model.disconnect(); retry.advance() }
                 model.phase = phase
@@ -495,7 +502,10 @@ private final class ActivityRecorder: @unchecked Sendable {
             }
         }
     }
-    let disabled = SessionModel(initialSavedDevices: [device], initialRegisteredDevice: device)
+    let attempts = TrustedAttemptRecorder()
+    let disabled = SessionModel(makeChannel: { _ in Issue.record("Disabled recovery must never open a media channel"); throw NativeFailure.state },
+        makeTrustedClient: { _, _ in Issue.record("Disabled recovery must never authenticate"); return FailingTrustedClient(.transport, attempts) },
+        initialSavedDevices: [device], initialRegisteredDevice: device)
     disabled.autoReconnect = false; disabled.phase = .approval; disabled.handleHostError("timeout")
     #expect(!disabled.hasPendingReconnect)
 }
