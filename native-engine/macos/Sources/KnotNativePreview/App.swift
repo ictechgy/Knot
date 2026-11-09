@@ -8,10 +8,7 @@ import Combine
 
 @main
 struct KnotNativePreviewApp: App {
-    @StateObject private var model = SessionModel(makeAudioSession: { try NativeAudioSession(invitation: $0) },
-                                                 makeConnectionActivity: { NativeConnectionActivity() },
-                                                 reloadSavedDevicesForNumber: { try NativeDeviceKeychain.load() },
-                                                 authorizeDeviceStorage: { try NativeDeviceKeychain.load(allowUserInteraction: true) })
+    @StateObject private var model: SessionModel
     @StateObject private var windowState = NativeWindowState()
     @StateObject private var preferences = NativePreferences()
     @StateObject private var quick = NativeQuickActivation()
@@ -19,7 +16,17 @@ struct KnotNativePreviewApp: App {
     @StateObject private var power = NativePowerMonitor()
     @StateObject private var videoIdle = NativeVideoIdleMonitor()
     @StateObject private var lifecycle = NativeApplicationLifecycle()
-    init() { NativeUpdateHandoff.runIfRequested() }
+    init() {
+        NativeUpdateHandoff.runIfRequested()
+        _model = StateObject(wrappedValue: Self.makeSessionModel())
+    }
+    @MainActor private static func makeSessionModel() -> SessionModel {
+        SessionModel(makeAudioSession: { try NativeAudioSession(invitation: $0) },
+                                                 makeConnectionActivity: { NativeConnectionActivity() },
+                                                 reloadSavedDevicesForNumber: { try NativeDeviceKeychain.load() },
+                                                 authorizeDeviceStorage: { try await NativeDeviceKeychain.authorizeLoad() },
+                                                 prepareDeviceStorage: { try NativeDeviceKeychain.prepare() })
+    }
     var body: some Scene {
         Window("Knot Native Preview", id: "main") {
             NativeMainContent(model: model, windowState: windowState, preferences: preferences, quick: quick, updates: updates, power: power, videoIdle: videoIdle, lifecycle: lifecycle)

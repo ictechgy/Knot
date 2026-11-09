@@ -5,9 +5,12 @@ import Testing
 @testable import KnotNativePreview
 
 // This entire suite uses inert injected functions, never a live Keychain.
-private final class SyntheticKeychainAccess: NativeDeviceKeychainAccess {
+// Each instance is used by one serialized operation. The contention fixture
+// transfers an instance to a worker and inspects it only after its semaphore.
+private final class SyntheticKeychainAccess: NativeDeviceKeychainAccess, @unchecked Sendable {
     var readStatus = errSecItemNotFound
     var value: CFTypeRef?
+    var readResponses: [(OSStatus, CFTypeRef?)] = []
     var updateStatus = errSecItemNotFound
     var addStatus = errSecSuccess
     var interactionStatus = errSecSuccess
@@ -15,10 +18,13 @@ private final class SyntheticKeychainAccess: NativeDeviceKeychainAccess {
     var policyStatuses: [OSStatus] = []
     var policies: [Bool] = []
     var copies: [[String: Any]] = []
+    var onCopy: (@Sendable () -> Void)?
     var updates: [([String: Any], [String: Any])] = []
     var additions: [[String: Any]] = []
     func copyMatching(_ query: [String: Any]) -> (OSStatus, CFTypeRef?) {
-        copies.append(query); return (readStatus, value)
+        copies.append(query)
+        onCopy?()
+        return readResponses.isEmpty ? (readStatus, value) : readResponses.removeFirst()
     }
     func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
         updates.append((query, attributes)); return updateStatus
@@ -33,6 +39,7 @@ private final class SyntheticKeychainAccess: NativeDeviceKeychainAccess {
     }
 }
 
+@Suite(.serialized)
 struct NativeDeviceKeychainTests {
     private func device() throws -> SavedNativeDevice {
         let fields: [String: String] = ["id": Invitation.encodeBase64URL(Data(repeating: 1, count: 32)),
@@ -151,6 +158,87 @@ struct NativeDeviceKeychainTests {
             try store.load()
         }
         #expect(access.copies.count == 1)
+    }
+    @Test func preparationDoesNotRewriteExistingItem() throws {
+        let access = SyntheticKeychainAccess()
+        access.readStatus = errSecSuccess; access.value = try JSONEncoder().encode([device()]) as CFData
+        let store = NativeDeviceKeychainStore(access: access)
+        try store.prepare()
+        #expect(access.copies.count == 1 && access.additions.isEmpty && access.updates.isEmpty)
+        #expect(access.policies == [false, true])
+        access.readStatus = errSecAuthFailed
+        #expect(throws: NativeDeviceKeychainFailure(operation: .read, status: errSecAuthFailed)) { try store.prepare() }
+        #expect(access.additions.isEmpty && access.updates.isEmpty)
+    }
+    @Test func preparationCreatesOnlyMissingEmptyItemAndVerifiesReadback() throws {
+        let access = SyntheticKeychainAccess()
+        access.readResponses = [(errSecItemNotFound, nil), (errSecSuccess, Data("[]".utf8) as CFData)]
+        let store = NativeDeviceKeychainStore(access: access)
+        try store.prepare()
+        #expect(access.copies.count == 2 && access.additions.count == 1 && access.updates.isEmpty)
+        #expect(access.additions[0][kSecValueData as String] as? Data == Data("[]".utf8))
+        #expect(access.policies == [false, true])
+        access.readResponses = [(errSecItemNotFound, nil), (errSecSuccess, try JSONEncoder().encode([device()]) as CFData)]
+        #expect(throws: NativeDeviceKeychainFailure(operation: .prepareReadback, status: errSecDecode)) { try store.prepare() }
+        #expect(access.updates.isEmpty && access.policies == [false, true, false, true])
+    }
+    @Test func preparationDuplicateAndFailedReadbackFailWithoutOverwrite() throws {
+        let access = SyntheticKeychainAccess()
+        access.addStatus = errSecDuplicateItem
+        let store = NativeDeviceKeychainStore(access: access)
+        #expect(throws: NativeDeviceKeychainFailure(operation: .add, status: errSecDuplicateItem)) { try store.prepare() }
+        #expect(access.copies.count == 1 && access.updates.isEmpty)
+        access.addStatus = errSecSuccess
+        access.readResponses = [(errSecItemNotFound, nil), (errSecItemNotFound, nil)]
+        #expect(throws: NativeDeviceKeychainFailure(operation: .prepareReadback, status: errSecDecode)) { try store.prepare() }
+        #expect(access.updates.isEmpty)
+    }
+    @Test @MainActor func authorizationAdapterRunsOffMainActor() async throws {
+        let devices = try await NativeDeviceKeychain.authorizeLoad(using: {
+            #expect(!Thread.isMainThread)
+            return []
+        })
+        #expect(devices.isEmpty)
+        do {
+            _ = try await NativeDeviceKeychain.authorizeLoad(using: {
+                #expect(!Thread.isMainThread)
+                throw NativeDeviceKeychainFailure(operation: .read, status: errSecAuthFailed)
+            })
+            Issue.record("Expected injected authorization failure")
+        } catch let error as NativeDeviceKeychainFailure {
+            #expect(error == NativeDeviceKeychainFailure(operation: .read, status: errSecAuthFailed))
+        }
+    }
+    @Test func noninteractiveCallFailsPromptlyWhileAuthorizationOwnsPolicy() throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        let owner = SyntheticKeychainAccess(); owner.previousInteraction = false
+        owner.onCopy = { entered.signal(); release.wait() }
+        DispatchQueue.global().async {
+            defer { finished.signal() }
+            do { _ = try NativeDeviceKeychainStore(access: owner).load(allowUserInteraction: true) }
+            catch { Issue.record(error) }
+        }
+        // Always release the owned synthetic operation, including a failed gate.
+        defer { release.signal() }
+        guard entered.wait(timeout: .now() + 5) == .success else {
+            Issue.record("Synthetic authorization did not enter its controlled read")
+            return
+        }
+        let blocked = SyntheticKeychainAccess()
+        let start = ContinuousClock.now
+        #expect(throws: NativeDeviceKeychainFailure(operation: .interactionPolicy, status: errSecInteractionNotAllowed)) {
+            try NativeDeviceKeychainStore(access: blocked).load()
+        }
+        #expect(ContinuousClock.now - start < .seconds(1))
+        #expect(blocked.copies.isEmpty && blocked.policies.isEmpty && blocked.updates.isEmpty && blocked.additions.isEmpty)
+        release.signal()
+        #expect(finished.wait(timeout: .now() + 5) == .success)
+        #expect(owner.policies == [true, false])
+        // Once the owner restores policy and releases the lock, access succeeds.
+        #expect(try NativeDeviceKeychainStore(access: blocked).load().isEmpty)
+        #expect(blocked.policies == [false, true])
     }
     @Test func invalidDeviceListCannotReachTheOS() throws {
         let access = SyntheticKeychainAccess()

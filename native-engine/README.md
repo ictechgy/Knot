@@ -26,9 +26,11 @@ ACL. It never reads, migrates or removes the old Data Protection item. This mean
 a previously unsaved pairing needs a new authenticated number and **내 PC로 등록**.
 Existing Windows registrations are not silently removed or replaced.
 
-Before registering on Windows, the Mac verifies its local store can be written
-and read back. It verifies the final credential again before advertising saved
-recovery. Storage errors remain visible during streaming and diagnostics include
+Before registering on Windows, the Mac checks existing local storage without
+rewriting it; if absent, it creates and reads back a new empty item. This catches
+missing-item write permission failures without overwriting a concurrent edit.
+An existing readable item does not guarantee a future write: the final credential
+must still be written and read back before saved recovery is advertised. Storage errors remain visible during streaming and diagnostics include
 only a fixed Keychain operation and OSStatus. The app and copied diagnostic now
 show the actual running build. This storage correction does not establish the
 cause of every network interruption or replace two-device sleep/wake acceptance.
@@ -39,11 +41,24 @@ registration and reconnect never open Keychain prompts. If access is denied, use
 may require **Always Allow**. The app retains the default Keychain ACL, offers no
 plaintext fallback, and does not weaken certificate or registered-device checks.
 Stable distribution signing and its credential-access policy remain release work.
+The interactive read runs on a dedicated background queue; while it waits,
+noninteractive store calls refuse immediately instead of blocking session work.
+Streaming uses a compact, dismissible warning control; full details remain in the
+connection page. Successful exact saved-identity selection clears historical
+registration warnings.
+
+The Windows registration acknowledgement and local Keychain commit are not a
+cross-device transaction. A final local failure can leave a new Windows record;
+the app reports that failure and Windows' registered-device manager can revoke
+that record. It never automatically evicts other registrations. Whole-array
+registration edits across simultaneously running app copies are not atomic.
 
 Native.19 retains Native.18's video-control protocol. Update **both apps to
 Native.19** when coming from Native.17; a Native.17 Windows host rejects the new
 video-control Hello. Downloading a DMG does not replace an already running app;
-confirm the visible full build after installation.
+confirm the visible full build after installation. A Native.18 Windows host also
+supports Native.19 Mac; the Windows update is recommended rather than required
+for this Mac-only storage correction.
 
 Update **both apps to Native.18** for connected video controls. On Mac, open **화질** to apply 1080p, 1440p or 4K stream bounds, 30/60fps and a 1–40Mbps target without pairing again. These are requested stream limits: the source retains its aspect ratio, is never upscaled and its physical display resolution is unchanged. The panel distinguishes accepted limits from actual settings; where live adjustment is supported, adaptive Text mode caps 30fps and Responsiveness caps 20Mbps. An unsupported optional adjustment retains the encoder's actual settings and reports the limitation. Hardware support and Wi-Fi still determine achievable quality.
 
@@ -86,7 +101,7 @@ CI now generates and PFX-reimports the same certificate used by production, asse
 - The menu-bar item and **Control+Option+Command+B** bring the owning Windows window forward. The app remembers its viewer name, Mac shortcut choice, reconnect preference, quality preference and fullscreen choice. Mission Control shortcuts remain owned by macOS.
 - Connected **화질** offers Auto / Text clarity / Responsiveness alongside explicit stream settings. Auto responds to slow socket writes and receiver pressure within the current accepted profile; dimensions change only after an explicit profile request. Receiver-only backoff bottoms out at 30fps and preserves bitrate, so it does not reduce load further when the selected stream is already 30fps. Hardware rejecting live bitrate changes retains the last applied settings and reports the limitation. This is an adaptive policy, not a measured latency guarantee.
 - The file panel counts completed items, reveals the most recently received item in Finder on request and retries only unacknowledged upload items. Received content never opens automatically. Byte-offset resume is not implemented; a lost acknowledgement can require a new collision-safe copy.
-- Signed-update infrastructure downloads in the background, verifies a publisher-pinned signature and artifact identity/hash/size, installs after the update action and relaunches. Registered-session resume intent lasts five minutes and is consumed once. Feed/key setup and actual installer/device acceptance remain separate prerequisites.
+- Signed-update infrastructure downloads in the background, verifies a publisher-pinned signature and artifact identity/hash/size, installs after the update action and relaunches. Registered-session resume intent lasts five minutes and is consumed once. An ad hoc Mac update can require explicit foreground Keychain reauthorization before a saved PC can be used; automatic resume cannot bypass it. Feed/key setup and actual installer/device acceptance remain separate prerequisites.
 
 ## Connect
 

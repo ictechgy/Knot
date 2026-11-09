@@ -142,8 +142,8 @@ final class NativeConnectionDiagnostics: ObservableObject {
         recoveryEntries.append(entry)
     }
     func recordKeychainFailure(_ failure: NativeDeviceKeychainFailure) {
-        // Storage failure is observable even before any transport is started.
-        record(.credentialStore)
+        // Separate history: an update's ACL prompt must not replace the first
+        // transport cause or evict the connection's bounded error history.
         if keychainEntries.count == Self.keychainCapacity { keychainEntries.removeFirst() }
         keychainEntries.append(KeychainEntry(seconds: elapsedSeconds, operation: failure.operation, status: failure.status))
     }
@@ -151,10 +151,10 @@ final class NativeConnectionDiagnostics: ObservableObject {
         Int(clamping: max(.zero, now() - began).components.seconds)
     }
     var report: String {
-        guard let firstIssue else { return "" }
+        guard firstIssue != nil || !keychainEntries.isEmpty else { return "" }
         var lines = ["Knot connection diagnostics v2", "App build: " + buildIdentity.diagnosticValue,
                      "Clock: elapsed seconds since app launch.",
-                     "First issue: " + firstIssue.line, "Recent issues:"] + entries.map(\.line)
+                     "First issue: " + (firstIssue?.line ?? "none"), "Recent issues:"] + entries.map(\.line)
         if let latestRecoverySnapshot {
             lines.append("Recovery state: " + latestRecoverySnapshot.line)
             lines.append("Recent recovery decisions:")
@@ -171,7 +171,7 @@ final class NativeConnectionDiagnostics: ObservableObject {
 struct NativeConnectionDiagnosticsView: View {
     @ObservedObject var diagnostics: NativeConnectionDiagnostics
     var body: some View {
-        if !diagnostics.entries.isEmpty {
+        if !diagnostics.entries.isEmpty || !diagnostics.keychainEntries.isEmpty {
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("이번 앱 실행 중 확인한 오류와 자동 복구 판단이에요. 시간은 앱 실행 시점 기준이며 재시도 후에도 남아요. 아래 내용을 선택해 복사할 수 있어요.")

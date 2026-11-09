@@ -516,14 +516,16 @@ class NativeRebuildTests(unittest.TestCase):
                       "audio-on", "audio-muted", "audio-unavailable", "audio-on-compact", "audio-muted-compact", "audio-unavailable-compact",
                       "audio-connecting", "audio-connecting-compact", "fullscreen-audio-connecting-controls",
                       "wake-reconnect", "wake-reconnect-compact",
-                      "sleep-recovery-compact",
+                      "sleep-recovery-compact", "storage-error", "storage-error-compact", "storage-streaming",
+                      "storage-streaming-compact", "fullscreen-storage-error", "fullscreen-storage-error-controls",
                       "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls",
                       "video-settings", "video-settings-compact", "video-settings-dark", "video-streaming", "video-paused-auto",
                       "video-paused-manual-compact", "fullscreen-video-applying", "fullscreen-video-paused", "video-rollback-settings", "video-unsupported-settings"]:
             image = self.output / "visuals" / ("mac-" + state + ".png")
             image.write_bytes(self.inert_visual_png())
             row = dict(name=image.name, sha256=native.digest(image), bytes=image.stat().st_size,
-                       width=640, height=480)
+                       width=640, height=480, appBuildVersion=native.VERSION,
+                       storageWarningVisible="storage-" in state)
             if state.startswith(("video-", "fullscreen-video-")):
                 row.update(videoControlVisible=True, videoControlSyntheticOnly=True,
                            videoControlPaused="paused" in state, videoControlApplying="applying" in state)
@@ -545,6 +547,17 @@ class NativeRebuildTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "must never invoke audio devices or output engines"):
                     builder.record_visual_checks(self.output / "visuals", [])
                 self.assertFalse(accepted_record.exists())
+        missing_storage = copy.deepcopy(baseline)
+        missing_storage["images"] = [row for row in missing_storage["images"] if row["name"] != "mac-storage-error.png"]
+        report_path.write_text(json.dumps(missing_storage))
+        with self.assertRaisesRegex(ValueError, "omitted a required task state"):
+            builder.record_visual_checks(self.output / "visuals", [])
+        self.assertFalse(accepted_record.exists())
+        wrong_build = copy.deepcopy(baseline)
+        wrong_build["images"][0]["appBuildVersion"] = "0.1.0-native.17"
+        report_path.write_text(json.dumps(wrong_build))
+        with self.assertRaisesRegex(ValueError, "exact source build"):
+            builder.record_visual_checks(self.output / "visuals", [])
         report_path.write_text(json.dumps(baseline))
         self.assertTrue(builder.record_visual_checks(self.output / "visuals", []).is_file())
 

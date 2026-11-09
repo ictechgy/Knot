@@ -575,6 +575,10 @@ class Builder:
             if name.casefold() in names:
                 raise ValueError("Duplicate UI fixture image name")
             names.add(name.casefold())
+            if self.platform == "macos" and row.get("appBuildVersion") != VERSION:
+                raise ValueError("Mac UI fixture must show the exact source build")
+            if self.platform == "macos" and "storage-" in name and row.get("storageWarningVisible") is not True:
+                raise ValueError("Mac storage fixture must retain its recovery warning")
             if self.platform == "macos" and name.startswith(("mac-video-", "mac-fullscreen-video-")):
                 if row.get("videoControlVisible") is not True or row.get("videoControlSyntheticOnly") is not True:
                     raise ValueError("Video control UI state must use the inert negotiated model")
@@ -599,7 +603,8 @@ class Builder:
                       "audio-on", "audio-muted", "audio-unavailable", "audio-on-compact", "audio-muted-compact", "audio-unavailable-compact",
                       "audio-connecting", "audio-connecting-compact", "fullscreen-audio-connecting-controls",
                       "wake-reconnect", "wake-reconnect-compact",
-                      "sleep-recovery-compact",
+                      "sleep-recovery-compact", "storage-error", "storage-error-compact", "storage-streaming",
+                      "storage-streaming-compact", "fullscreen-storage-error", "fullscreen-storage-error-controls",
                       "fullscreen-audio-on-controls", "fullscreen-audio-muted-controls", "fullscreen-audio-unavailable-controls",
                       "video-settings", "video-settings-compact", "video-settings-dark", "video-streaming", "video-paused-auto",
                       "video-paused-manual-compact", "fullscreen-video-applying", "fullscreen-video-paused", "video-rollback-settings", "video-unsupported-settings"]}
@@ -755,7 +760,7 @@ class Builder:
                          ROOT / "native-engine/pairing/CMakeLists.txt", ROOT / "native-engine/pairing/PROVENANCE.json",
                          *sorted((package / "Sources").rglob("*.swift")),
                          *sorted((package / "VisualFixtures").rglob("*.swift"))]
-        self.run("native-ui-visual-checks", [sys.executable, renderer, "--output", visuals],
+        self.run("native-ui-visual-checks", [sys.executable, renderer, "--output", visuals, "--build-version", VERSION],
                  timeout=600, env=swift_environment, command_inputs=[self.input(path) for path in visual_inputs])
         visual_record = self.record_visual_checks(visuals, visual_inputs)
         app = self.output / "Knot Native Preview.app"

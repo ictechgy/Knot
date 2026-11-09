@@ -41,6 +41,8 @@ final class SessionModel: ObservableObject {
     // desktop alone is not evidence that its recovery credential was saved.
     @Published private(set) var savedDeviceStorageMessage: String?
     private var registrationNeedsRetry = false
+    @Published private(set) var isAuthorizingSavedDeviceStorage = false
+    private var storageAuthorizationTask: Task<Void, Never>?
     @Published private(set) var clipboard: ClipboardModel?
     @Published private(set) var quality: QualityModel?
     @Published private(set) var videoControl: VideoControlModel?
@@ -98,7 +100,8 @@ final class SessionModel: ObservableObject {
     private let loadSavedDevices: @MainActor @Sendable () throws -> [SavedNativeDevice]
     private let reloadSavedDevicesForNumber: (@MainActor @Sendable () throws -> [SavedNativeDevice])?
     private let saveSavedDevices: @MainActor @Sendable ([SavedNativeDevice]) throws -> Void
-    private let authorizeDeviceStorage: (@MainActor @Sendable () throws -> [SavedNativeDevice])?
+    private let authorizeDeviceStorage: (@MainActor @Sendable () async throws -> [SavedNativeDevice])?
+    private let prepareDeviceStorage: (@MainActor @Sendable () throws -> Void)?
     private let registerDevice: @MainActor @Sendable (SavedNativeDevice, String, Invitation) async throws -> Void
     @Published var showFullscreenControls = false
     @Published private(set) var numberAuthorized = false
@@ -156,7 +159,8 @@ final class SessionModel: ObservableObject {
          makeAudioSession: (@MainActor @Sendable (Invitation) throws -> NativeAudioSession)? = nil,
          makeConnectionActivity: (@MainActor () -> any NativeConnectionActivityHolding)? = nil,
          reloadSavedDevicesForNumber: (@MainActor @Sendable () throws -> [SavedNativeDevice])? = nil,
-         authorizeDeviceStorage: (@MainActor @Sendable () throws -> [SavedNativeDevice])? = nil,
+         authorizeDeviceStorage: (@MainActor @Sendable () async throws -> [SavedNativeDevice])? = nil,
+         prepareDeviceStorage: (@MainActor @Sendable () throws -> Void)? = nil,
          writeUpdateResume: @escaping @MainActor @Sendable (String?, TimeInterval) -> Void = { id, expiry in
              let defaults = UserDefaults(suiteName: "io.knot.native-preview")
              defaults?.removeObject(forKey: "updateResumeDevice"); defaults?.removeObject(forKey: "updateResumeExpiry")
@@ -177,6 +181,7 @@ final class SessionModel: ObservableObject {
         self.makeConnectionActivity = makeConnectionActivity
         self.reloadSavedDevicesForNumber = reloadSavedDevicesForNumber
         self.authorizeDeviceStorage = authorizeDeviceStorage
+        self.prepareDeviceStorage = prepareDeviceStorage
         self.waitForInputDeadline = waitForInputDeadline
         self.makeTrustedClient = makeTrustedClient; self.waitForReconnect = waitForReconnect
         self.waitForWakeReadiness = waitForWakeReadiness; self.removeSavedDevice = removeSavedDevice
@@ -210,10 +215,26 @@ final class SessionModel: ObservableObject {
     /// Only an explicit foreground button calls the interactive adapter. Startup,
     /// number adoption, retry and wake use the noninteractive adapter exclusively.
     func authorizeSavedDeviceStorage() {
-        guard let authorizeDeviceStorage else { return }
-        refreshSavedDevices(using: authorizeDeviceStorage)
+        guard !isAuthorizingSavedDeviceStorage, registrationTask == nil,
+              let authorizeDeviceStorage else { return }
+        isAuthorizingSavedDeviceStorage = true
+        let run = identity
+        storageAuthorizationTask = Task { [weak self] in
+            let result: Result<[SavedNativeDevice], Error>
+            do { result = .success(try await authorizeDeviceStorage()) }
+            catch { result = .failure(error) }
+            guard let self else { return }
+            self.storageAuthorizationTask = nil; self.isAuthorizingSavedDeviceStorage = false
+            // A completed OS dialog cannot reselect a PC after a disconnect,
+            // sleep, or another connection changed the session identity.
+            guard self.identity == run, !Task.isCancelled else { return }
+            self.refreshSavedDevices(using: { try result.get() })
+        }
     }
-    func refreshSavedDevices() { refreshSavedDevices(using: loadSavedDevices) }
+    func refreshSavedDevices() {
+        guard !isAuthorizingSavedDeviceStorage else { return }
+        refreshSavedDevices(using: loadSavedDevices)
+    }
     private func refreshSavedDevices(using loader: @escaping @MainActor @Sendable () throws -> [SavedNativeDevice]) {
         do {
             savedDevices = try readDeviceStore(using: loader)
@@ -232,12 +253,13 @@ final class SessionModel: ObservableObject {
         catch { status = "등록된 PC를 읽지 못했어요. 키체인 접근을 확인하세요." }
     }
     func connectSaved(_ id: String) {
-        guard !active, !isSystemSleeping, let device = savedDevices.first(where: { $0.id == id }) else { return }
+        guard !active, !isSystemSleeping, !isAuthorizingSavedDeviceStorage, let device = savedDevices.first(where: { $0.id == id }) else { return }
         clearAutomaticRecovery(); endConnectionActivity(); reconnectAttempt = 0
         guard Invitation.validViewerLabel(viewerLabel) else {
             phase = .failed; status = "Choose a viewer label of 1–64 UTF-8 bytes without control characters."; return
         }
         reconnectMethod = .registered
+        registrationNeedsRetry = false; savedDeviceStorageMessage = nil
         selectedTrustedDevice = device; authenticatedRecoveryEndpoint = nil; recoveryCredential = .saved; pendingRegistration = nil
         beginTrustedConnection(device)
     }
@@ -273,6 +295,7 @@ final class SessionModel: ObservableObject {
         } catch { connectionFailed(error) }
     }
     func forgetSaved(_ id: String) {
+        guard !isAuthorizingSavedDeviceStorage else { return }
         guard let device = savedDevices.first(where: { $0.id == id }) else { return }
         let wasSelected = selectedTrustedDevice?.id == id
         // Revoke this connection/recovery immediately on the owner's request,
@@ -282,6 +305,8 @@ final class SessionModel: ObservableObject {
         // Windows device list offers independent, immediate server revocation.
         do { try removeSavedDevice(id); savedDevices.removeAll { $0.id == id } }
         catch {
+            noteDeviceStorageFailure(error)
+            savedDeviceStorageMessage = storageFailureMessage(error, prefix: "키체인에서 PC 등록을 해제하지 못했어요.")
             if wasSelected {
                 phase = .failed
                 status = "연결은 종료했지만 키체인에서 PC 등록을 해제하지 못했어요. 다시 시도하세요."
@@ -297,6 +322,7 @@ final class SessionModel: ObservableObject {
     }
     private func registerConnectedDevice(_ invitation: Invitation) {
         guard rememberThisPC, numberAuthorized, selectedTrustedDevice == nil else { return }
+        guard !isAuthorizingSavedDeviceStorage else { return }
         pendingRegistration = nil
         do {
             let stored = try readDeviceStore()
@@ -304,6 +330,7 @@ final class SessionModel: ObservableObject {
             if matches.count == 1, let existing = matches.first {
                 let target = try existing.atAuthenticatedEndpoint(invitation)
                 savedDevices = stored; selectedTrustedDevice = existing; authenticatedRecoveryEndpoint = target
+                registrationNeedsRetry = false; savedDeviceStorageMessage = nil
                 recoveryCredential = target.address == existing.address ? .saved : .authenticatedEndpoint
                 registeredRecovery = autoReconnect ? .current(existing) : nil
                 recordRecovery(target.address == existing.address ? .numberAdoptedSaved : .numberAdoptedEndpoint)
@@ -318,10 +345,11 @@ final class SessionModel: ObservableObject {
                 status = "등록된 PC는 16대까지 저장할 수 있어요. 기존 PC 등록을 해제한 뒤 다시 시도하세요."
                 return
             }
-            // Verify that the exact credential store is writable BEFORE asking
-            // Windows to remember this Mac. A successful empty read does not
-            // establish write permission (notably on ad hoc signed previews).
-            try persistDeviceStore(stored)
+            // Production verifies readable storage, creating an empty item only
+            // if absent. Never rewrite this earlier snapshot as a write probe:
+            // another app copy may have edited it. Final write+readback below
+            // remains the authority gate; preparation is not a transaction.
+            try prepareDeviceStorage?()
             let device = try NativeTrustedClient.newDevice(invitation: invitation, name: savedDeviceLabel)
             let run = identity
             recordRecovery(.registrationStarted)
@@ -359,6 +387,7 @@ final class SessionModel: ObservableObject {
         }
     }
     private func persistDeviceStore(_ devices: [SavedNativeDevice]) throws {
+        guard !isAuthorizingSavedDeviceStorage else { throw NativeFailure.state }
         try saveSavedDevices(devices)
         // Do not advertise recovery until a fresh read returns the exact bytes'
         // decoded credentials, including id, pin and secret.
@@ -369,7 +398,7 @@ final class SessionModel: ObservableObject {
     }
     private func storageFailureMessage(_ error: Error, prefix: String) -> String {
         if let failure = error as? NativeDeviceKeychainFailure {
-            return prefix + " 키체인 오류 \(failure.status). ‘키체인 접근 허용’에서 확인하세요."
+            return prefix + " 키체인 오류 \(failure.status). ‘키체인 접근 허용’을 누르고 지속 접근은 macOS의 ‘항상 허용’을 확인하세요."
         }
         return prefix + " 키체인 접근을 확인하세요."
     }
@@ -426,6 +455,7 @@ final class SessionModel: ObservableObject {
         if cancelledWake { recordRecovery(.wakeCancelled) }
     }
     private func readDeviceStore(using loader: (@MainActor @Sendable () throws -> [SavedNativeDevice])? = nil) throws -> [SavedNativeDevice] {
+        guard !isAuthorizingSavedDeviceStorage else { throw NativeFailure.state }
         do {
             let devices = try (loader ?? loadSavedDevices)()
             savedDeviceLoadUnavailable = false
@@ -552,7 +582,7 @@ final class SessionModel: ObservableObject {
         startConnection()
     }
     func connectAuthenticated(_ enrollment: AuthenticatedEnrollment) {
-        guard !active, !isSystemSleeping else { return }
+        guard !active, !isSystemSleeping, !isAuthorizingSavedDeviceStorage else { return }
         clearAutomaticRecovery(); endConnectionActivity(); identity = UUID()
         guard ContinuousClock.now < enrollment.expiresAt, Invitation.validViewerLabel(enrollment.viewerName) else {
             close(message: "Invitation was rejected or expired. Create a new invitation.", failed: true, numberConnection: true); return
@@ -575,6 +605,7 @@ final class SessionModel: ObservableObject {
         } else if matches.count == 1, let existing = matches.first,
                   let target = try? existing.atAuthenticatedEndpoint(authenticatedInvitation) {
             selectedTrustedDevice = existing; authenticatedRecoveryEndpoint = target
+            registrationNeedsRetry = false; savedDeviceStorageMessage = nil
             recoveryCredential = target.address == existing.address ? .saved : .authenticatedEndpoint
             adoptionEvent = target.address == existing.address ? .numberAdoptedSaved : .numberAdoptedEndpoint
         } else if matches.count > 1 {

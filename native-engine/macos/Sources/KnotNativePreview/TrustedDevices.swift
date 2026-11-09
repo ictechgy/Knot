@@ -32,7 +32,7 @@ struct SavedNativeDevice: Codable, Identifiable, Equatable, Sendable {
 /// Contains only non-secret error metadata suitable for diagnostics.
 struct NativeDeviceKeychainFailure: Error, Equatable, Sendable {
     enum Operation: String, Sendable {
-        case read, update, add, interactionState, interactionPolicy, restoreInteractionPolicy
+        case read, update, add, prepareReadback, interactionState, interactionPolicy, restoreInteractionPolicy
     }
     let operation: Operation
     let status: OSStatus
@@ -81,7 +81,13 @@ struct NativeDeviceKeychainStore {
          kSecUseDataProtectionKeychain as String: false]
     }
     private func scopedAccess<T>(allowUserInteraction: Bool, _ action: () throws -> T) throws -> T {
-        Self.accessLock.lock()
+        if allowUserInteraction {
+            Self.accessLock.lock()
+        } else if !Self.accessLock.try() {
+            // A foreground authorization dialog may own the process policy.
+            // Background/main-actor callers must fail promptly rather than wait.
+            throw NativeDeviceKeychainFailure(operation: .interactionPolicy, status: errSecInteractionNotAllowed)
+        }
         defer { Self.accessLock.unlock() }
         let (status, previous) = access.interactionAllowed()
         guard status == errSecSuccess else {
@@ -119,6 +125,22 @@ struct NativeDeviceKeychainStore {
     func load(allowUserInteraction: Bool = false) throws -> [SavedNativeDevice] {
         try scopedAccess(allowUserInteraction: allowUserInteraction) { try readStoredDevices() ?? [] }
     }
+    /// Verify existing data without rewriting it. Only a missing store creates
+    /// a new empty item; preparation cannot prove a future update will succeed.
+    func prepare() throws {
+        try scopedAccess(allowUserInteraction: false) {
+            guard try readStoredDevices() == nil else { return }
+            var add = query
+            add[kSecValueData as String] = try JSONEncoder().encode([SavedNativeDevice]())
+            let added = access.add(add)
+            guard added == errSecSuccess else {
+                throw NativeDeviceKeychainFailure(operation: .add, status: added)
+            }
+            guard try readStoredDevices() == [] else {
+                throw NativeDeviceKeychainFailure(operation: .prepareReadback, status: errSecDecode)
+            }
+        }
+    }
     func save(_ devices: [SavedNativeDevice], allowUserInteraction: Bool = false) throws {
         guard devices.count <= 16, Set(devices.map(\.id)).count == devices.count else { throw NativeFailure.oversized }
         _ = try devices.map { try $0.validated() }
@@ -150,9 +172,24 @@ struct NativeDeviceKeychainStore {
 /// reauthorization is opt-in; automatic reconnect never opens a Keychain dialog.
 /// An updated ad-hoc binary may require the user to authorize the new signature.
 enum NativeDeviceKeychain {
+    private static let authorizationQueue = DispatchQueue(label: "org.knot.native-preview.keychain-authorization")
     private static var store: NativeDeviceKeychainStore { NativeDeviceKeychainStore(access: SystemNativeDeviceKeychainAccess()) }
     static func load(allowUserInteraction: Bool = false) throws -> [SavedNativeDevice] {
         try store.load(allowUserInteraction: allowUserInteraction)
+    }
+    static func prepare() throws { try store.prepare() }
+    /// Invoke only for an explicit foreground user action. The entire blocking
+    /// policy/read/restore scope runs off the main actor so the app stays usable
+    /// while macOS asks the user to authorize an updated app signature.
+    static func authorizeLoad() async throws -> [SavedNativeDevice] {
+        try await authorizeLoad(using: { try load(allowUserInteraction: true) })
+    }
+    static func authorizeLoad(using operation: @escaping @Sendable () throws -> [SavedNativeDevice]) async throws -> [SavedNativeDevice] {
+        try await withCheckedThrowingContinuation { continuation in
+            authorizationQueue.async {
+                continuation.resume(with: Result(catching: operation))
+            }
+        }
     }
     static func save(_ devices: [SavedNativeDevice], allowUserInteraction: Bool = false) throws {
         try store.save(devices, allowUserInteraction: allowUserInteraction)

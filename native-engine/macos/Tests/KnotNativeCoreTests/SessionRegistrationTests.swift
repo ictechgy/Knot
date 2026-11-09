@@ -18,6 +18,12 @@ import KnotNativeCore
     var saveFails = false
     var discardSaves = false
     var afterRegistrationSaveFails = false
+    var failReadAfterFinalSave = false
+    private(set) var preparations = 0
+    func prepare() throws {
+        preparations += 1
+        if saveFails { throw NativeFailure.trust }
+    }
     init(_ devices: [SavedNativeDevice]) { self.devices = devices }
     func load() throws -> [SavedNativeDevice] {
         loads += 1
@@ -28,6 +34,7 @@ import KnotNativeCore
         saves += 1
         if saveFails || (afterRegistrationSaveFails && !registered.isEmpty) { throw NativeFailure.trust }
         if !discardSaves { self.devices = devices }
+        if failReadAfterFinalSave && !registered.isEmpty { loadFails = true }
     }
     func remove(_ id: String) { removals += 1; devices.removeAll { $0.id == id } }
     func register(_ device: SavedNativeDevice) async throws {
@@ -43,7 +50,9 @@ private final class RegistrationChannel: NativeChannel, @unchecked Sendable {
     private var read: CheckedContinuation<Data, any Error>?
     private var closed = false
     func start() async throws {}
-    func send(_ packet: Packet) async throws {}
+    private var outgoing: [Packet] = []
+    var heartbeatCount: Int { lock.withLock { outgoing.filter { $0.kind == .heartbeat }.count } }
+    func send(_ packet: Packet) async throws { lock.withLock { outgoing.append(packet) } }
     func readExactly(_ count: Int, timeout: Duration) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             lock.lock()
@@ -105,7 +114,8 @@ private func registrationEnrollment(address: String = "192.168.50.200", pin: Str
 @MainActor private func registrationModel(_ store: RegistrationStore, channel: RegistrationChannel) -> SessionModel {
     SessionModel(makeChannel: { _ in channel }, initialSavedDevices: store.devices,
         loadSavedDevices: { try store.load() }, saveSavedDevices: { try store.save($0) },
-        registerDevice: { device, _, _ in try await store.register(device) })
+        registerDevice: { device, _, _ in try await store.register(device) },
+        prepareDeviceStorage: { try store.prepare() })
 }
 
 @MainActor private func presentNumberSession(_ model: SessionModel, channel: RegistrationChannel,
@@ -157,7 +167,7 @@ struct SessionRegistrationTests {
         defer { model.disconnect(); store.duringRegistration = nil }
         try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: registrationEnrollment())
         try await waitForRegistration { model.status.contains("등록을 저장하지 못했어요") }
-        #expect(store.registered.count == 1 && store.loads == 3 && store.saves == 1)
+        #expect(store.registered.count == 1 && store.loads == 2 && store.saves == 0)
         #expect(store.devices.count == 16 && model.savedDevices.count == 15)
         #expect(model.phase == .streaming && model.status.contains("Windows의 등록 기기"))
     }
@@ -222,7 +232,8 @@ private final class RegistrationProofClient: NativeTrustedConnecting, Sendable {
         waitForReconnect: { _ in try await retry.wait() }, waitForWakeReadiness: { try await wake.wait() },
         initialSavedDevices: initialDevices ?? store.devices, removeSavedDevice: { store.remove($0) },
         loadSavedDevices: { try store.load() }, saveSavedDevices: { try store.save($0) },
-        registerDevice: { device, _, _ in try await store.register(device) }, reloadSavedDevicesForNumber: reload)
+        registerDevice: { device, _, _ in try await store.register(device) }, reloadSavedDevicesForNumber: reload,
+        prepareDeviceStorage: { try store.prepare() })
 }
 
 @MainActor private func showRecoveryNumberSession(_ model: SessionModel, channels: RegistrationChannels,
@@ -646,7 +657,7 @@ extension SessionRegistrationTests {
         let model = registrationModel(store, channel: channel)
         defer { model.disconnect() }
         try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: registrationEnrollment())
-        #expect(store.registered.isEmpty && store.saves == 1 && store.loads == 1)
+        #expect(store.registered.isEmpty && store.saves == 0 && store.loads == 1 && store.preparations == 1)
         #expect(model.savedDevices.isEmpty && model.phase == .streaming && !model.hasPendingReconnect)
         #expect(model.savedDeviceStorageMessage?.contains("자동 재연결은 준비되지 않았어요") == true)
         model.releaseInput()
@@ -660,7 +671,7 @@ extension SessionRegistrationTests {
         defer { model.disconnect() }
         try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: registrationEnrollment())
         try await waitForRegistration { model.savedDevices.count == 1 }
-        #expect(store.saves == 2 && store.loads == 4 && store.registered.count == 1)
+        #expect(store.saves == 1 && store.loads == 3 && store.registered.count == 1 && store.preparations == 1)
         #expect(model.savedDevices == store.devices && model.savedDeviceStorageMessage == nil)
         #expect(model.diagnostics.latestRecoverySnapshot?.credential == .saved)
     }
@@ -679,7 +690,7 @@ extension SessionRegistrationTests {
         #expect(store.registered.count == 1)
     }
 
-    @Test @MainActor func keychainAuthorizationRequiresExplicitActionAndPreservesActiveSession() throws {
+    @Test @MainActor func keychainAuthorizationRequiresExplicitActionInIdle() async throws {
         var authorizations = 0
         let device = try registrationDevice(1)
         let model = SessionModel(loadSavedDevices: { throw NativeFailure.trust },
@@ -687,7 +698,73 @@ extension SessionRegistrationTests {
         model.refreshSavedDevices()
         #expect(authorizations == 0 && model.savedDevices.isEmpty && model.savedDeviceStorageMessage != nil)
         model.authorizeSavedDeviceStorage()
+        try await waitForRegistration { !model.isAuthorizingSavedDeviceStorage }
         #expect(authorizations == 1 && model.savedDevices == [device] && model.savedDeviceStorageMessage == nil)
         #expect(model.phase == .idle)
+    }
+}
+
+
+extension SessionRegistrationTests {
+    @Test @MainActor func blockedAuthorizationKeepsStreamingHeartbeatWriterRunning() async throws {
+        let gate = RegistrationWaitGate(), channel = RegistrationChannel(), presenter = RegistrationPresenter()
+        let device = try registrationDevice(1)
+        var reads = 0
+        let model = SessionModel(makeChannel: { _ in channel },
+            loadSavedDevices: { reads += 1; throw NativeFailure.trust },
+            authorizeDeviceStorage: { try await gate.wait(); return [device] })
+        defer { model.disconnect(); gate.releaseAll() }
+        model.refreshSavedDevices()
+        try await presentNumberSession(model, channel: channel, presenter: presenter,
+            enrollment: registrationEnrollment(), remember: false)
+        let before = channel.heartbeatCount
+        model.authorizeSavedDeviceStorage(); model.authorizeSavedDeviceStorage()
+        try await waitForRegistration { gate.count == 1 }
+        #expect(model.isAuthorizingSavedDeviceStorage && model.phase == .streaming)
+        model.refreshSavedDevices() // Must not synchronously wait for the store's UI policy lock.
+        #expect(reads == 1)
+        try await waitForRegistration { channel.heartbeatCount > before }
+        #expect(model.phase == .streaming && model.isAuthorizingSavedDeviceStorage)
+        gate.releaseAll()
+        try await waitForRegistration { !model.isAuthorizingSavedDeviceStorage }
+        #expect(model.savedDevices == [device] && model.phase == .streaming)
+    }
+
+    @Test @MainActor func lateAuthorizationCannotReselectAfterManualDisconnect() async throws {
+        let gate = RegistrationWaitGate(), device = try registrationDevice(1)
+        let model = SessionModel(authorizeDeviceStorage: { try await gate.wait(); return [device] })
+        defer { gate.releaseAll() }
+        model.authorizeSavedDeviceStorage()
+        try await waitForRegistration { gate.count == 1 }
+        model.disconnect(); let status = model.status
+        gate.releaseAll()
+        try await waitForRegistration { !model.isAuthorizingSavedDeviceStorage }
+        #expect(model.savedDevices.isEmpty && model.phase == .idle && model.status == status)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func confirmedSavedAuthorityClearsHistoricalRegistrationWarning(_ useNumber: Bool) async throws {
+        let store = RegistrationStore([]); store.failReadAfterFinalSave = true
+        let channel = RegistrationChannel(), presenter = RegistrationPresenter()
+        let model = SessionModel(makeChannel: { _ in channel },
+            loadSavedDevices: { try store.load() }, saveSavedDevices: { try store.save($0) },
+            registerDevice: { device, _, _ in try await store.register(device) },
+            authorizeDeviceStorage: { store.loadFails = false; return try store.load() },
+            prepareDeviceStorage: { try store.prepare() })
+        defer { model.disconnect() }
+        let enrollment = try registrationEnrollment()
+        try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: enrollment)
+        try await waitForRegistration { model.savedDeviceStorageMessage != nil }
+        #expect(store.devices.count == 1 && model.savedDevices.isEmpty)
+        model.authorizeSavedDeviceStorage()
+        try await waitForRegistration { !model.isAuthorizingSavedDeviceStorage }
+        let device = try #require(model.savedDevices.first)
+        #expect(model.savedDeviceStorageMessage != nil) // Load alone does not authorize this session.
+        model.disconnect()
+        if useNumber { model.connectAuthenticated(try registrationEnrollment(pin: device.certificateSHA256, token: 9)) }
+        else { model.connectSaved(device.id) }
+        #expect(model.savedDeviceStorageMessage == nil)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .saved)
+        #expect(store.registered.count == 1 && store.saves == 1)
     }
 }

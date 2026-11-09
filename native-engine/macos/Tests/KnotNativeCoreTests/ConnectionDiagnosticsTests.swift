@@ -104,8 +104,8 @@ private func recoverySnapshot(credential: NativeRecoveryCredential = .saved,
     var instant = began
     let diagnostics = NativeConnectionDiagnostics(now: { instant }, buildIdentity: NativeBuildIdentity(version: "0.1.0-native.19"))
     diagnostics.recordKeychainFailure(NativeDeviceKeychainFailure(operation: .add, status: -34018))
-    #expect(diagnostics.firstIssue?.issue == .credentialStore)
-    #expect(diagnostics.report.contains("First issue: +0s  storage.reconnect-keychain"))
+    #expect(diagnostics.firstIssue == nil)
+    #expect(diagnostics.report.contains("First issue: none"))
     #expect(diagnostics.report.contains("Recent keychain failures:\n+0s  keychain.add status=-34018"))
     for index in 1...20 {
         instant = began + .seconds(index)
@@ -113,8 +113,11 @@ private func recoverySnapshot(credential: NativeRecoveryCredential = .saved,
     }
     #expect(diagnostics.keychainEntries.count == NativeConnectionDiagnostics.keychainCapacity)
     #expect(diagnostics.keychainEntries.first?.seconds == 13 && diagnostics.keychainEntries.last?.seconds == 20)
-    #expect(diagnostics.firstIssue == .init(seconds: 0, issue: .credentialStore))
+    #expect(diagnostics.firstIssue == nil)
     #expect(diagnostics.report.utf8.count < 4096)
+    #expect(diagnostics.entries.isEmpty)
+    diagnostics.record(.silenceDeadline)
+    #expect(diagnostics.firstIssue?.issue == .silenceDeadline)
 }
 
 @Test @MainActor func recoveryDiagnosticsAcceptOnlyFixedCategoriesAndClampNegativeElapsedAndAttempt() {

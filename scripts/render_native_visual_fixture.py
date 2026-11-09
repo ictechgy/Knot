@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import struct
 import subprocess
@@ -24,7 +25,11 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--build-version", default=SYNTHETIC_BUILD_VERSION,
+                        help="Authored version from this source build, never an installed app")
     args = parser.parse_args()
+    if not re.fullmatch(r"0\.1\.0-native\.[1-9][0-9]{0,4}", args.build_version) or int(args.build_version.rsplit(".", 1)[1]) > 65535:
+        raise SystemExit("Invalid authored fixture build")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     marker = output / ".native-visual-owned.json"
@@ -89,7 +94,7 @@ def main():
         (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
             "CFBundleExecutable": executable.name, "CFBundleIdentifier": "org.knot.native-visual-fixture." + uuid.uuid4().hex,
             "CFBundleName": "KnotNativeVisualFixture", "CFBundlePackageType": "APPL", "CFBundleIconFile": "AppIcon",
-            "KnotNativeVersion": SYNTHETIC_BUILD_VERSION,
+            "KnotNativeVersion": args.build_version,
             "LSMinimumSystemVersion": "26.0", "LSUIElement": True, "NSHighResolutionCapable": True}))
         ui = [p for p in sorted((ROOT / "native-engine/macos/Sources/KnotNativePreview").glob("*.swift")) if p.name != "App.swift"]
         run("compile-visual-ui", ["/usr/bin/swiftc", "-parse-as-library", "-module-name", "KnotNativeVisualFixture",
@@ -115,7 +120,7 @@ def main():
             type(rendered.get("modelPhaseChecks")) is not int or rendered["modelPhaseChecks"] != len(rendered["images"])):
         raise SystemExit("Visual fixture did not measure adapter attempts and intended model phases")
     for row in rendered["images"]:
-        if row.get("appBuildVersion") != SYNTHETIC_BUILD_VERSION:
+        if row.get("appBuildVersion") != args.build_version:
             raise SystemExit("Visual fixture omitted its exact authored build identity")
         if row.get("storageWarningVisible") is not row["state"].startswith("storage-"):
             raise SystemExit("Visual fixture did not retain the expected storage warning")

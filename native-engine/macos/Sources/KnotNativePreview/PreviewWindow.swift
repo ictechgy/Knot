@@ -30,6 +30,8 @@ struct PreviewWindow: View {
     @FocusState private var codeFocused: Bool
     @State private var activeTarget: NativeTarget?
     @State private var deviceToForget: SavedNativeDevice?
+    @State private var showingStorageWarning = false
+    @State private var storageWarningDismissed = false
 
     init(model: SessionModel, simulatedDesktop: AnyView? = nil, initialHelp: Bool = false, simulatedFullscreen: Bool? = nil, enrollment: EnrollmentModel? = nil, initialManualAddress: Bool = false, windowState: NativeWindowState? = nil, simulatedFiles: FileTransferModel? = nil, initialFiles: Bool = false, updates: NativeUpdateModel? = nil, simulatedAudio: NativeAudioSession? = nil, simulatedVideo: VideoControlModel? = nil) {
         self.model = model
@@ -73,6 +75,7 @@ struct PreviewWindow: View {
                             .padding(.horizontal, 32).padding(.top, 32).padding(.bottom, 28)
                             .frame(maxWidth: .infinity, alignment: .topLeading)
                     }.background(NativeStyle.canvas)
+                        .disabled(model.isAuthorizingSavedDeviceStorage)
                 }
             }
         }.frame(minWidth: 880, minHeight: 620)
@@ -87,6 +90,7 @@ struct PreviewWindow: View {
             .onChange(of: enrollment.selectedID) { _, selected in
                 codeFocused = selected != nil
             }
+            .onChange(of: model.savedDeviceStorageMessage) { _, _ in storageWarningDismissed = false }
             .onChange(of: model.isSystemSleeping) { _, sleeping in
                 if sleeping, enrollment.busy { enrollment.interrupt(.sleep) }
             }
@@ -205,12 +209,29 @@ struct PreviewWindow: View {
                         .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
                 Spacer(minLength: 8)
-                Button("키체인 접근 허용") {
+                Button(model.isAuthorizingSavedDeviceStorage ? "접근 확인 중…" : "키체인 접근 허용") {
                     model.releaseInput()
                     model.authorizeSavedDeviceStorage()
-                }.buttonStyle(.bordered)
+                }.buttonStyle(.bordered).disabled(model.isAuthorizingSavedDeviceStorage)
                     .accessibilityHint("macOS가 접근 확인을 요청할 수 있어요. 허용 여부는 직접 선택해요.")
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16).nativePanel()
+        }
+    }
+
+    @ViewBuilder private var sessionStorageWarningControl: some View {
+        if model.savedDeviceStorageMessage != nil, !storageWarningDismissed {
+            HStack(spacing: 8) {
+                Button { model.releaseInput(); showingStorageWarning = true } label: {
+                    Label(model.isAuthorizingSavedDeviceStorage ? "키체인 접근 확인 중…" : "자동 재연결 등록 확인",
+                          systemImage: "exclamationmark.triangle")
+                }.buttonStyle(.plain)
+                    .popover(isPresented: $showingStorageWarning) {
+                        savedDeviceStorageWarning.frame(width: 430).padding(12)
+                    }
+                Button { storageWarningDismissed = true; showingStorageWarning = false } label: {
+                    Image(systemName: "xmark")
+                }.buttonStyle(.plain).accessibilityLabel("이번 화면에서 등록 안내 접기")
+            }.font(.system(size: 12)).padding(10).nativePanel()
         }
     }
 
@@ -563,9 +584,9 @@ struct PreviewWindow: View {
                         }.padding(28).frame(maxWidth: 460).nativePanel().padding(24).allowsHitTesting(false)
                     }
                 }
+                .overlay(alignment: .topTrailing) { sessionStorageWarningControl.padding(12) }
                 .overlay(alignment: .bottom) {
                     VStack(spacing: 10) {
-                        savedDeviceStorageWarning.frame(maxWidth: 620)
                         if model.phase == .streaming, model.inputRecovery {
                             Label(NativeCopy.status(model.status), systemImage: "cursorarrow.click")
                                 .font(.system(size: 13)).multilineTextAlignment(.center)
