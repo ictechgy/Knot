@@ -10,7 +10,8 @@ import Combine
 struct KnotNativePreviewApp: App {
     @StateObject private var model = SessionModel(makeAudioSession: { try NativeAudioSession(invitation: $0) },
                                                  makeConnectionActivity: { NativeConnectionActivity() },
-                                                 reloadSavedDevicesForNumber: { try NativeDeviceKeychain.load() })
+                                                 reloadSavedDevicesForNumber: { try NativeDeviceKeychain.load() },
+                                                 authorizeDeviceStorage: { try NativeDeviceKeychain.load(allowUserInteraction: true) })
     @StateObject private var windowState = NativeWindowState()
     @StateObject private var preferences = NativePreferences()
     @StateObject private var quick = NativeQuickActivation()

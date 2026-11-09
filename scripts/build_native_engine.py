@@ -23,7 +23,7 @@ from build_snapshot import source_snapshot, validate_corresponding_source
 from native_updates import build_resource as native_update_resource
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.1.0-native.18"
+VERSION = "0.1.0-native.19"
 VERSION_BASE, PREVIEW_BUILD = VERSION.split("-native.", 1)
 NUMERIC_VERSION = VERSION_BASE + "." + PREVIEW_BUILD
 

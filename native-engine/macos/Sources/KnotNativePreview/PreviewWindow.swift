@@ -103,6 +103,10 @@ struct PreviewWindow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Knot").font(.system(size: 24, weight: .semibold))
                     Text("Native Preview").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(model.diagnostics.buildIdentity.version ?? "빌드 정보 없음")
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityLabel("실행 중인 앱 버전: \(model.diagnostics.buildIdentity.diagnosticValue)")
                 }
             }.padding(.horizontal, 22).padding(.top, 30).padding(.bottom, 36)
             sidebarButton("원격 데스크톱", symbol: "display", selected: !showingHelp) { showingHelp = false }
@@ -145,6 +149,7 @@ struct PreviewWindow: View {
                     symbol: model.phase == .failed || enrollment.phase == .failed ? "exclamationmark.circle" : enrollment.busy ? "clock" : "circle",
                     tint: model.phase == .failed || enrollment.phase == .failed ? .orange : .secondary)
             }
+            savedDeviceStorageWarning
             if model.hasPendingReconnect {
                 VStack(alignment: .leading, spacing: 14) {
                     Label("등록된 PC에 다시 연결해요", systemImage: "arrow.clockwise").font(.headline)
@@ -173,6 +178,8 @@ struct PreviewWindow: View {
                     Text("이 이름은 연결 요청의 참고 정보예요. 확인된 기기 신원을 뜻하지 않아요.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                     Toggle("등록 기기의 일시적인 끊김 자동 복구", isOn: $model.autoReconnect)
+                    Text(model.diagnostics.buildIdentity.displayText)
+                        .font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
                     Divider()
                     NativeIdleVideoSettings(minutes: $model.idleVideoMinutes, backgroundOnly: $model.idleVideoBackgroundOnly,
                         onInteraction: { model.acceptedLocalInteraction() })
@@ -184,6 +191,26 @@ struct PreviewWindow: View {
             NativeConnectionDiagnosticsView(diagnostics: model.diagnostics)
             Text("미리보기 · Windows 11 SDR 기본 화면 → Apple Silicon Mac")
                 .font(.system(size: 11)).foregroundStyle(.tertiary)
+        }
+    }
+
+    @ViewBuilder private var savedDeviceStorageWarning: some View {
+        if let message = model.savedDeviceStorageMessage {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("자동 재연결 등록을 확인해 주세요").font(.system(size: 13, weight: .semibold))
+                    Text(message).font(.system(size: 12)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+                Spacer(minLength: 8)
+                Button("키체인 접근 허용") {
+                    model.releaseInput()
+                    model.authorizeSavedDeviceStorage()
+                }.buttonStyle(.bordered)
+                    .accessibilityHint("macOS가 접근 확인을 요청할 수 있어요. 허용 여부는 직접 선택해요.")
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(16).nativePanel()
         }
     }
 
@@ -537,12 +564,15 @@ struct PreviewWindow: View {
                     }
                 }
                 .overlay(alignment: .bottom) {
-                    if model.phase == .streaming, model.inputRecovery {
-                        Label(NativeCopy.status(model.status), systemImage: "cursorarrow.click")
-                            .font(.system(size: 13)).multilineTextAlignment(.center)
-                            .frame(maxWidth: 620).padding(.horizontal, 16).padding(.vertical, 12)
-                            .nativePanel().padding(18).allowsHitTesting(false)
-                    }
+                    VStack(spacing: 10) {
+                        savedDeviceStorageWarning.frame(maxWidth: 620)
+                        if model.phase == .streaming, model.inputRecovery {
+                            Label(NativeCopy.status(model.status), systemImage: "cursorarrow.click")
+                                .font(.system(size: 13)).multilineTextAlignment(.center)
+                                .frame(maxWidth: 620).padding(.horizontal, 16).padding(.vertical, 12)
+                                .nativePanel().allowsHitTesting(false)
+                        }
+                    }.padding(18)
                 }
             Divider().frame(height: immersive ? 0 : nil).clipped()
             keyboardBar

@@ -1,6 +1,5 @@
 import Foundation
 import Security
-import LocalAuthentication
 import CryptoKit
 import Network
 import KnotNativeCore
@@ -30,38 +29,138 @@ struct SavedNativeDevice: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
-/// No reads occur at construction or in synthetic view fixtures. Access is
-/// restricted to this exact application-owned Keychain service/account.
-enum NativeDeviceKeychain {
-    private static let service = "io.knot.native-preview.trusted-devices.v1"
-    private static var query: [String: Any] { [kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service, kSecAttrAccount as String: "devices",
-        kSecUseDataProtectionKeychain as String: true] }
-    static func load() throws -> [SavedNativeDevice] {
-        var request = query; request[kSecReturnData as String] = true; request[kSecMatchLimit as String] = kSecMatchLimitOne
-        let context = LAContext(); context.interactionNotAllowed = true
-        request[kSecUseAuthenticationContext as String] = context
+/// Contains only non-secret error metadata suitable for diagnostics.
+struct NativeDeviceKeychainFailure: Error, Equatable, Sendable {
+    enum Operation: String, Sendable {
+        case read, update, add, interactionState, interactionPolicy, restoreInteractionPolicy
+    }
+    let operation: Operation
+    let status: OSStatus
+}
+
+/// The seam never touches the OS until a store operation is explicitly called.
+protocol NativeDeviceKeychainAccess {
+    func copyMatching(_ query: [String: Any]) -> (OSStatus, CFTypeRef?)
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus
+    func add(_ attributes: [String: Any]) -> OSStatus
+    func interactionAllowed() -> (OSStatus, Bool)
+    func setInteractionAllowed(_ allowed: Bool) -> OSStatus
+}
+
+private struct SystemNativeDeviceKeychainAccess: NativeDeviceKeychainAccess {
+    func copyMatching(_ query: [String: Any]) -> (OSStatus, CFTypeRef?) {
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(request as CFDictionary, &result)
-        if status == errSecItemNotFound { return [] }
-        guard status == errSecSuccess, let bytes = result as? Data, bytes.count <= 32768 else { throw NativeFailure.trust }
+        return (SecItemCopyMatching(query as CFDictionary, &result), result)
+    }
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
+    func add(_ attributes: [String: Any]) -> OSStatus { SecItemAdd(attributes as CFDictionary, nil) }
+    // LAContext.interactionNotAllowed does not suppress file-based Keychain ACL
+    // prompts. Use the legacy process-local policy for a serialized sync scope.
+    func interactionAllowed() -> (OSStatus, Bool) {
+        var allowed: DarwinBoolean = false
+        let status = SecKeychainGetUserInteractionAllowed(&allowed)
+        return (status, allowed.boolValue)
+    }
+    func setInteractionAllowed(_ allowed: Bool) -> OSStatus {
+        SecKeychainSetUserInteractionAllowed(allowed)
+    }
+}
+
+struct NativeDeviceKeychainStore {
+    // Ad-hoc previews cannot use entitlement-gated Data Protection storage.
+    // Separate the namespace; never inspect/migrate old credentials implicitly.
+    static let service = "io.knot.native-preview.trusted-devices.file.v2"
+    private static let accessLock = NSLock()
+    private let access: any NativeDeviceKeychainAccess
+    init(access: any NativeDeviceKeychainAccess) { self.access = access }
+    private var query: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: Self.service, kSecAttrAccount as String: "devices",
+         kSecUseDataProtectionKeychain as String: false]
+    }
+    private func scopedAccess<T>(allowUserInteraction: Bool, _ action: () throws -> T) throws -> T {
+        Self.accessLock.lock()
+        defer { Self.accessLock.unlock() }
+        let (status, previous) = access.interactionAllowed()
+        guard status == errSecSuccess else {
+            throw NativeDeviceKeychainFailure(operation: .interactionState, status: status)
+        }
+        let changed = access.setInteractionAllowed(allowUserInteraction)
+        guard changed == errSecSuccess else {
+            let restored = access.setInteractionAllowed(previous)
+            guard restored == errSecSuccess else {
+                throw NativeDeviceKeychainFailure(operation: .restoreInteractionPolicy, status: restored)
+            }
+            throw NativeDeviceKeychainFailure(operation: .interactionPolicy, status: changed)
+        }
+        let result = Result(catching: action)
+        let restored = access.setInteractionAllowed(previous)
+        guard restored == errSecSuccess else {
+            throw NativeDeviceKeychainFailure(operation: .restoreInteractionPolicy, status: restored)
+        }
+        return try result.get()
+    }
+    private func readStoredDevices() throws -> [SavedNativeDevice]? {
+        var request = query
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        let (status, result) = access.copyMatching(request)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else {
+            throw NativeDeviceKeychainFailure(operation: .read, status: status)
+        }
+        guard let bytes = result as? Data, bytes.count <= 32768 else { throw NativeFailure.malformed }
         let devices = try JSONDecoder().decode([SavedNativeDevice].self, from: bytes)
         guard devices.count <= 16, Set(devices.map(\.id)).count == devices.count else { throw NativeFailure.malformed }
         return try devices.map { try $0.validated() }
     }
-    static func save(_ devices: [SavedNativeDevice]) throws {
+    func load(allowUserInteraction: Bool = false) throws -> [SavedNativeDevice] {
+        try scopedAccess(allowUserInteraction: allowUserInteraction) { try readStoredDevices() ?? [] }
+    }
+    func save(_ devices: [SavedNativeDevice], allowUserInteraction: Bool = false) throws {
         guard devices.count <= 16, Set(devices.map(\.id)).count == devices.count else { throw NativeFailure.oversized }
         _ = try devices.map { try $0.validated() }
         let bytes = try JSONEncoder().encode(devices)
         guard bytes.count <= 32768 else { throw NativeFailure.oversized }
-        let update = SecItemUpdate(query as CFDictionary, [kSecValueData as String: bytes] as CFDictionary)
-        if update == errSecItemNotFound {
-            var add = query; add[kSecValueData as String] = bytes
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { throw NativeFailure.trust }
-        } else if update != errSecSuccess { throw NativeFailure.trust }
+        try scopedAccess(allowUserInteraction: allowUserInteraction) {
+            // The file-based API can update an item even when its read ACL would
+            // reject this binary. Require authorized, valid existing data first;
+            // a changed ad-hoc signature must never overwrite an unreadable item.
+            if try readStoredDevices() == nil {
+                var add = query; add[kSecValueData as String] = bytes
+                // Omit custom ACL, access group, sync and DPK-only accessibility.
+                // The OS assigns the creating application's default ACL.
+                let added = access.add(add)
+                guard added == errSecSuccess else {
+                    throw NativeDeviceKeychainFailure(operation: .add, status: added)
+                }
+            } else {
+                let updated = access.update(query, attributes: [kSecValueData as String: bytes])
+                guard updated == errSecSuccess else {
+                    throw NativeDeviceKeychainFailure(operation: .update, status: updated)
+                }
+            }
+        }
     }
-    static func remove(_ id: String) throws { try save(load().filter { $0.id != id }) }
+}
+
+/// No reads occur at construction or in synthetic view fixtures. Foreground
+/// reauthorization is opt-in; automatic reconnect never opens a Keychain dialog.
+/// An updated ad-hoc binary may require the user to authorize the new signature.
+enum NativeDeviceKeychain {
+    private static var store: NativeDeviceKeychainStore { NativeDeviceKeychainStore(access: SystemNativeDeviceKeychainAccess()) }
+    static func load(allowUserInteraction: Bool = false) throws -> [SavedNativeDevice] {
+        try store.load(allowUserInteraction: allowUserInteraction)
+    }
+    static func save(_ devices: [SavedNativeDevice], allowUserInteraction: Bool = false) throws {
+        try store.save(devices, allowUserInteraction: allowUserInteraction)
+    }
+    static func remove(_ id: String, allowUserInteraction: Bool = false) throws {
+        try save(load(allowUserInteraction: allowUserInteraction).filter { $0.id != id },
+                 allowUserInteraction: allowUserInteraction)
+    }
 }
 
 protocol NativeTrustedConnecting: AnyObject, Sendable {

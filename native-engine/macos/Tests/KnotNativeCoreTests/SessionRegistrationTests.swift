@@ -15,13 +15,20 @@ import KnotNativeCore
     var duringRegistration: (() -> Void)?
     var loadFails = false
     var registrationFails = false
+    var saveFails = false
+    var discardSaves = false
+    var afterRegistrationSaveFails = false
     init(_ devices: [SavedNativeDevice]) { self.devices = devices }
     func load() throws -> [SavedNativeDevice] {
         loads += 1
         if loadFails { throw NativeFailure.trust }
         return devices
     }
-    func save(_ devices: [SavedNativeDevice]) { saves += 1; self.devices = devices }
+    func save(_ devices: [SavedNativeDevice]) throws {
+        saves += 1
+        if saveFails || (afterRegistrationSaveFails && !registered.isEmpty) { throw NativeFailure.trust }
+        if !discardSaves { self.devices = devices }
+    }
     func remove(_ id: String) { removals += 1; devices.removeAll { $0.id == id } }
     func register(_ device: SavedNativeDevice) async throws {
         registered.append(device)
@@ -97,7 +104,7 @@ private func registrationEnrollment(address: String = "192.168.50.200", pin: Str
 
 @MainActor private func registrationModel(_ store: RegistrationStore, channel: RegistrationChannel) -> SessionModel {
     SessionModel(makeChannel: { _ in channel }, initialSavedDevices: store.devices,
-        loadSavedDevices: { try store.load() }, saveSavedDevices: { store.save($0) },
+        loadSavedDevices: { try store.load() }, saveSavedDevices: { try store.save($0) },
         registerDevice: { device, _, _ in try await store.register(device) })
 }
 
@@ -150,7 +157,7 @@ struct SessionRegistrationTests {
         defer { model.disconnect(); store.duringRegistration = nil }
         try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: registrationEnrollment())
         try await waitForRegistration { model.status.contains("등록을 저장하지 못했어요") }
-        #expect(store.registered.count == 1 && store.loads == 2 && store.saves == 0)
+        #expect(store.registered.count == 1 && store.loads == 3 && store.saves == 1)
         #expect(store.devices.count == 16 && model.savedDevices.count == 15)
         #expect(model.phase == .streaming && model.status.contains("Windows의 등록 기기"))
     }
@@ -214,7 +221,7 @@ private final class RegistrationProofClient: NativeTrustedConnecting, Sendable {
     return SessionModel(makeChannel: { try channels.make($0) }, makeTrustedClient: { device, _ in proof.make(device) },
         waitForReconnect: { _ in try await retry.wait() }, waitForWakeReadiness: { try await wake.wait() },
         initialSavedDevices: initialDevices ?? store.devices, removeSavedDevice: { store.remove($0) },
-        loadSavedDevices: { try store.load() }, saveSavedDevices: { store.save($0) },
+        loadSavedDevices: { try store.load() }, saveSavedDevices: { try store.save($0) },
         registerDevice: { device, _, _ in try await store.register(device) }, reloadSavedDevicesForNumber: reload)
 }
 
@@ -629,4 +636,58 @@ func registrationStoreRereadReusesUniqueSavedIdentityAndRefusesAmbiguousIdentity
         #expect(model.savedDevices == [device] && store.devices == [device])
     }
     #expect(store.loads == 1 && store.saves == 0 && store.registered.isEmpty)
+}
+
+
+extension SessionRegistrationTests {
+    @Test @MainActor func unavailableWritePermissionStopsRegistrationBeforeRemoteSideEffect() async throws {
+        let store = RegistrationStore([]); store.saveFails = true
+        let channel = RegistrationChannel(), presenter = RegistrationPresenter()
+        let model = registrationModel(store, channel: channel)
+        defer { model.disconnect() }
+        try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: registrationEnrollment())
+        #expect(store.registered.isEmpty && store.saves == 1 && store.loads == 1)
+        #expect(model.savedDevices.isEmpty && model.phase == .streaming && !model.hasPendingReconnect)
+        #expect(model.savedDeviceStorageMessage?.contains("자동 재연결은 준비되지 않았어요") == true)
+        model.releaseInput()
+        #expect(model.savedDeviceStorageMessage != nil)
+    }
+
+    @Test @MainActor func registrationRequiresPersistedReadbackBeforeRecoveryBecomesAvailable() async throws {
+        let store = RegistrationStore([])
+        let channel = RegistrationChannel(), presenter = RegistrationPresenter()
+        let model = registrationModel(store, channel: channel)
+        defer { model.disconnect() }
+        try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: registrationEnrollment())
+        try await waitForRegistration { model.savedDevices.count == 1 }
+        #expect(store.saves == 2 && store.loads == 4 && store.registered.count == 1)
+        #expect(model.savedDevices == store.devices && model.savedDeviceStorageMessage == nil)
+        #expect(model.diagnostics.latestRecoverySnapshot?.credential == .saved)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func failedFinalPersistenceNeverAdvertisesRecovery(_ silentDiscard: Bool) async throws {
+        let store = RegistrationStore([])
+        store.discardSaves = silentDiscard; store.afterRegistrationSaveFails = !silentDiscard
+        let channel = RegistrationChannel(), presenter = RegistrationPresenter()
+        let model = registrationModel(store, channel: channel)
+        defer { model.disconnect() }
+        try await presentNumberSession(model, channel: channel, presenter: presenter, enrollment: registrationEnrollment())
+        try await waitForRegistration { model.savedDeviceStorageMessage != nil }
+        #expect(model.phase == .streaming && model.savedDevices.isEmpty && !model.hasPendingReconnect)
+        #expect(model.savedDeviceStorageMessage?.contains("자동 재연결은 준비되지 않았어요") == true)
+        #expect(store.registered.count == 1)
+    }
+
+    @Test @MainActor func keychainAuthorizationRequiresExplicitActionAndPreservesActiveSession() throws {
+        var authorizations = 0
+        let device = try registrationDevice(1)
+        let model = SessionModel(loadSavedDevices: { throw NativeFailure.trust },
+            authorizeDeviceStorage: { authorizations += 1; return [device] })
+        model.refreshSavedDevices()
+        #expect(authorizations == 0 && model.savedDevices.isEmpty && model.savedDeviceStorageMessage != nil)
+        model.authorizeSavedDeviceStorage()
+        #expect(authorizations == 1 && model.savedDevices == [device] && model.savedDeviceStorageMessage == nil)
+        #expect(model.phase == .idle)
+    }
 }

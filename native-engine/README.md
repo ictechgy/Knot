@@ -15,7 +15,35 @@ Windows uses DXGI Desktop Duplication, D3D11 SDR/NV12 processing and a **hardwar
 
 **Microphone forwarding, ambient clipboard synchronization, headless/virtual displays, secure desktop/UAC/lock screen, HDR, rotation and multiple displays remain unsupported.** Native.11 adds explicit text copy/paste, opt-in trusted devices and reconnect, adaptive quality and signed-update infrastructure. Public update publishing remains unconfigured; see [UPDATES.md](UPDATES.md). Existing production desktop/files/reverse/Linux apps remain separate. The host cursor's separate DXGI overlay is not composited. Real GPU/Home, input/IME, fullscreen and network quality require device acceptance; codec or TLS failure does not select a weaker backend.
 
-## Daily use (native.18)
+## Daily use (native.19)
+
+Native.19 corrects Mac registration storage for ad hoc signed previews. Earlier
+previews selected the entitlement-gated Data Protection Keychain even though the
+app was ad hoc signed without those entitlements: a missing-item read could
+succeed while its first write failed with `errSecMissingEntitlement` (-34018).
+The Mac now uses its own file-based Keychain item with the OS-created application
+ACL. It never reads, migrates or removes the old Data Protection item. This means
+a previously unsaved pairing needs a new authenticated number and **내 PC로 등록**.
+Existing Windows registrations are not silently removed or replaced.
+
+Before registering on Windows, the Mac verifies its local store can be written
+and read back. It verifies the final credential again before advertising saved
+recovery. Storage errors remain visible during streaming and diagnostics include
+only a fixed Keychain operation and OSStatus. The app and copied diagnostic now
+show the actual running build. This storage correction does not establish the
+cause of every network interruption or replace two-device sleep/wake acceptance.
+
+An updated ad hoc binary has a different code-signing identity. Background reads,
+registration and reconnect never open Keychain prompts. If access is denied, use
+**키체인 접근 허용** in the foreground and review the macOS dialog; ongoing access
+may require **Always Allow**. The app retains the default Keychain ACL, offers no
+plaintext fallback, and does not weaken certificate or registered-device checks.
+Stable distribution signing and its credential-access policy remain release work.
+
+Native.19 retains Native.18's video-control protocol. Update **both apps to
+Native.19** when coming from Native.17; a Native.17 Windows host rejects the new
+video-control Hello. Downloading a DMG does not replace an already running app;
+confirm the visible full build after installation.
 
 Update **both apps to Native.18** for connected video controls. On Mac, open **화질** to apply 1080p, 1440p or 4K stream bounds, 30/60fps and a 1–40Mbps target without pairing again. These are requested stream limits: the source retains its aspect ratio, is never upscaled and its physical display resolution is unchanged. The panel distinguishes accepted limits from actual settings; where live adjustment is supported, adaptive Text mode caps 30fps and Responsiveness caps 20Mbps. An unsupported optional adjustment retains the encoder's actual settings and reports the limitation. Hardware support and Wi-Fi still determine achievable quality.
 

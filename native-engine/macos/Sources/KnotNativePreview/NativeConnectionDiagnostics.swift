@@ -2,6 +2,23 @@ import Foundation
 import Combine
 import SwiftUI
 
+/// Only the application's version field is exposed. An absent or malformed
+/// bundle value never contributes arbitrary text to UI or copied diagnostics.
+struct NativeBuildIdentity: Equatable, Sendable {
+    let version: String?
+
+    init(version value: Any?) {
+        guard let value = value as? String, value.utf8.count <= 32,
+              (try? NativeUpdateManifest.versionBuild(value)) != nil else {
+            version = nil; return
+        }
+        version = value
+    }
+    static var current: Self { Self(version: Bundle.main.object(forInfoDictionaryKey: "KnotNativeVersion")) }
+    var diagnosticValue: String { version ?? "unknown" }
+    var displayText: String { version.map { "Knot \($0)" } ?? "Knot · 빌드 정보 없음" }
+}
+
 /// Only fixed codes enter this in-memory record: no endpoint, credential,
 /// clipboard, remote content, raw error description, or filesystem logging.
 enum NativeConnectionIssue: String, CaseIterable, Sendable {
@@ -15,6 +32,7 @@ enum NativeConnectionIssue: String, CaseIterable, Sendable {
     case certificatePin = "security.certificate-pin"
     case certificatePolicy = "security.certificate-policy"
     case trust = "security.device-authorization"
+    case credentialStore = "storage.reconnect-keychain"
     case protocolFailure = "protocol.validation"
     case hostTimeout = "host.timeout"
     case hostFailure = "host.failure"
@@ -90,16 +108,26 @@ final class NativeConnectionDiagnostics: ObservableObject {
         let snapshot: NativeRecoverySnapshot
         var line: String { "+\(seconds)s  \(event.rawValue) \(snapshot.line)" }
     }
+    struct KeychainEntry: Equatable {
+        let seconds: Int
+        let operation: NativeDeviceKeychainFailure.Operation
+        let status: Int32
+        var line: String { "+\(seconds)s  keychain.\(operation.rawValue) status=\(status)" }
+    }
     static let capacity = 32
+    static let keychainCapacity = 8
     @Published private(set) var entries: [Entry] = []
     @Published private(set) var recoveryEntries: [RecoveryEntry] = []
+    @Published private(set) var keychainEntries: [KeychainEntry] = []
     @Published private(set) var latestRecoverySnapshot: NativeRecoverySnapshot?
     private(set) var firstIssue: Entry?
     private let now: () -> ContinuousClock.Instant
     private let began: ContinuousClock.Instant
+    let buildIdentity: NativeBuildIdentity
 
-    init(now: @escaping () -> ContinuousClock.Instant = { .now }) {
+    init(now: @escaping () -> ContinuousClock.Instant = { .now }, buildIdentity: NativeBuildIdentity = .current) {
         self.now = now; began = now()
+        self.buildIdentity = buildIdentity
     }
     func record(_ issue: NativeConnectionIssue) {
         let entry = Entry(seconds: elapsedSeconds, issue: issue)
@@ -113,17 +141,28 @@ final class NativeConnectionDiagnostics: ObservableObject {
         if recoveryEntries.count == Self.capacity { recoveryEntries.removeFirst() }
         recoveryEntries.append(entry)
     }
+    func recordKeychainFailure(_ failure: NativeDeviceKeychainFailure) {
+        // Storage failure is observable even before any transport is started.
+        record(.credentialStore)
+        if keychainEntries.count == Self.keychainCapacity { keychainEntries.removeFirst() }
+        keychainEntries.append(KeychainEntry(seconds: elapsedSeconds, operation: failure.operation, status: failure.status))
+    }
     private var elapsedSeconds: Int {
         Int(clamping: max(.zero, now() - began).components.seconds)
     }
     var report: String {
         guard let firstIssue else { return "" }
-        var lines = ["Knot connection diagnostics v2", "Clock: elapsed seconds since app launch.",
+        var lines = ["Knot connection diagnostics v2", "App build: " + buildIdentity.diagnosticValue,
+                     "Clock: elapsed seconds since app launch.",
                      "First issue: " + firstIssue.line, "Recent issues:"] + entries.map(\.line)
         if let latestRecoverySnapshot {
             lines.append("Recovery state: " + latestRecoverySnapshot.line)
             lines.append("Recent recovery decisions:")
             lines += recoveryEntries.map(\.line)
+        }
+        if !keychainEntries.isEmpty {
+            lines.append("Recent keychain failures:")
+            lines += keychainEntries.map(\.line)
         }
         return lines.joined(separator: "\n")
     }

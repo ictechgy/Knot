@@ -13,6 +13,8 @@ import tempfile
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
+# Authored fixture identity, never inferred from an installed app or preferences.
+SYNTHETIC_BUILD_VERSION = "0.1.0-native.19"
 
 
 def digest(path):
@@ -87,6 +89,7 @@ def main():
         (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
             "CFBundleExecutable": executable.name, "CFBundleIdentifier": "org.knot.native-visual-fixture." + uuid.uuid4().hex,
             "CFBundleName": "KnotNativeVisualFixture", "CFBundlePackageType": "APPL", "CFBundleIconFile": "AppIcon",
+            "KnotNativeVersion": SYNTHETIC_BUILD_VERSION,
             "LSMinimumSystemVersion": "26.0", "LSUIElement": True, "NSHighResolutionCapable": True}))
         ui = [p for p in sorted((ROOT / "native-engine/macos/Sources/KnotNativePreview").glob("*.swift")) if p.name != "App.swift"]
         run("compile-visual-ui", ["/usr/bin/swiftc", "-parse-as-library", "-module-name", "KnotNativeVisualFixture",
@@ -112,6 +115,10 @@ def main():
             type(rendered.get("modelPhaseChecks")) is not int or rendered["modelPhaseChecks"] != len(rendered["images"])):
         raise SystemExit("Visual fixture did not measure adapter attempts and intended model phases")
     for row in rendered["images"]:
+        if row.get("appBuildVersion") != SYNTHETIC_BUILD_VERSION:
+            raise SystemExit("Visual fixture omitted its exact authored build identity")
+        if row.get("storageWarningVisible") is not row["state"].startswith("storage-"):
+            raise SystemExit("Visual fixture did not retain the expected storage warning")
         if type(row.get("fileAdaptersInvoked")) is not int or row["fileAdaptersInvoked"] != 0:
             raise SystemExit("Visual fixture invoked a file operation while rendering")
         if (not isinstance(row.get("expectedPhase"), str) or not row["expectedPhase"] or

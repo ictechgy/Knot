@@ -38,6 +38,12 @@ struct NativeVisualFixture {
             ("wake-reconnect", "wake-reconnect", 1200, 760, false),
             ("wake-reconnect-compact", "wake-reconnect", 880, 620, false),
             ("sleep-recovery-compact", "sleep-recovery", 880, 620, false),
+            ("storage-error", "storage-error", 1200, 760, false),
+            ("storage-error-compact", "storage-error", 880, 620, false),
+            ("storage-streaming", "storage-streaming", 1200, 760, false),
+            ("storage-streaming-compact", "storage-streaming", 880, 620, false),
+            ("fullscreen-storage-error", "storage-streaming", 1920, 1080, false),
+            ("fullscreen-storage-error-controls", "storage-streaming", 1920, 1080, false),
             ("approval", "approval", 1200, 760, false),
             ("decoding", "decoding", 1200, 760, false),
             ("streaming", "streaming", 1200, 760, false),
@@ -197,6 +203,8 @@ struct NativeVisualFixture {
             imageResult["rememberThisPC"] = model.rememberThisPC
             imageResult["savedDeviceCount"] = model.savedDevices.count
             imageResult["pendingReconnect"] = model.hasPendingReconnect
+            imageResult["storageWarningVisible"] = model.savedDeviceStorageMessage != nil
+            imageResult["appBuildVersion"] = model.diagnostics.buildIdentity.diagnosticValue
             imageResult["convenienceActionsVisible"] = convenience != nil
             imageResult["convenienceActionsPresentation"] = convenience == nil ? "native-menu" : "inline-production-action-views"
             imageResult["videoControlVisible"] = video != nil
@@ -328,7 +336,7 @@ struct NativeVisualFixture {
         case "connecting": .connecting
         case "approval": .approval
         case "decoding": .decoding
-        case "streaming", "input-paused", "display-behind": .streaming
+        case "streaming", "input-paused", "display-behind", "storage-streaming": .streaming
         case "failed", "certificate-policy", "certificate-pin-mismatch": .failed
         default: .idle
         }
@@ -388,9 +396,21 @@ struct NativeVisualFixture {
         let model = SessionModel(makeChannel: { _ in effects.markMedia(); throw NativeFailure.state },
             makeTrustedClient: { _, _ in effects.mark(); throw NativeFailure.state },
             waitForWakeReadiness: { try await Task.sleep(for: .seconds(30)) },
-            initialSavedDevices: saved, initialRegisteredDevice: ["wake-reconnect", "sleep-recovery"].contains(state) ? saved.first : nil)
+            initialSavedDevices: saved, initialRegisteredDevice: ["wake-reconnect", "sleep-recovery"].contains(state) ? saved.first : nil,
+            loadSavedDevices: {
+                if state.hasPrefix("storage-") { throw NativeDeviceKeychainFailure(operation: .read, status: -25308) }
+                return saved
+            })
         model.viewerLabel = "나의 Mac"
         model.rememberThisPC = state == "number-remembered"
+        if state.hasPrefix("storage-") {
+            model.refreshSavedDevices() // The authored failing adapter above only.
+            if state == "storage-streaming" {
+                model.phase = .streaming
+                model.status = "Receiving the host desktop. Temporary trust; no saved pairing."
+            }
+            return model
+        }
         if state.hasPrefix("files") || state.hasPrefix("audio-") || state.hasPrefix("video-") { model.phase = .streaming; model.status = "Receiving the host desktop. Temporary trust; no saved pairing."; return model }
         switch state {
         case "sleep-recovery":
