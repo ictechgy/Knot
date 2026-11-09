@@ -32,6 +32,12 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def write_native_update_resource(destination):
+    # Canonical LF is part of both native configuration parsers. Text-mode writes
+    # translate LF to CRLF on Windows, making the embedded version invalid.
+    Path(destination).write_bytes(native_update_resource(ROOT, VERSION).encode("utf-8"))
+
+
 def validate_audio_conversion(value):
     if (value.get("status") != "passed" or value.get("freshSyntheticOnly") is not True or
             value.get("actualAudioCapture") is not False or value.get("actualAudioPlayback") is not False or
@@ -779,7 +785,7 @@ class Builder:
         shutil.copy2(self.output / "KnotNativePairing-LICENSE.txt", resources / "KnotNativePairing-LICENSE.txt")
         self.input(ROOT / "scripts/native_updates.py")
         self.input(ROOT / "packaging/updates/native-publisher.json")
-        (resources / "NativeUpdateConfig.txt").write_text(native_update_resource(ROOT, VERSION), encoding="utf-8")
+        write_native_update_resource(resources / "NativeUpdateConfig.txt")
         info = {"CFBundleExecutable": "KnotNativePreview", "CFBundleIdentifier": "org.knot.native-preview",
                 "CFBundleName": "Knot Native Preview", "CFBundleDisplayName": "Knot Native Preview",
                 "CFBundlePackageType": "APPL", "CFBundleVersion": PREVIEW_BUILD, "CFBundleShortVersionString": VERSION_BASE,
@@ -859,7 +865,7 @@ class Builder:
         self.input(ROOT / "scripts/native_updates.py")
         self.input(ROOT / "packaging/updates/native-publisher.json")
         update_config = self.output / "native-update-config.txt"
-        update_config.write_text(native_update_resource(ROOT, VERSION), encoding="utf-8")
+        write_native_update_resource(update_config)
         argv.append("/resource:" + str(update_config) + ",KnotNativeUpdateConfig")
         for name in ["mscorlib", "System", "System.Core", "System.Security", "System.Drawing", "System.Windows.Forms"]:
             argv.append("/reference:" + str(refs / (name + ".dll")))
@@ -867,7 +873,7 @@ class Builder:
             argv.extend(["/win32icon:" + str(self.input(ROOT / "Assets/Brand/AppIcon.ico")),
                          "/win32manifest:" + str(self.input(ROOT / "native-engine/windows/Native.manifest"))])
         argv.extend(self.input(p) for p in sources)
-        self.run("compile-" + label, argv)
+        self.run("compile-" + label, argv, command_inputs=[update_config])
         return self.output / (label + ".exe")
 
     def windows(self):

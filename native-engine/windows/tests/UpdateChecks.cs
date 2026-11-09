@@ -12,6 +12,14 @@ namespace Knot.NativePreview
         private static void UpdateChecks()
         {
             var disabled = new NativeUpdateConfiguration("0.1.0-native.10\n\n\n\n\n"); Check(!disabled.Configured);
+            Check(PreviewForm.ReadBuildVersion(delegate { return disabled; }) == disabled.Version);
+            Check(PreviewForm.ReadBuildVersion(delegate { return null; }) == null);
+            foreach (string invalid in new[] { "invalid", "0.1.0-native.10\r\n\r\n\r\n\r\n\r\n" }) {
+                Check(PreviewForm.ReadBuildVersion(delegate { return new NativeUpdateConfiguration(invalid); }) == null);
+                UpdateReject(delegate { new NativeUpdateConfiguration(invalid); });
+            }
+            Check(PreviewForm.ReadBuildVersion(delegate { throw new IOException("synthetic"); }) == null);
+            Check(PreviewForm.ReadBuildVersion(delegate { throw new FormatException("synthetic"); }) == null);
             foreach (string v in new[] { "0.1.0", "0.1.0-native.0", "0.1.0-native.01", "0.1.0-native.65536", "0.1.0-native.11\n" }) UpdateReject(delegate { NativeUpdateManifest.VersionBuild(v); });
             Check(NativeUpdateManifest.VersionBuild("0.1.0-native.10") < NativeUpdateManifest.VersionBuild("0.1.0-native.11"));
             UpdateAttemptOwnershipChecks(); UpdateRuntimeSnapshotChecks();

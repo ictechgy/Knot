@@ -368,11 +368,13 @@ namespace Knot.NativePreview
             SetOwnedFont(label, PreviewStyle.Type(size, style, scale));
             wrappingLabels.Add(label); return label;
         }
-        private static string ReadBuildVersion()
+        private static string ReadBuildVersion() { return ReadBuildVersion(NativeUpdateConfiguration.Load); }
+        internal static string ReadBuildVersion(Func<NativeUpdateConfiguration> readConfiguration)
         {
-            // This public resource is compiled from the same VERSION used by the
-            // installer, even when update publishing is not configured.
-            try { NativeUpdateConfiguration config = NativeUpdateConfiguration.Load(); return config == null ? null : config.Version; }
+            // Public embedded metadata only. InvalidDataException is not an
+            // IOException on .NET Framework; a bad label must not crash startup.
+            try { NativeUpdateConfiguration config = readConfiguration(); return config == null ? null : config.Version; }
+            catch (System.IO.InvalidDataException) { return null; }
             catch (System.IO.IOException) { return null; }
             catch (FormatException) { return null; }
         }

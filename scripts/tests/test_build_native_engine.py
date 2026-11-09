@@ -448,6 +448,16 @@ class NativeRebuildTests(unittest.TestCase):
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
 
+    def test_embedded_update_resource_is_utf8_lf_on_every_platform(self):
+        target = self.root / "synthetic-native-update-config.txt"
+        canonical = native.VERSION + "\n\n\n\n\n"
+        with patch.object(native, "native_update_resource", return_value=canonical), \
+             patch.object(Path, "write_text", side_effect=AssertionError("Text-mode output can translate LF on Windows")):
+            native.write_native_update_resource(target)
+        self.assertEqual(target.read_bytes(), canonical.encode("utf-8"))
+        self.assertNotIn(b"\r", target.read_bytes())
+        self.assertEqual(target.read_bytes().split(b"\n")[0], native.VERSION.encode("ascii"))
+
     def test_windows_full_build_version_must_match_and_remain_visible(self):
         for invalid in ["version-missing", "version-old", "version-hidden"]:
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "build|version"):
