@@ -584,7 +584,10 @@ struct PreviewWindow: View {
                         }.padding(28).frame(maxWidth: 460).nativePanel().padding(24).allowsHitTesting(false)
                     }
                 }
-                .overlay(alignment: .topTrailing) { sessionStorageWarningControl.padding(12) }
+                .overlay(alignment: .topTrailing) {
+                    sessionStorageWarningControl.padding(.horizontal, 12)
+                        .padding(.top, immersive && model.showFullscreenControls ? 164 : 12)
+                }
                 .overlay(alignment: .bottom) {
                     VStack(spacing: 10) {
                         if model.phase == .streaming, model.inputRecovery {

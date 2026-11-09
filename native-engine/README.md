@@ -31,8 +31,8 @@ rewriting it; if absent, it creates and reads back a new empty item. This catche
 missing-item write permission failures without overwriting a concurrent edit.
 An existing readable item does not guarantee a future write: the final credential
 must still be written and read back before saved recovery is advertised. Storage errors remain visible during streaming and diagnostics include
-only a fixed Keychain operation and OSStatus. The app and copied diagnostic now
-show the actual running build. This storage correction does not establish the
+only a fixed Keychain operation and OSStatus. Both apps show the actual running build (Windows includes it in the title bar
+and normal/compact navigation); the Mac copied diagnostic includes it too. This storage correction does not establish the
 cause of every network interruption or replace two-device sleep/wake acceptance.
 
 An updated ad hoc binary has a different code-signing identity. Background reads,

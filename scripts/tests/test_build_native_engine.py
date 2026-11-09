@@ -299,7 +299,8 @@ class NativeRebuildTests(unittest.TestCase):
                               "audio-ready", "audio-ready-compact", "audio-sharing", "audio-sharing-scale200"]:
                     image = visual_output / ("windows-" + state + ".png")
                     image.write_bytes(data)
-                    rows.append(dict(name=image.name, sha256=native.digest(image), bytes=len(data), width=640, height=480))
+                    rows.append(dict(name=image.name, sha256=native.digest(image), bytes=len(data), width=640, height=480,
+                                     appBuildVersion=native.VERSION, buildVersionVisible=True))
                 report = dict(schema=1, status="passed", freshSyntheticOnly=True,
                     productionEntryInvoked=False, networkInvoked=False, clipboardInvoked=False,
                     certificateCreationInvoked=False, captureInvoked=False, actualInputInvoked=False,
@@ -327,6 +328,9 @@ class NativeRebuildTests(unittest.TestCase):
                 elif invalid_visual == "button-missing": del report["buttonSurfaceChecks"]
                 elif invalid_visual == "button-corners": report["buttonSurfaceChecks"]["opaqueCorners"] = False
                 elif invalid_visual == "button-count": report["buttonSurfaceChecks"]["rasterCases"] = 599
+                elif invalid_visual == "version-missing": del rows[0]["appBuildVersion"]
+                elif invalid_visual == "version-old": rows[0]["appBuildVersion"] = "0.1.0-native.17"
+                elif invalid_visual == "version-hidden": rows[0]["buildVersionVisible"] = False
                 (visual_output / "visual-checks.json").write_text(json.dumps(report) + "\n")
             elif label in ["native-parser-checks", "native-pacing-checks", "native-activation-checks"]:
                 return b"INERT external-tool substitute for lifecycle checks only\n"
@@ -443,6 +447,13 @@ class NativeRebuildTests(unittest.TestCase):
             self.build_with_inert_tools(invalid_visual="path")
         self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
         self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
+
+    def test_windows_full_build_version_must_match_and_remain_visible(self):
+        for invalid in ["version-missing", "version-old", "version-hidden"]:
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "build|version"):
+                self.build_with_inert_tools(invalid_visual=invalid)
+            self.assertFalse((self.output / "NATIVE-BUILD.json").exists())
+            self.assertFalse((self.output / "native-ui-visual-checks.json").exists())
 
     def test_windows_monitor_geometry_evidence_is_required_and_measured(self):
         for invalid in ["monitor-missing", "monitor-false", "monitor-count", "monitor-bool"]:

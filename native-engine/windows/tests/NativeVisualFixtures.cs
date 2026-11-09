@@ -344,6 +344,7 @@ namespace Knot.NativePreview
                             if (!form.FixtureAudioConsentMatches(frame.AudioAllowed, state.RunPresent) || !frame.Help && !form.FixtureAudioConsentFits)
                                 throw new InvalidOperationException("Playback consent must match the owner choice, lock during sharing and fit the viewport.");
                             AssertFontsUsable(form);
+                            if (!form.FixtureBuildVersionVisible) throw new InvalidOperationException("The full running build must be visible in normal and compact layouts.");
                             if (!form.FixtureFooterFits) throw new InvalidOperationException("Fixed status text and stop action must fit the actual client viewport.");
                             if (!form.FixtureEnrollmentCodeFits) throw new InvalidOperationException("The complete short code must fit the actual client viewport.");
                             if (expectedApproval && !form.FixtureConsentFits) throw new InvalidOperationException("The full pin, observed address, unverified name and consent actions must fit the request viewport.");
@@ -366,6 +367,7 @@ namespace Knot.NativePreview
                                     ",\"bytes\":" + new FileInfo(path).Length + ",\"width\":" + bitmap.Width + ",\"height\":" + bitmap.Height +
                                     ",\"clientWidth\":" + form.ClientSize.Width + ",\"clientHeight\":" + form.ClientSize.Height +
                                     ",\"requestedClientWidth\":" + (int)(frame.Width * frame.Scale) + ",\"requestedClientHeight\":" + (int)(frame.Height * frame.Scale) +
+                                    ",\"appBuildVersion\":" + Q(form.FixtureAppBuildVersion) + ",\"buildVersionVisible\":true" +
                                     ",\"logicalClientWidth\":" + form.FixtureLogicalWidth.ToString(CultureInfo.InvariantCulture) + ",\"responsiveCompact\":" + (form.FixtureCompactMode ? "true" : "false") +
                                     ",\"footerFits\":true,\"consentFits\":" + (expectedApproval ? "true" : "null") +
                                     ",\"layoutFontScale\":" + frame.Scale.ToString(CultureInfo.InvariantCulture) +

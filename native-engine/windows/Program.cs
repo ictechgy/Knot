@@ -46,6 +46,8 @@ namespace Knot.NativePreview
         private readonly float scale;
         private readonly bool fixtureMode;
         private readonly string advertisedName;
+        private readonly string buildVersion;
+        private Label sidebarBuildVersion, compactBuildVersion;
         private readonly Action<string> fixtureTrace;
         private readonly ComboBox addresses = new ComboBox();
         private readonly ComboBox qualityProfiles = new ComboBox();
@@ -95,8 +97,9 @@ namespace Knot.NativePreview
             if (layoutScale < 1 || layoutScale > 2) throw new ArgumentException("Invalid fixture layout scale.");
             fixtureMode = visualFixture; scale = visualFixture ? layoutScale : 1f; fixtureTrace = visualFixture ? trace : null;
             advertisedName = PreviewCopy.DiscoveryName(visualFixture ? "작업용 Windows" : Environment.MachineName);
+            buildVersion = ReadBuildVersion();
             fileRootPath = visualFixture ? @"C:\Synthetic\Knot Files" : FileSharingOptions.DefaultRootPath;
-            Text = "Knot Native Preview"; ClientSize = new Size(P(1040), P(740));
+            Text = "Knot Native Preview · " + (buildVersion ?? "빌드 정보 없음"); ClientSize = new Size(P(1040), P(740));
             MinimumSize = new Size(P(500), P(360)); StartPosition = FormStartPosition.CenterScreen;
             AutoScaleDimensions = new SizeF(96, 96); AutoScaleMode = visualFixture ? AutoScaleMode.None : AutoScaleMode.Dpi;
             SetOwnedFont(this, PreviewStyle.Type(10.5f, FontStyle.Regular, scale)); BackColor = PreviewStyle.Canvas;
@@ -365,6 +368,14 @@ namespace Knot.NativePreview
             SetOwnedFont(label, PreviewStyle.Type(size, style, scale));
             wrappingLabels.Add(label); return label;
         }
+        private static string ReadBuildVersion()
+        {
+            // This public resource is compiled from the same VERSION used by the
+            // installer, even when update publishing is not configured.
+            try { NativeUpdateConfiguration config = NativeUpdateConfiguration.Load(); return config == null ? null : config.Version; }
+            catch (System.IO.IOException) { return null; }
+            catch (FormatException) { return null; }
+        }
         private Control BuildSidebar()
         {
             Panel rail = new Panel { Dock = DockStyle.Fill, BackColor = PreviewStyle.Rail, Margin = Padding.Empty, Padding = new Padding(P(18), P(28), P(18), P(22)) };
@@ -373,7 +384,10 @@ namespace Knot.NativePreview
             top.Controls.Add(brandMark);
             Label name = MakeLabel("Knot", 21, FontStyle.Bold); name.Margin = new Padding(P(8), 0, 0, P(3)); top.Controls.Add(name);
             Label preview = MakeLabel(fixtureMode ? "미리보기 · 합성 화면" : "Native Preview", 8.5f, FontStyle.Regular);
-            preview.Margin = new Padding(P(8), 0, 0, P(34)); top.Controls.Add(preview);
+            preview.Margin = new Padding(P(8), 0, 0, P(3)); top.Controls.Add(preview);
+            sidebarBuildVersion = MakeLabel(buildVersion ?? "빌드 정보 없음", 8.5f, FontStyle.Regular);
+            sidebarBuildVersion.AccessibleName = "Knot 버전 " + (buildVersion ?? "정보 없음");
+            sidebarBuildVersion.Margin = new Padding(P(8), 0, 0, P(28)); top.Controls.Add(sidebarBuildVersion);
             foreach (PreviewButton button in new PreviewButton[] { desktopNavigation, helpNavigation })
             { button.Dock = DockStyle.Top; button.AutoSize = false; button.Height = P(44); button.Margin = new Padding(0, 0, 0, P(6)); top.Controls.Add(button); }
             rail.Controls.Add(top);
@@ -386,7 +400,9 @@ namespace Knot.NativePreview
             FlowLayoutPanel navigation = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
             compactBrandMark = new KnotBrandMark(ownedIcon) { Width = P(24), Height = P(24), MinimumSize = new Size(P(24), P(24)), Margin = new Padding(0, P(4), P(8), 0) };
             navigation.Controls.Add(compactBrandMark);
-            Label name = MakeLabel("Knot", 12, FontStyle.Bold); name.Dock = DockStyle.None; name.Margin = new Padding(0, P(5), P(16), 0); navigation.Controls.Add(name);
+            compactBuildVersion = MakeLabel("Knot · " + (buildVersion ?? "빌드 정보 없음"), 10, FontStyle.Bold);
+            compactBuildVersion.AccessibleName = "Knot 버전 " + (buildVersion ?? "정보 없음");
+            compactBuildVersion.Dock = DockStyle.None; compactBuildVersion.Margin = new Padding(0, P(5), P(12), 0); navigation.Controls.Add(compactBuildVersion);
             foreach (PreviewButton button in new PreviewButton[] { compactDesktopNavigation, compactHelpNavigation })
             {
                 SetOwnedFont(button, PreviewStyle.Type(9, FontStyle.Bold, scale));
@@ -718,6 +734,16 @@ namespace Knot.NativePreview
         internal bool FixtureCertificateConversionVisible { get { return !helpVisible && certificateCompatibilityRequired && share.Visible && share.Enabled &&
             share.Text == PreviewCopy.CertificateConversionAction && stateTitle.Text == PreviewCopy.CertificateConversionTitle &&
             stateDescription.Text == PreviewCopy.CertificateConversionDisclosure; } }
+        internal string FixtureAppBuildVersion { get { return buildVersion ?? ""; } }
+        internal bool FixtureBuildVersionVisible
+        {
+            get
+            {
+                Label visible = compactMode ? compactBuildVersion : sidebarBuildVersion;
+                return buildVersion != null && visible.Visible && visible.Text.Contains(buildVersion) &&
+                    visible.Parent.ClientRectangle.Contains(visible.Bounds) && ClientRectangle.Contains(BoundsWithin(visible, this));
+            }
+        }
         internal string DisplayedStatus { get { return status.Text; } }
         internal bool HelpVisible { get { return helpVisible; } }
         internal string DisplayedPin { get { return pin.Text; } }

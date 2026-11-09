@@ -575,8 +575,10 @@ class Builder:
             if name.casefold() in names:
                 raise ValueError("Duplicate UI fixture image name")
             names.add(name.casefold())
-            if self.platform == "macos" and row.get("appBuildVersion") != VERSION:
-                raise ValueError("Mac UI fixture must show the exact source build")
+            if row.get("appBuildVersion") != VERSION:
+                raise ValueError("UI fixture must show the exact source build")
+            if self.platform == "windows" and row.get("buildVersionVisible") is not True:
+                raise ValueError("Windows UI must keep its full build version visible")
             if self.platform == "macos" and "storage-" in name and row.get("storageWarningVisible") is not True:
                 raise ValueError("Mac storage fixture must retain its recovery warning")
             if self.platform == "macos" and name.startswith(("mac-video-", "mac-fullscreen-video-")):
